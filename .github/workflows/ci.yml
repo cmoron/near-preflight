@@ -1,0 +1,42 @@
+# Manual only (Actions tab, "Run workflow"): no run on push while the repository is private.
+name: ci
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+  app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.5
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+      # The fork freezes the deployed guard's public EVM address: no key, no testnet account needed.
+      - name: Start the Base fork
+        run: |
+          echo "GUARD=$(sed -n "s/^const DEFAULT_GUARD = '\(.*\)';/\1/p" docs/app.js)" > .env
+          evm/fork.sh > fork.log 2>&1 &
+          for _ in $(seq 1 180); do grep -q "^Base fork at block" fork.log && exit 0; sleep 2; done
+          cat fork.log; exit 1
+      - run: bun test
+      - if: failure()
+        run: tail -50 fork.log
