@@ -17,6 +17,8 @@ const check = (verdict: Check["verdict"]): Check => ({
   signed_tx: null,
   code: null,
   exit_amount: null,
+  decision_sha256: null,
+  buy_decision_sha256: null,
 });
 
 test("absente sur un noeud en retard sur last_check_id : relue au tour suivant, pas sautee", () => {

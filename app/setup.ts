@@ -17,8 +17,8 @@ const id = (name: string) => `${name}.${parent}`;
 // Price of a verdict: covers the storage of a check, its code record and, on a block, its listing
 // (CHECK_STORAGE_BYTES = 1500 in src/lib.rs, at 10^19 yoctoNEAR per byte).
 const PRICE = nearToYocto("0.015");
-// Demo bounds set by the human: 0.3 NEAR per arming (the demo arms 0.2), 1 h at most, 2 NEAR per 7 days.
-const BOUNDS = { max_budget: nearToYocto("0.3").toString(), max_duration_s: 3600, max_7d: nearToYocto("2").toString() };
+// Demo bounds set by the human: 0.5 NEAR per arming (the demo arms 0.4), 1 h at most, 5 NEAR per 7 days.
+const BOUNDS = { max_budget: nearToYocto("0.5").toString(), max_duration_s: 3600, max_7d: nearToYocto("5").toString() };
 const AGENT_METHODS = ["request_check", "buy", "refund_check", "request_exit", "sell_quoted"];
 // Achat EVM fixe par l'humain : gaz 250 000 (un swap V2 en use ~140 000 sur le fork), frais au plus
 // 0,05 gwei (base fee de Base ~0,005 gwei), pourboire 0,001 gwei ; budget debite a 1 ETH = 1000 NEAR ;
@@ -57,7 +57,7 @@ async function scopedKey(name: string, methods: string[], allowance: `${number}`
   return key.toString();
 }
 
-const guardKey = await subAccount("guard", "4"); // wasm of ~294 KB: ~2.9 NEAR of storage
+const guardKey = await subAccount("guard", "4"); // wasm of ~315 KB: ~3.2 NEAR of storage
 await subAccount("agent", "0.5");
 await subAccount("agent2", "0.3");
 await subAccount("sentinel", "0.5");
@@ -87,7 +87,8 @@ await guard.signAndSendTransaction({
 });
 console.log(`guard deployed and initialized on ${id("guard")} (owner ${parent}, armer ${id("armer")}, price 0.015 NEAR)`);
 console.log(`derived EVM address of ${id("guard")} (path ${GUARD_PATH}, signer ${MPC_CONTRACT}): ${evmAddress}`);
-console.log(`ETH withdrawals from it go only to ${withdrawTo}, fixed at init${process.argv[3] ? "" : " (default burn address: pass your own EVM address as 2nd argument)"}`);
+console.log(`ETH withdrawals from it go only to ${withdrawTo}, fixed at init`);
+if (!process.argv[3]) console.log("  0x...dEaD is a demo placeholder (a burn address), not an owner's address: pass your own EVM address as 2nd argument");
 
 // buy attache 100 TGas : le protocole exige 0,101 NEAR d'allocation libre pour l'envoyer (gaz au prix
 // pessimiste), puis ne retire que le gaz brule (mesure : 0,0014 NEAR par achat signe). sell_quoted
@@ -101,15 +102,18 @@ const owner = (methodName: string, args: Record<string, unknown>) => human.callF
 await owner("set_bounds", BOUNDS);
 await owner("register_agent", { agent: id("agent") });
 await owner("register_agent", { agent: id("agent2") });
-console.log(`bounds: 0.3 NEAR per arming, 3600 s max, 2 NEAR per 7 days; ${id("agent")} and ${id("agent2")} registered`);
+console.log(`bounds: 0.5 NEAR per arming, 3600 s max, 5 NEAR per 7 days; ${id("agent")} and ${id("agent2")} registered`);
 await human.callFunction({
   contractId: id("guard"),
   methodName: "deposit_credit",
   args: { account_id: id("agent") },
-  deposit: nearToYocto("1"),
+  deposit: nearToYocto("2"),
 });
-console.log(`1 NEAR of credit deposited for ${id("agent")}`);
-// The sentinel reports templates to the shared blocklist: each entry's storage (420 bytes, 0.0042 NEAR)
+console.log(`2 NEAR of credit deposited for ${id("agent")}`);
+// The second agent checks the farm token in the demo: one verdict, plus margin.
+await human.callFunction({ contractId: id("guard"), methodName: "deposit_credit", args: { account_id: id("agent2") }, deposit: nearToYocto("0.1") });
+console.log(`0.1 NEAR of credit deposited for ${id("agent2")}`);
+// The sentinel reports templates to the shared blocklist: each entry's storage (500 bytes, 0.005 NEAR)
 // is paid from its credit, never from the guard's balance.
 await human.callFunction({
   contractId: id("guard"),

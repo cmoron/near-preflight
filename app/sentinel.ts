@@ -62,7 +62,7 @@ if (import.meta.main) {
       const r = await checkExit(EVM, target, GUARD_EVM, BigInt(check.exit_amount));
       const proof = toProof(id, target, r);
       await Bun.write(`proofs/${id}.json`, JSON.stringify(proof, null, 2));
-      const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code: null });
+      const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code: null, list_target: false });
       log(`#${id} : exit quote ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.quote} wei for ${check.exit_amount} tokens, block ${r.evidence.block}, proof proofs/${id}.json  ${tx}`);
       return;
     }
@@ -73,10 +73,12 @@ if (import.meta.main) {
     const proof = toProof(id, target, r);
     await Bun.write(`proofs/${id}.json`, JSON.stringify(proof, null, 2));
     const code = { code_hash: r.evidence.code_hash, implementation: r.evidence.implementation };
-    const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code });
+    // list_target: the guard lists the token only on a block from its own simulation or liquidity (judge).
+    const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code, list_target: r.list_target });
     const failed = r.evidence.calls.filter((c) => c.endsWith("revert")).length;
     log(`#${id} : ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.calls.length} simulated calls (${failed} reverted, takeback probes included), quote ${r.evidence.quote} for 0.01 ETH, block ${r.evidence.block}, proof proofs/${id}.json  ${tx}`);
-    if (r.verdict === "block") log(`#${id} : ${target} listed on the guard's shared blocklist by this block verdict (evidence sha256 = the proof's)`);
+    // An entry is never overwritten: a token already listed keeps its first entry.
+    if (r.list_target && !r.evidence.near.listed.some((l) => l.kind === "token")) log(`#${id} : ${target} listed on the guard's shared blocklist by this block verdict (evidence sha256 = the proof's)`);
     // A template whose reputation blocks is reported too: a fresh token of it is then blocked by
     // any agent or sentinel reading the list, index or not.
     const rep = r.evidence.reputation;
@@ -124,6 +126,7 @@ if (import.meta.main) {
               evidence: JSON.stringify({ error: msg.slice(0, 1000) }),
               quote: "0",
               code: null,
+              list_target: false,
             });
             log(`#${next} : BLOCK, simulation impossible (${msg})  ${tx}`);
           } catch (e2) {

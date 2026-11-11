@@ -14,9 +14,11 @@ const log = (s: string) => console.log(`  [wrapper] ${s}`);
 const VERDICT_TTL_MS = 120_000; // un verdict allow expire 120 s apres son poste (meme regle que le contrat)
 const TIMEOUT_MS = 300_000; // delai du contrat avant remboursement d'une demande sans verdict
 
-export async function requestCheck(target: string): Promise<number> {
-  const { value: id, tx } = await call<number>(agent, "request_check", { target });
-  log(`request #${id} : verdict on ${target}, 0.015 NEAR taken from credit  ${tx}`);
+/** Asks the guard for a verdict on `target`. `decision`: sha256 of the model's decision package
+ *  (app/llm.ts) that asked for it, stored with the check. */
+export async function requestCheck(target: string, decision?: string): Promise<number> {
+  const { value: id, tx } = await call<number>(agent, "request_check", { target, decision_sha256: decision });
+  log(`request #${id} : verdict on ${target}, 0.015 NEAR taken from credit${decision ? `, decision ${decision.slice(0, 12)}...` : ""}  ${tx}`);
   return id;
 }
 
@@ -84,16 +86,23 @@ export async function guardedBuy(
     log(`#${id} : ${verdict} expired (${Math.round(age / 1000)} s old, limit ${VERDICT_TTL_MS / 1000} s), I REFUSE TO BUY`);
     return { id, signed: null };
   }
+  return { id, signed: await buy(id, wei, verdict) };
+}
+
+/** `buy` on check #id: the guard builds the swap and has NEAR sign it; the contract refuses it
+ *  unless the verdict allows. `decision`: sha256 of the model's decision package, stored with the
+ *  check. Returns the signed transaction, null if the MPC returned no signature. */
+export async function buy(id: number, wei: bigint, verdict = "", decision?: string): Promise<string | null> {
   const started = Date.now();
-  const args = { id, amount_wei: wei.toString() };
+  const args = { id, amount_wei: wei.toString(), decision_sha256: decision };
   const { value: signed, tx, burnt } = await call<string | null>(agent, "buy", args, 0n, BUY_GAS);
   const secs = ((Date.now() - started) / 1000).toFixed(1);
   if (!signed) {
     log(`#${id} : ${verdict}, but the MPC returned no signature in ${secs} s: credit and budget restored  ${tx}`);
-    return { id, signed: null };
+    return null;
   }
-  log(`#${id} : ${verdict}, buy of ${formatEther(wei)} ETH signed by NEAR in ${secs} s (${burnt}): ${signed.slice(0, 18)}...  ${tx}`);
-  return { id, signed };
+  log(`#${id} : ${verdict ? `${verdict}, ` : ""}buy of ${formatEther(wei)} ETH signed by NEAR in ${secs} s (${burnt}): ${signed.slice(0, 18)}...  ${tx}`);
+  return signed;
 }
 
 const erc20 = parseAbi(["function balanceOf(address) view returns (uint256)"]);
@@ -108,7 +117,13 @@ export async function sellAll(buyId: number): Promise<{ nonce: number; signed: H
   const token = bought.target as Address;
   const { address } = await view<{ address: Address }>("evm_config");
   const client = createPublicClient({ transport: http(env("EVM_RPC")) });
-  const amount = await client.readContract({ address: token, abi: erc20, functionName: "balanceOf", args: [address] });
+  // The guard credits each buy at its signed minimum, so the agent sells at most that: the rest
+  // (received above the minimum) stays for the owner's own exit.
+  const [balance, held] = await Promise.all([
+    client.readContract({ address: token, abi: erc20, functionName: "balanceOf", args: [address] }),
+    view<string>("holding", { agent: env("AGENT"), token }),
+  ]);
+  const amount = balance < BigInt(held) ? balance : BigInt(held);
   const { value: id, tx: asked } = await call<number>(agent, "request_exit", { buy_id: buyId, amount: amount.toString() });
   log(`request #${id} : exit quote for ${amount} ${token} (bought by #${buyId}), 0.015 NEAR taken from credit  ${asked}`);
   const quote = await waitVerdict(id);

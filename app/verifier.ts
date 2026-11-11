@@ -15,7 +15,7 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import { reputationFindings, reputationOf, templateOf, type Index, type Reputation } from "./index";
+import { beforeBlock, reputationFindings, reputationOf, templateOf, type Index, type Reputation } from "./index";
 
 export const ROUTER: Address = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"; // Uniswap V2 Router02 (Base)
 export const WETH: Address = "0x4200000000000000000000000000000000000006";
@@ -88,6 +88,9 @@ export type Finding = { level: Verdict; text: string };
 export type Report = {
   verdict: Verdict;
   reasons: string;
+  /** post_verdict's `list_target`: a block resting on the token's own simulation or liquidity, which
+   *  the guard turns into a `token:` listing (judge). */
+  list_target: boolean;
   /** Resume poste en chaine (<= 8000 caracteres). */
   evidence: {
     chain_id: number;
@@ -395,7 +398,7 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const implementation = await implementationAt(url, token, block);
   const liquidity = await liquidityFacts(url, token, block);
   const template = templateOf(code);
-  const reputation = ctx.index?.chain_id === chainId ? reputationOf(ctx.index, template, liquidity?.pair ?? null) : null;
+  const reputation = ctx.index?.chain_id === chainId ? reputationOf(ctx.index, template, await beforeBlock(url, ctx.index, liquidity?.pair ?? null)) : null;
   const near = await ctx.near(token, template);
   const proof = { chain_id: chainId, block, code_hash: keccak256(code), implementation, liquidity, template, reputation, near };
   const [first1] = plan(token, buyer, guard, block, now);
@@ -469,19 +472,22 @@ function sideFindings(r: Record<string, Result>, p: string, stop: boolean): Find
 /** Jugement pur : ne depend que des libelles des appels et de leurs resultats, donc rejouable
  *  par n'importe qui a partir d'une preuve (voir app/replay.ts). The guard side's findings that the
  *  probe buyer does not share are reported as "guard address: ...". */
-export function judge(labels: string[], results: Result[], facts: Facts): { verdict: Verdict; reasons: string } {
+export function judge(labels: string[], results: Result[], facts: Facts): { verdict: Verdict; reasons: string; list_target: boolean } {
   const r = byLabel(labels, results);
   const { stop } = buyStages(r);
   const findings = sideFindings(r, "", stop);
   const seen = new Set(findings.map((f) => f.text));
   for (const f of sideFindings(r, GUARD, stop)) if (!seen.has(f.text)) findings.push({ ...f, text: `guard address: ${f.text}` });
-  findings.unshift(...nearFindings(facts.near, facts.code_hash, facts.implementation), ...reputationFindings(facts.reputation));
   findings.push(...liquidityFindings(facts.liquidity, facts.block));
+  // Only a block on the token's own simulation or liquidity lists it on the guard: its template's
+  // reputation can be poisoned by copies, and an existing NEAR listing is already there.
+  const list_target = findings.some((f) => f.level === "block");
+  findings.unshift(...nearFindings(facts.near, facts.code_hash, facts.implementation), ...reputationFindings(facts.reputation));
   const rank = (f: Finding) => (f.level === "block" ? 0 : 1);
   findings.sort((a, b) => rank(a) - rank(b)); // stable: blocks first, so the 280-byte cut keeps them
   const verdict: Verdict = findings.some((f) => f.level === "block") ? "block" : findings.some((f) => f.level === "warn") ? "warn" : "allow";
   const reasons = findings.length ? findings.map((f) => f.text).join(" ; ") : "buy, takeback probes and sales simulated without anomaly";
-  return { verdict, reasons: reasons.slice(0, 280) };
+  return { verdict, reasons: reasons.slice(0, 280), list_target };
 }
 
 /** Devis poste avec le verdict : jetons recus par l'achat simule de 0,01 ETH (0 sans achat), tire de
@@ -501,7 +507,7 @@ function report(
   sim: { request: Report["request"]; results: Result[] },
   labels: string[],
 ): Report {
-  const { verdict, reasons } = judge(labels, sim.results, { ...proof, block: Number(proof.block) });
+  const { verdict, reasons, list_target } = judge(labels, sim.results, { ...proof, block: Number(proof.block) });
   const evidence = {
     chain_id: proof.chain_id,
     block: Number(proof.block),
@@ -517,7 +523,7 @@ function report(
     near: proof.near,
   };
   if (JSON.stringify(evidence).length > 8000) throw new Error("evidence above 8000 characters");
-  return { verdict, reasons, evidence, request: sim.request, response: sim.results };
+  return { verdict, reasons, list_target, evidence, request: sim.request, response: sim.results };
 }
 
 /** Exit quote: the guard's EVM address sells `amount` of the token it holds, in one simulated block
@@ -578,7 +584,7 @@ export async function checkExit(url: string, token: Address, guard: Address, amo
 
 /** Fichier proofs/<id>.json : `evidence` y est la chaine exacte postee a post_verdict, dont le
  *  contrat stocke le sha256 ; app/replay.ts la relit telle quelle. */
-export type ProofFile = Omit<Report, "evidence"> & { id: number; target: string; evidence: string };
+export type ProofFile = Omit<Report, "evidence" | "list_target"> & { id: number; target: string; evidence: string };
 
 export function toProof(id: number, target: string, r: Report | ExitReport): ProofFile {
   return { id, target, verdict: r.verdict, reasons: r.reasons, evidence: JSON.stringify(r.evidence), request: r.request, response: r.response };

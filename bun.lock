@@ -7,6 +7,7 @@
       "dependencies": {
         "@noble/curves": "^2.4.0",
         "@noble/hashes": "^2.4.0",
+        "@phala/dcap-qvl-node": "0.3.3",
         "bs58": "^6.0.0",
         "near-api-js": "^7.5.2",
         "viem": "^2.57.18",
@@ -28,6 +29,8 @@
     "@noble/hashes": ["@noble/hashes@2.4.0", "", {}, "sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA=="],
 
     "@noble/post-quantum": ["@noble/post-quantum@0.7.1", "", { "dependencies": { "@noble/ciphers": "2.4.0", "@noble/curves": "2.4.0", "@noble/hashes": "2.4.0" } }, "sha512-+P9981IiAnVh+rmcubozzVwrEy3XsN/tMhTnvsjV9VDaYpOnNCqWqKo2FLWxbu92YHfjGIlE5XnW175UK+ln+Q=="],
+
+    "@phala/dcap-qvl-node": ["@phala/dcap-qvl-node@0.3.3", "", {}, "sha512-Iakz7N6VfWXWfgDkgJ5PFr414UV8BD3mk9ssEd0sFFiGNgiAwzD/wE2zwsGRya7qYYC+R8rvg4uEHXQfu1ArAQ=="],
 
     "@scure/base": ["@scure/base@2.3.0", "", {}, "sha512-NsG6Y03tY6R5BUis4FdVtHVkur0U6FOzskgs9ZXNl78CUc9fkZ78HmENUle1nSOkCasDmbubmWD9qwB7mm4PZA=="],
 

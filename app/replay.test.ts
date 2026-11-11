@@ -169,6 +169,14 @@ describe("replay : la chaine evidence est celle postee en chaine", () => {
     const bad = failed(await replay({ ...proof, verdict: "warn" }, RPC));
     expect(bad.some((l) => l.includes("reputation"))).toBe(true);
   });
+  test("a forged before_block (pools launched after the target counted too) is detected", async () => {
+    const proof = withEvidence(await proofOf(tokens.farm_fresh as Address), (e) => (e.reputation.before_block = e.reputation.to + 1));
+    expect(failed(await replay(proof, RPC)).some((l) => l.includes("template reputation differs"))).toBe(true);
+  });
+  test("a reputation without before_block (old format) is refused before anything is sent", async () => {
+    const proof = withEvidence(await proofOf(tokens.farm_fresh as Address), (e) => delete e.reputation.before_block);
+    expect(failed(await replay(proof, RPC))).toEqual(["MISMATCH evidence fields have unexpected types (nothing sent to the node)"]);
+  });
   test("a forged template hash is detected", async () => {
     const proof = withEvidence(await proofOf(tokens.farm_fresh as Address), (e) => (e.template = `0x${"00".repeat(32)}`));
     expect(failed(await replay(proof, RPC)).some((l) => l.includes("template"))).toBe(true);

@@ -71,6 +71,10 @@ export type Check = {
   target: string;
   requested_ns: string;
   verdict: "allow" | "warn" | "block" | null;
+  /** sha256 of the decision package (app/llm.ts) that asked for this check, null without one. */
+  decision_sha256: string | null;
+  /** sha256 of the decision package that asked for the buy on this check, null without one. */
+  buy_decision_sha256: string | null;
   reasons: string;
   /** Heure du verdict, en nanosecondes (chaine). */
   judged_ns: string;

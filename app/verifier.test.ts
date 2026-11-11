@@ -137,6 +137,12 @@ describe("template reputation", () => {
     expect(r.reasons.split(" ; ").map((f) => f.split(" ")[0])).toEqual(["template", "pool"]);
     expect(r.reasons).toMatch(/^template 0x[0-9a-f]{4}\.\.[0-9a-f]{4}: 5 of 5 earlier pools drained, median 2 blocks after creation/);
     expect(r.evidence.reputation).toMatchObject({ pools: 5, drained: 5, median_drain_blocks: 2 });
+    expect(r.list_target).toBe(false); // a block on the template's reputation alone: the guard does not list the token
+  });
+  test("a simulation trap (sale refused): block resting on the token's own simulation, so list_target", async () => {
+    const r = await check(tokens.sell_blocked);
+    expect(r.verdict).toBe("block");
+    expect(r.list_target).toBe(true);
   });
   test("without an index the reputation is unknown: warn, never allow", async () => {
     const r = await check(tokens.safe, GUARD_EVM, null);
@@ -152,6 +158,7 @@ describe("shared blocklist and code changes read from NEAR", () => {
     expect(r.verdict).toBe("block");
     expect(r.reasons).toStartWith("listed on NEAR by agent-b.testnet (token)");
     expect(r.evidence.near.listed.length).toBe(1);
+    expect(r.list_target).toBe(false); // already listed: nothing of its own to list it for
   });
   test("code changed since the last check (another code hash): warn, the human decides", async () => {
     const before = { id: 7, code_hash: `0x${"00".repeat(32)}` as const, implementation: null };

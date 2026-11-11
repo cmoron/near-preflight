@@ -6,6 +6,8 @@
 # The sentinel consults a template index rebuilt here from the fork's logs; a second agent (.env.agent2)
 # is refused a token the sentinel listed.
 # Prerequis : evm/fork.sh tourne dans un autre terminal, bun app/setup.ts <parent>.testnet a ete lance.
+# The agent's model runs on NEAR AI Cloud when .env.llm holds NEAR_AI_API_KEY (loaded by the agent's
+# process only); without it the LLM step verifies a recorded decision package instead.
 # Code de sortie 1 si une tentative piegee passe, si un refus attendu n'a pas la bonne raison ou si un
 # achat sain n'est pas execute sur le fork.
 set -euo pipefail
@@ -30,10 +32,15 @@ refused() {
 }
 
 echo "0. The armer (own process, function-call key limited to arm/disarm) arms the agent within the human's bounds."
-refused "budget above the human's bound" "${ARMER[@]}" 0.5 900
+refused "budget above the human's bound" "${ARMER[@]}" 0.6 900
+# LLM step: at most 3 checks of the trap + 1 check and 1 buy of USDC = 0.0825 NEAR; scripted agent:
 # 7 verdicts at 0.015 NEAR (one an exit quote) + 3 buys at 0.0225 + 1 exit at 0.025 (gas of 2 tx at the
-# cap) = 0.1975 NEAR, armed with some margin
-"${ARMER[@]}" 0.25 900
+# cap) = 0.1975 NEAR; armed with some margin
+"${ARMER[@]}" 0.4 900
+# The second agent (step 7) asks for one check.
+AGENT=$(sed -n 's/^AGENT=//p' .env.agent2) "${ARMER[@]}" 0.05 900
+LLM=()
+[[ -f .env.llm ]] && LLM=(--env-file=.env.llm)
 
 # Template index the sentinel consults, rebuilt from the fork's own logs (same chain state, same sha256).
 from=$(($(jq .fork_block evm/tokens.json) + 1))
@@ -43,7 +50,7 @@ SENTINEL=$!
 trap 'kill $SENTINEL' EXIT
 status=0
 # The agent's buy and sale wait for the MPC signature: allow 60 s per NEAR RPC call (20 s by default).
-RPC_TIMEOUT_MS=60000 bun --env-file=.env --env-file=.env.agent app/demo.ts "$@" || status=$?
+RPC_TIMEOUT_MS=60000 bun --env-file=.env --env-file=.env.agent "${LLM[@]}" app/demo.ts "$@" || status=$?
 kill $SENTINEL
 trap - EXIT # sinon le piege retue un processus deja recolte, et sous set -e son echec devient le code de sortie
 

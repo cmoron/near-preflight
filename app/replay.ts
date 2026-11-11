@@ -2,7 +2,7 @@
 // Le fichier porte la chaine `evidence` exacte postee en chaine ; tout son contenu est reverifie.
 // Usage : bun app/replay.ts <preuve.json> [rpc] [--check]
 import { keccak256, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
-import { buildIndex, indexSha256, reputationOf, templateOf, type Reputation } from "./index";
+import { beforeBlock, buildIndex, indexSha256, reputationOf, templateOf, type Reputation } from "./index";
 import {
   balances,
   buildRequest,
@@ -66,6 +66,7 @@ type BlockStateCall = { blockOverrides: { time: Hex }; calls: { from: Address }[
 
 const EVIDENCE_KEYS = "block,calls,chain_id,code_hash,implementation,liquidity,method,near,quote,reputation,request_sha256,template";
 const EXIT_KEYS = "amount,block,calls,chain_id,kind,method,quote,request_sha256";
+const REPUTATION_KEYS = "before_block,drained,from,index_sha256,median_drain_blocks,pools,template,to";
 /** Ecart tolere entre l'heure du bloc EVM et celles de la demande et du verdict NEAR : horloges de
  *  deux chaines, retard du RPC EVM lu par la sentinelle, intervalle de bloc. */
 const CLOCK_SLACK_S = 60;
@@ -107,7 +108,8 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
     /^\d+$/.test(e.quote) &&
     (e.liquidity === null || isObj(e.liquidity)) &&
     typeof e.template === "string" &&
-    (e.reputation === null || isObj(e.reputation)) &&
+    (e.reputation === null ||
+      (isObj(e.reputation) && Object.keys(e.reputation).sort().join() === REPUTATION_KEYS && [e.reputation.from, e.reputation.to, e.reputation.before_block].every(Number.isSafeInteger))) &&
     isObj(e.near) &&
     Array.isArray(e.near.listed) &&
     (e.near.previous === null || isObj(e.near.previous));
@@ -314,7 +316,8 @@ export async function replay(
     fail("recomputing the liquidity facts", err);
   }
 
-  // (e3) template reputation: the index rebuilt from the node over the same window, same sha256
+  // (e3) template reputation: the index rebuilt from the node over the same window, same sha256, and
+  // the pools before the target's own one counted by the same rule (beforeBlock reads the node too)
   if (!e.reputation) add(true, "no template index used: reputation unknown, which the verdict counts as a warn");
   else {
     const r = e.reputation;
@@ -322,7 +325,7 @@ export async function replay(
       const index = await buildIndex(url, r.from, r.to);
       const sha = indexSha256(index);
       add(sha === r.index_sha256, sha === r.index_sha256 ? `template index of blocks ${r.from}..${r.to} rebuilt from the node: same sha256 ${sha.slice(0, 10)}...` : `template index of blocks ${r.from}..${r.to} rebuilt with sha256 ${sha}, evidence says ${r.index_sha256}`);
-      const want = JSON.stringify(reputationOf(index, e.template as Hex, e.liquidity?.pair ?? null));
+      const want = JSON.stringify(reputationOf(index, e.template as Hex, await beforeBlock(url, index, e.liquidity?.pair ?? null)));
       add(want === JSON.stringify(r), want === JSON.stringify(r) ? `template reputation recomputed identically (${r.drained} of ${r.pools} earlier pools drained)` : `template reputation differs: evidence ${JSON.stringify(r)} vs rebuilt ${want}`);
     } catch (err) {
       fail("rebuilding the template index", err);

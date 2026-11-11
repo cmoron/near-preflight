@@ -6,14 +6,19 @@
 // liquidity removed); a template is the token code with immutables and metadata masked (templateOf);
 // a farm is a template whose earlier pools were almost all drained shortly after creation.
 // Usage: bun app/index.ts <rpc> <from block> <to block> <out.json> [--pace-ms N]
-import { hexToBytes, keccak256, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
+import { hexToBytes, keccak256, parseEther, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
 import { FACTORY, LOG_CHUNK, rpc, short, WETH, type Finding } from "./verifier";
 
 /** At least this many earlier pools of the template: fewer is an anecdote, not a pattern. */
 const MIN_POOLS = 3;
 /** "Almost all": at least 4 in 5 earlier pools drained. An honest template (a popular token
- *  factory) loses some pools to abandonment, rarely 4 in 5 within a day of creation. */
+ *  factory) loses some pools to abandonment, rarely 4 in 5 within a day of creation. A very common
+ *  template (a standard ERC-20 with many pools, honest and not) has a mixed history: this share,
+ *  not a comparison of creators, is what keeps it from blocking. */
 const FARM_SHARE = 0.8;
+/** A pool counts only if its liquidity providers added at least this much WETH: a dust pool costs a
+ *  decoy maker nothing, while a farm seeds real liquidity to look tradable (the demo farm: 1 ETH). */
+const MIN_POOL_WETH = parseEther("0.5");
 /** "Shortly after creation": within 1 day (43,200 blocks of 2 s on Base). An honest project does not
  *  remove 90 % of its liquidity on its first day. */
 const SHORT_BLOCKS = 43_200;
@@ -23,9 +28,11 @@ const DRAIN_BPS = 9_000n;
 const PAIRS_PER_QUERY = 10;
 const PAIR_CREATED = keccak256(stringToHex("PairCreated(address,address,address,uint256)"));
 const TRANSFER = keccak256(stringToHex("Transfer(address,address,uint256)"));
+const MINT = keccak256(stringToHex("Mint(address,uint256,uint256)"));
 const ZERO = "0x0000000000000000000000000000000000000000";
 
-export type Pool = { pair: Address; token: Address; created: number; drained: number | null };
+/** `weth_added`: WETH added by the pair's `Mint`s in the window, decimal wei. */
+export type Pool = { pair: Address; token: Address; created: number; drained: number | null; weth_added: string };
 /** Pools by template, templates and pools in a fixed order: the JSON (and its sha256) depends only
  *  on the chain state and the window. Addresses lowercase. */
 export type Index = { chain_id: number; factory: Address; weth: Address; from: number; to: number; templates: Record<string, Pool[]> };
@@ -34,6 +41,8 @@ export type Reputation = {
   template: Hex;
   from: number;
   to: number;
+  /** Only pools created before this block count (beforeBlock). */
+  before_block: number;
   index_sha256: Hex;
   pools: number;
   drained: number;
@@ -81,23 +90,31 @@ export async function buildIndex(url: string, from: number, to: number, pace: ()
   const chain_id = Number(await call<Hex>("eth_chainId", []));
   const weth = WETH.toLowerCase() as Address;
   const pools: Pool[] = [];
+  const wethIs0 = new Set<Address>(); // pairs whose token0 is WETH: its Mint amount is amount0
   for (const l of await logs({ address: FACTORY, topics: [PAIR_CREATED] })) {
     const [t0, t1] = [word(l.topics[1]), word(l.topics[2])];
     const token = t0 === weth ? t1 : t1 === weth ? t0 : null;
-    if (token) pools.push({ pair: `0x${l.data.slice(26, 66)}` as Address, token, created: Number(BigInt(l.blockNumber)), drained: null });
+    const pair = `0x${l.data.slice(26, 66)}` as Address;
+    if (token) pools.push({ pair, token, created: Number(BigInt(l.blockNumber)), drained: null, weth_added: "0" });
+    if (t0 === weth) wethIs0.add(pair);
   }
-  const byPair = new Map(pools.map((p) => [p.pair, { pool: p, minted: 0n, burned: 0n }]));
+  const byPair = new Map(pools.map((p) => [p.pair, { pool: p, minted: 0n, burned: 0n, weth: 0n }]));
   for (let i = 0; i < pools.length; i += PAIRS_PER_QUERY) {
     const group = pools.slice(i, i + PAIRS_PER_QUERY); // in creation order: no LP log before the first one
-    for (const l of await logs({ address: group.map((p) => p.pair), topics: [TRANSFER] }, group[0].created)) {
+    for (const l of await logs({ address: group.map((p) => p.pair), topics: [[TRANSFER, MINT]] }, group[0].created)) {
       const s = byPair.get(l.address.toLowerCase() as Address);
       if (!s) continue;
+      if (l.topics[0] === MINT) {
+        s.weth += BigInt(`0x${wethIs0.has(s.pool.pair) ? l.data.slice(2, 66) : l.data.slice(66, 130)}`);
+        continue;
+      }
       const value = BigInt(l.data);
       if (word(l.topics[1]) === ZERO) s.minted += value;
       else if (word(l.topics[2]) === ZERO && word(l.topics[1]) === s.pool.pair) s.burned += value;
       if (s.pool.drained === null && s.minted > 0n && s.burned * 10_000n >= s.minted * DRAIN_BPS) s.pool.drained = Number(BigInt(l.blockNumber));
     }
   }
+  for (const s of byPair.values()) s.pool.weth_added = s.weth.toString();
   const templates: Record<string, Pool[]> = {};
   for (const p of pools) {
     const code = await call<Hex>("eth_getCode", [p.token, toHex(to)]);
@@ -111,13 +128,25 @@ export async function buildIndex(url: string, from: number, to: number, pace: ()
 
 export const indexSha256 = (i: Index): Hex => sha256(stringToHex(JSON.stringify(i)));
 
-/** The template's other pools in the index (the target's own pool excluded). */
-export function reputationOf(index: Index, template: Hex, ownPair: Address | null): Reputation {
-  const earlier = (index.templates[template] ?? []).filter((p) => p.pair !== ownPair?.toLowerCase());
+/** The block before which an index pool is earlier than the target's own pool (`ownPair`, its V2
+ *  WETH pair): that pool's creation block when the index has it. Otherwise one eth_getCode decides:
+ *  code at `from`, the pair predates the window and no index pool is earlier (`from`); no code, it
+ *  came after the window and all are (`to + 1`). Copies launched and drained after the target cannot
+ *  poison it. No own pool: all count; without a V2 WETH pair the token cannot be bought anyway. */
+export async function beforeBlock(url: string, index: Index, ownPair: Address | null): Promise<number> {
+  if (!ownPair) return index.to + 1;
+  const own = Object.values(index.templates).flat().find((p) => p.pair === ownPair.toLowerCase());
+  if (own) return own.created;
+  return (await rpc<Hex>(url, "eth_getCode", [ownPair, toHex(index.from)])) !== "0x" ? index.from : index.to + 1;
+}
+
+/** The template's pools created before `before` (beforeBlock) with at least MIN_POOL_WETH added. */
+export function reputationOf(index: Index, template: Hex, before: number): Reputation {
+  const earlier = (index.templates[template] ?? []).filter((p) => p.created < before && BigInt(p.weth_added) >= MIN_POOL_WETH);
   const delays = earlier.flatMap((p) => (p.drained !== null && p.drained - p.created <= SHORT_BLOCKS ? [p.drained - p.created] : [])).sort((a, b) => a - b);
   const mid = delays.length >> 1;
   const median = delays.length ? (delays.length % 2 ? delays[mid] : (delays[mid - 1] + delays[mid]) / 2) : null;
-  return { template, from: index.from, to: index.to, index_sha256: indexSha256(index), pools: earlier.length, drained: delays.length, median_drain_blocks: median };
+  return { template, from: index.from, to: index.to, before_block: before, index_sha256: indexSha256(index), pools: earlier.length, drained: delays.length, median_drain_blocks: median };
 }
 
 /** The farm rule. No index: the reputation is unknown, which is never a pass. */
