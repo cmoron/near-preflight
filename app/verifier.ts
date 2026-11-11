@@ -163,9 +163,10 @@ export async function checkToken(url: string, token: Address): Promise<Report> {
     findings.push({ level: "block", text: "n'importe qui reprend les jetons par transferFrom sans approbation" });
   }
   const quoted = (res: Result) => (ok(res) ? (uint(router, "getAmountsOut", res) as bigint[])[1] : 0n);
-  const loss = (got: bigint, expected: bigint) => (expected > 0n ? 1 - Number(got) / Number(expected) : 0);
+  // Sans devis, la taxe n'est pas mesurable : perte totale supposee, donc block (echec ferme).
+  const loss = (got: bigint, expected: bigint) => (expected > 0n ? 1 - Number(got) / Number(expected) : 1);
   const taxed = (tax: number, when: string) => {
-    const text = `taxe de ${Math.round(tax * 100)} % ${when}`;
+    const text = tax >= 1 ? `taxe non mesurable ${when} (devis du pool en echec)` : `taxe de ${Math.round(tax * 100)} % ${when}`;
     if (tax >= TAX_BLOCK) findings.push({ level: "block", text });
     else if (tax >= TAX_WARN) findings.push({ level: "warn", text });
   };

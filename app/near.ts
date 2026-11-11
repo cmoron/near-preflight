@@ -1,5 +1,5 @@
 // Acces NEAR partage : configuration lue dans .env (bun la charge seul), cles hors depot.
-import { Account, JsonRpcProvider } from "near-api-js";
+import { Account, getTransactionLastResult, JsonRpcProvider } from "near-api-js";
 import { homedir } from "node:os";
 
 export const RPC = process.env.NEAR_RPC ?? "https://test.rpc.fastnear.com";
@@ -32,3 +32,20 @@ export function reason(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
   return msg.match(/Smart contract panicked: ([^"\n]+)/)?.[1] ?? msg.split("\n")[0];
 }
+
+export const explorer = (tx: string) => `https://testnet.nearblocks.io/txns/${tx}`;
+
+/** Appel de la garde signe par `who` ; renvoie la valeur et le lien de la transaction. */
+export async function call<T>(who: Account, methodName: string, args: Record<string, unknown>, deposit = 0n) {
+  const raw = await who.callFunctionRaw({ contractId: env("GUARD"), methodName, args, deposit });
+  return { value: getTransactionLastResult(raw) as T, tx: explorer(raw.transaction.hash) };
+}
+
+export type Check = {
+  agent: string;
+  target: string;
+  requested_ns: string;
+  verdict: "allow" | "warn" | "block" | null;
+  reasons: string;
+  settled: boolean;
+};
