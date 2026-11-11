@@ -12,6 +12,8 @@ await mkdir("proofs", { recursive: true });
 
 // ponytail: relit toutes les demandes depuis 1 au demarrage ; partir d'un curseur sauvegarde si elles se comptent par milliers.
 let next = 1;
+const failures = new Map<number, number>();
+const MAX_TRIES = 3;
 log(`a l'ecoute de ${env("GUARD")}, simulation sur ${EVM}`);
 for (;;) {
   const last = await view<number>("last_check_id");
@@ -21,8 +23,22 @@ for (;;) {
       try {
         await judge(next, check);
       } catch (e) {
-        log(`#${next} : echec, nouvel essai dans 2 s (${e instanceof Error ? e.message : e})`);
-        break; // la demande reste sans verdict ; l'agent est rembourse si cela dure plus de 5 min
+        const msg = e instanceof Error ? e.message.split("\n")[0] : String(e);
+        const tries = (failures.get(next) ?? 0) + 1;
+        failures.set(next, tries);
+        if (tries < MAX_TRIES) {
+          log(`#${next} : echec ${tries}/${MAX_TRIES}, nouvel essai (${msg})`);
+          break;
+        }
+        // Echec ferme : un jeton qui fait echouer la simulation ne bloque pas les demandes suivantes,
+        // et ne s'achete pas.
+        const { tx } = await call(sentinel, "post_verdict", {
+          id: next,
+          verdict: "block",
+          reasons: `simulation impossible apres ${MAX_TRIES} essais : ${msg}`.slice(0, 280),
+          evidence: JSON.stringify({ error: msg.slice(0, 1000) }),
+        });
+        log(`#${next} : BLOCK, simulation impossible (${msg})  ${tx}`);
       }
     }
     next++;
