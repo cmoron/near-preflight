@@ -68,8 +68,9 @@ Requirements: Rust with `cargo-near` (0.23), `near` CLI (near-cli-rs 0.31), `bun
 5. **Start a copy of Base**, in a separate terminal: `evm/fork.sh` -> `fork de Base au bloc 55836672 pret`
    and `evm/tokens.json`: USDC (healthy, already on Base), one healthy demo token and five trap tokens
    (`evm/src/DemoToken.sol`) with their Uniswap V2 pairs. Same addresses on every run.
-6. **Sentinel tests.** `bun test app/verifier.test.ts` -> `7 pass`: USDC and the healthy token `allow`,
-   the five traps `block`, each for its own reason.
+6. **Off-chain tests.** `bun test` -> `8 pass`: USDC and the healthy token `allow`, the five traps
+   `block`, each for its own reason, and an RPC that never answers cannot hang a role (it fails within the
+   timeout).
 7. **Run the attack demo.** `./demo.sh` (optional argument: a trap name from `evm/tokens.json`, default
    `sell_blocked_later`). The human arms the agent, the sentinel starts, the agent runs. You see (real
    output, simulated-call lines trimmed):
@@ -98,7 +99,10 @@ Requirements: Rust with `cargo-near` (0.23), `near` CLI (near-cli-rs 0.31), `bun
    `near contract call-function as-read-only guard.<name>.testnet get_check json-args '{"id":3}' network-config testnet now`
    -> `"verdict": "block"` with its reasons. The full proof summary is in the `verdict_posted` event
    (`EVENT_JSON:` log, NEP-297) of the sentinel's transaction; the full simulation request and response
-   are in `proofs/<id>.json`.
+   are in `proofs/<id>.json`. Every transaction printed by the demo can be checked with
+   `near transaction view-status <hash> network-config testnet` (for example the hash after `[sentinelle] #3`
+   above -> `method_name: "post_verdict"`, `SuccessValue`). The printed links open the same transactions on
+   testnet.nearblocks.io.
 9. **Check the agent's keys.** `near account list-keys agent.<name>.testnet network-config testnet now`
    -> one full-access key (human's keychain) and one key that can `only do ["request_check", "spend",
 "refund_check"] function calls on guard.<name>.testnet`.
