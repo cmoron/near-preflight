@@ -10,7 +10,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1 # the version the contract is built and linted with
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -37,6 +37,6 @@ jobs:
           evm/fork.sh > fork.log 2>&1 &
           for _ in $(seq 1 180); do grep -q "^Base fork at block" fork.log && exit 0; sleep 2; done
           cat fork.log; exit 1
-      - run: bun test
+      - run: bun test --timeout 30000 # shared runners are slower than the 5 s default allows
       - if: failure()
         run: tail -50 fork.log
