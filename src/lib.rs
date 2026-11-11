@@ -27,6 +27,8 @@ pub struct Check {
     pub target: String,
     pub requested_ns: U64,
     pub verdict: Option<Verdict>,
+    /// Heure du bloc ou le verdict a ete poste (0 tant qu'il n'y en a pas).
+    pub judged_ns: U64,
     pub reasons: String,
     /// Vrai une fois l'achat paye : un verdict ne sert qu'une fois.
     pub settled: bool,
@@ -39,6 +41,9 @@ const MAX_EVIDENCE: usize = 8_000;
 /// Majorant du stockage d'une demande (cle, agent <= 64 o, cible 42 o, raisons <= 280 o,
 /// surcout du trie) : le prix doit le couvrir, sinon chaque demande ronge le solde du contrat.
 const CHECK_STORAGE_BYTES: u128 = 600;
+/// Duree de validite d'un verdict : la cible peut changer (proprietaire, proxy, liquidite),
+/// un `allow` ancien ne paie donc plus ; l'agent redemande un controle.
+pub const VERDICT_TTL_NS: u64 = 120 * 1_000_000_000;
 pub const VERDICT_TIMEOUT_NS: u64 = 300 * 1_000_000_000;
 
 #[near(contract_state)]
@@ -84,11 +89,11 @@ impl Guard {
     pub fn new(owner: AccountId, sentinel: AccountId, price: U128) -> Self {
         require!(
             env::predecessor_account_id() == env::current_account_id(),
-            "initialisation reservee au contrat"
+            "init reserved to the contract account"
         );
         require!(
             price.0 >= CHECK_STORAGE_BYTES * env::storage_byte_cost().as_yoctonear(),
-            "prix inferieur au stockage d'une demande"
+            "price below the storage cost of a check"
         );
         Self {
             owner,
@@ -111,7 +116,7 @@ impl Guard {
     pub fn deposit_credit(&mut self, account_id: Option<AccountId>) {
         let who = account_id.unwrap_or_else(env::predecessor_account_id);
         let amount = env::attached_deposit().as_yoctonear();
-        require!(amount > 0, "depot nul");
+        require!(amount > 0, "zero deposit");
         let previous = self.credits.get(&who).copied();
         let storage_cost = if previous.is_none() {
             let usage = env::storage_usage();
@@ -121,7 +126,7 @@ impl Guard {
         } else {
             0
         };
-        require!(amount > storage_cost, "depot insuffisant pour le stockage");
+        require!(amount > storage_cost, "deposit does not cover storage");
         self.credits
             .insert(who, previous.unwrap_or(0) + amount - storage_cost);
     }
@@ -153,7 +158,7 @@ impl Guard {
     pub fn request_check(&mut self, target: String) -> u64 {
         require!(
             is_evm_address(&target),
-            "cible invalide : 0x + 40 hexadecimaux"
+            "invalid target: expected 0x + 40 hex digits"
         );
         let who = env::predecessor_account_id();
         self.debit(&who, self.price);
@@ -166,6 +171,7 @@ impl Guard {
                 target: target.clone(),
                 requested_ns: U64(env::block_timestamp()),
                 verdict: None,
+                judged_ns: U64(0),
                 reasons: String::new(),
                 settled: false,
             },
@@ -182,16 +188,17 @@ impl Guard {
     pub fn post_verdict(&mut self, id: u64, verdict: Verdict, reasons: String, evidence: String) {
         require!(
             env::predecessor_account_id() == self.sentinel,
-            "reserve a la sentinelle"
+            "sentinel only"
         );
-        require!(reasons.len() <= MAX_REASONS, "raisons trop longues");
-        require!(evidence.len() <= MAX_EVIDENCE, "preuve trop longue");
+        require!(reasons.len() <= MAX_REASONS, "reasons too long");
+        require!(evidence.len() <= MAX_EVIDENCE, "evidence too long");
         let Some(check) = self.checks.get_mut(&id) else {
-            env::panic_str("demande inconnue")
+            env::panic_str("unknown check")
         };
-        require!(check.verdict.is_none(), "verdict deja poste");
-        require!(!check.settled, "demande deja reglee");
+        require!(check.verdict.is_none(), "verdict already posted");
+        require!(!check.settled, "check already settled");
         check.verdict = Some(verdict);
+        check.judged_ns = U64(env::block_timestamp());
         check.reasons.clone_from(&reasons);
         self.escrow -= self.price;
         self.fees += self.price;
@@ -214,18 +221,22 @@ impl Guard {
     pub fn spend(&mut self, id: u64, recipient: AccountId, amount: U128) -> Promise {
         let who = env::predecessor_account_id();
         let Some(check) = self.checks.get(&id) else {
-            env::panic_str("demande inconnue")
+            env::panic_str("unknown check")
         };
-        require!(check.agent == who, "demande d'un autre agent");
-        require!(!check.settled, "demande deja reglee");
+        require!(check.agent == who, "check belongs to another agent");
+        require!(!check.settled, "check already settled");
         match check.verdict {
-            None => env::panic_str("verdict absent"),
+            None => env::panic_str("no verdict yet"),
             Some(Verdict::Allow) => {}
-            Some(_) => env::panic_str("verdict refuse l'achat"),
+            Some(_) => env::panic_str("verdict does not allow the purchase"),
         }
         require!(
+            env::block_timestamp() < check.judged_ns.0.saturating_add(VERDICT_TTL_NS),
+            "verdict expired"
+        );
+        require!(
             self.recipients.contains(&recipient),
-            "destinataire non permis"
+            "recipient not allowed"
         );
         let target = check.target.clone();
         self.debit(&who, amount.0);
@@ -250,14 +261,14 @@ impl Guard {
         let who = env::predecessor_account_id();
         let price = self.price;
         let Some(check) = self.checks.get_mut(&id) else {
-            env::panic_str("demande inconnue")
+            env::panic_str("unknown check")
         };
-        require!(check.agent == who, "demande d'un autre agent");
-        require!(check.verdict.is_none(), "verdict deja poste");
-        require!(!check.settled, "demande deja reglee");
+        require!(check.agent == who, "check belongs to another agent");
+        require!(check.verdict.is_none(), "verdict already posted");
+        require!(!check.settled, "check already settled");
         require!(
             env::block_timestamp() >= check.requested_ns.0.saturating_add(VERDICT_TIMEOUT_NS),
-            "delai non ecoule"
+            "timeout not reached"
         );
         self.checks.remove(&id);
         self.escrow -= price;
@@ -278,7 +289,7 @@ impl Guard {
     pub fn refund_credit(&mut self) -> Promise {
         let who = env::predecessor_account_id();
         let credit = self.credit_of(&who).0;
-        require!(credit > 0, "aucun credit a rembourser");
+        require!(credit > 0, "no credit to refund");
         self.credits.insert(who.clone(), 0);
         Promise::new(who).transfer(NearToken::from_yoctonear(credit))
     }
@@ -286,7 +297,7 @@ impl Guard {
     /// Reserve au proprietaire : retire des frais percus, jamais plus que leur total.
     pub fn withdraw_fees(&mut self, amount: U128) -> Promise {
         self.assert_owner();
-        require!(amount.0 <= self.fees, "retrait au-dela des frais percus");
+        require!(amount.0 <= self.fees, "withdrawal exceeds collected fees");
         self.fees -= amount.0;
         Promise::new(self.owner.clone()).transfer(NearToken::from_yoctonear(amount.0))
     }
@@ -315,12 +326,12 @@ impl Guard {
     /// Debite `amount` du budget arme (present, non echu, suffisant) et du credit de `who`.
     fn debit(&mut self, who: &AccountId, amount: u128) {
         let Some(budget) = self.budgets.get(who).copied() else {
-            env::panic_str("budget non arme")
+            env::panic_str("budget not armed")
         };
-        require!(env::block_timestamp() < budget.expires_ns, "budget expire");
-        require!(amount <= budget.remaining, "budget depasse");
+        require!(env::block_timestamp() < budget.expires_ns, "budget expired");
+        require!(amount <= budget.remaining, "budget exceeded");
         let credit = self.credit_of(who).0;
-        require!(amount <= credit, "credit insuffisant");
+        require!(amount <= credit, "insufficient credit");
         self.credits.insert(who.clone(), credit - amount);
         self.budgets.insert(
             who.clone(),
@@ -332,10 +343,7 @@ impl Guard {
     }
 
     fn assert_owner(&self) {
-        require!(
-            env::predecessor_account_id() == self.owner,
-            "reserve au proprietaire"
-        );
+        require!(env::predecessor_account_id() == self.owner, "owner only");
     }
 }
 
@@ -409,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "credit insuffisant")]
+    #[should_panic(expected = "insufficient credit")]
     fn request_check_refuse_sans_credit_suffisant() {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("agent.test", 0, 0);
@@ -421,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "budget expire")]
+    #[should_panic(expected = "budget expired")]
     fn depense_refusee_apres_l_echeance() {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("agent.test", 0, SEC);
@@ -429,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "budget depasse")]
+    #[should_panic(expected = "budget exceeded")]
     fn depense_refusee_au_dela_du_budget() {
         let mut g = funded(ONE_NEAR, 15 * U, 1);
         ctx("agent.test", 0, 500);
@@ -438,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "budget non arme")]
+    #[should_panic(expected = "budget not armed")]
     fn depense_refusee_sans_budget_arme() {
         let mut g = guard();
         ctx("agent.test", ONE_NEAR, 0);
@@ -447,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "reserve au proprietaire")]
+    #[should_panic(expected = "owner only")]
     fn seul_le_proprietaire_arme() {
         let mut g = guard();
         ctx("agent.test", 0, 0);
@@ -493,7 +501,7 @@ mod tests {
 
     // 2. initialiseur reserve au compte du contrat
     #[test]
-    #[should_panic(expected = "initialisation reservee au contrat")]
+    #[should_panic(expected = "init reserved to the contract account")]
     fn new_refuse_un_tiers() {
         ctx("intrus.test", 0, 0);
         let _ = Guard::new(id("intrus.test"), id("intrus.test"), U128(PRICE));
@@ -516,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "au-dela des frais percus")]
+    #[should_panic(expected = "exceeds collected fees")]
     fn retrait_plafonne_aux_frais() {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("agent.test", 0, 500);
@@ -528,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "reserve au proprietaire")]
+    #[should_panic(expected = "owner only")]
     fn retrait_reserve_au_proprietaire() {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("agent.test", 0, 500);
@@ -550,7 +558,7 @@ mod tests {
 
     // 4. stockage d'un compte neuf couvert par son depot
     #[test]
-    #[should_panic(expected = "depot insuffisant pour le stockage")]
+    #[should_panic(expected = "deposit does not cover storage")]
     fn depot_minuscule_refuse_pour_un_compte_neuf() {
         let mut g = guard();
         ctx("agent.test", 1, 0);
@@ -581,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "reserve a la sentinelle")]
+    #[should_panic(expected = "sentinel only")]
     fn seule_la_sentinelle_poste_un_verdict() {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("agent.test", 0, 500);
@@ -590,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "verdict deja poste")]
+    #[should_panic(expected = "verdict already posted")]
     fn un_verdict_ne_se_reecrit_pas() {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("agent.test", 0, 500);
@@ -628,21 +636,21 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "verdict refuse l'achat")]
+    #[should_panic(expected = "verdict does not allow the purchase")]
     fn achat_refuse_sur_block() {
         let (mut g, check) = judged(Verdict::Block);
         let _ = g.spend(check, id("shop.test"), U128(30 * U));
     }
 
     #[test]
-    #[should_panic(expected = "verdict refuse l'achat")]
+    #[should_panic(expected = "verdict does not allow the purchase")]
     fn achat_refuse_sur_warn_sans_humain() {
         let (mut g, check) = judged(Verdict::Warn);
         let _ = g.spend(check, id("shop.test"), U128(30 * U));
     }
 
     #[test]
-    #[should_panic(expected = "verdict absent")]
+    #[should_panic(expected = "no verdict yet")]
     fn achat_refuse_sans_verdict() {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("owner.test", 0, 0);
@@ -653,21 +661,21 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "destinataire non permis")]
+    #[should_panic(expected = "recipient not allowed")]
     fn achat_refuse_vers_un_destinataire_non_permis() {
         let (mut g, check) = judged(Verdict::Allow);
         let _ = g.spend(check, id("attacker.test"), U128(30 * U));
     }
 
     #[test]
-    #[should_panic(expected = "budget depasse")]
+    #[should_panic(expected = "budget exceeded")]
     fn achat_refuse_au_dela_du_budget_arme() {
         let (mut g, check) = judged(Verdict::Allow);
         let _ = g.spend(check, id("shop.test"), U128(100 * U - PRICE + 1));
     }
 
     #[test]
-    #[should_panic(expected = "budget expire")]
+    #[should_panic(expected = "budget expired")]
     fn achat_refuse_apres_l_echeance() {
         let (mut g, check) = judged(Verdict::Allow);
         ctx("agent.test", 0, SEC);
@@ -675,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "demande d'un autre agent")]
+    #[should_panic(expected = "check belongs to another agent")]
     fn achat_refuse_a_un_autre_agent() {
         let (mut g, check) = judged(Verdict::Allow);
         ctx("intrus.test", 0, 700);
@@ -683,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "demande deja reglee")]
+    #[should_panic(expected = "check already settled")]
     fn un_seul_achat_par_verdict() {
         let (mut g, check) = judged(Verdict::Allow);
         let _ = g.spend(check, id("shop.test"), U128(30 * U));
@@ -691,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "reserve au proprietaire")]
+    #[should_panic(expected = "owner only")]
     fn seul_le_proprietaire_permet_un_destinataire() {
         let mut g = guard();
         ctx("agent.test", 0, 0);
@@ -724,7 +732,7 @@ mod tests {
 
     // 9. arret d'urgence par l'humain
     #[test]
-    #[should_panic(expected = "budget non arme")]
+    #[should_panic(expected = "budget not armed")]
     fn le_desarmement_coupe_toute_depense() {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("owner.test", 0, 0);
@@ -734,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "reserve au proprietaire")]
+    #[should_panic(expected = "owner only")]
     fn seul_le_proprietaire_desarme() {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("agent.test", 0, 0);
@@ -762,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "delai non ecoule")]
+    #[should_panic(expected = "timeout not reached")]
     fn pas_de_remboursement_avant_le_delai() {
         let (mut g, check) = pending();
         ctx("agent.test", 0, VERDICT_TIMEOUT_NS - 1);
@@ -770,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "verdict deja poste")]
+    #[should_panic(expected = "verdict already posted")]
     fn pas_de_remboursement_apres_un_verdict() {
         let (mut g, check) = pending();
         ctx("sentinel.test", 0, 1);
@@ -780,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "demande inconnue")]
+    #[should_panic(expected = "unknown check")]
     fn un_seul_remboursement() {
         let (mut g, check) = pending();
         ctx("agent.test", 0, VERDICT_TIMEOUT_NS);
@@ -789,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "demande inconnue")]
+    #[should_panic(expected = "unknown check")]
     fn pas_de_verdict_apres_remboursement() {
         let (mut g, check) = pending();
         ctx("agent.test", 0, VERDICT_TIMEOUT_NS);
@@ -799,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "demande d'un autre agent")]
+    #[should_panic(expected = "check belongs to another agent")]
     fn seul_l_agent_se_fait_rembourser() {
         let (mut g, check) = pending();
         ctx("intrus.test", 0, VERDICT_TIMEOUT_NS);
@@ -808,7 +816,7 @@ mod tests {
 
     // 11. le prix d'une demande reste sous sequestre jusqu'au verdict
     #[test]
-    #[should_panic(expected = "au-dela des frais percus")]
+    #[should_panic(expected = "exceeds collected fees")]
     fn le_prix_en_attente_n_est_pas_retirable() {
         let (mut g, _check) = pending();
         ctx("owner.test", 0, 0);
@@ -825,7 +833,7 @@ mod tests {
 
     // 12. revue de securite : stockage couvert par le prix, budget jamais regonfle
     #[test]
-    #[should_panic(expected = "prix inferieur au stockage d'une demande")]
+    #[should_panic(expected = "price below the storage cost of a check")]
     fn le_prix_couvre_le_stockage_d_une_demande() {
         ctx("guard.test", 0, 0);
         let _ = Guard::new(id("owner.test"), id("sentinel.test"), U128(U));
@@ -850,5 +858,39 @@ mod tests {
         g.request_check(TARGET.into());
         g.request_check(TARGET.into());
         assert_eq!(g.last_check_id(), 2);
+    }
+
+    // 14. un verdict perime ne paie plus : la cible a pu changer depuis le controle
+    fn judged_at_1s() -> (Guard, u64) {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        ctx("owner.test", 0, 0);
+        g.allow_recipient(id("shop.test"));
+        ctx("agent.test", 0, 0);
+        let check = g.request_check(TARGET.into());
+        ctx("sentinel.test", 0, SEC);
+        g.post_verdict(check, Verdict::Allow, String::new(), String::new());
+        (g, check)
+    }
+
+    #[test]
+    fn le_verdict_date_son_jugement() {
+        let (g, check) = judged_at_1s();
+        assert_eq!(g.get_check(check).unwrap().judged_ns, U64(SEC));
+    }
+
+    #[test]
+    fn achat_paye_juste_avant_l_echeance_du_verdict() {
+        let (mut g, check) = judged_at_1s();
+        ctx("agent.test", 0, SEC + VERDICT_TTL_NS - 1);
+        let _ = g.spend(check, id("shop.test"), U128(30 * U));
+        assert!(g.get_check(check).unwrap().settled);
+    }
+
+    #[test]
+    #[should_panic(expected = "verdict expired")]
+    fn achat_refuse_sur_verdict_perime() {
+        let (mut g, check) = judged_at_1s();
+        ctx("agent.test", 0, SEC + VERDICT_TTL_NS);
+        let _ = g.spend(check, id("shop.test"), U128(30 * U));
     }
 }
