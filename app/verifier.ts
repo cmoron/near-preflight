@@ -43,7 +43,7 @@ const router = parseAbi([
 
 export type Verdict = "allow" | "warn" | "block";
 type Call = { label: string; from: Address; to: Address; data: Hex; value?: Hex };
-type Result = { status: Hex; returnData: Hex; error?: { message?: string; data?: Hex } };
+export type Result = { status: Hex; returnData: Hex; error?: { message?: string; data?: Hex } };
 type Finding = { level: Verdict; text: string };
 export type Report = {
   verdict: Verdict;
@@ -70,7 +70,7 @@ function call(label: string, from: Address, to: Address, abi: Abi, functionName:
   return { label, from, to, data, ...(value ? { value: toHex(value) } : {}) };
 }
 
-async function rpc<T>(url: string, method: string, params: unknown[]): Promise<T> {
+export async function rpc<T>(url: string, method: string, params: unknown[]): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -148,19 +148,10 @@ export async function checkToken(url: string, token: Address): Promise<Report> {
 
   // 1re simulation : quantite achetee et proprietaire, pour construire la seconde.
   const first = await simulate(url, block, buyer, [{ time: now, calls: buy }]);
-  const f = byLabel(buy, first.results);
-  const findings: Finding[] = [];
-  if (!ok(f["buy quote"])) findings.push({ level: "warn", text: "no liquidity: no Uniswap V2 WETH pair, sale not verifiable" });
-  else if (!ok(f["buy 0.01 ETH"])) findings.push({ level: "block", text: `simulated buy failed: ${revertReason(f["buy 0.01 ETH"])}` });
-  // Une adresse sans code repond "0x" a balanceOf : solde nul, pas une erreur de decodage.
-  const bal = (r: Result) => (ok(r) && r.returnData !== "0x" ? (uint(erc20, "balanceOf", r) as bigint) : 0n);
-  const delta = (after: Result, before: Result) => (ok(after) && ok(before) ? bal(after) - bal(before) : 0n);
-  const amount = delta(f["tokens after buy"], f["tokens before buy"]);
-  const owner = ok(f["owner()"]) && f["owner()"].returnData !== "0x" ? (uint(erc20, "owner", f["owner()"]) as Address) : null;
-  if (findings.length || amount < 10n) {
-    if (!findings.length) findings.push({ level: "block", text: "simulated buy received no tokens" });
-    return report(proof, first, findings, buy.map((c) => c.label));
-  }
+  const buyLabels = buy.map((c) => c.label);
+  const st = buyStage(byLabel(buyLabels, first.results));
+  if (st.findings.length) return report(proof, first, buyLabels);
+  const { amount, owner } = st;
 
   // 2e simulation, la preuve, en trois blocs : achat + reprises sans approbation + approve,
   // vente de la moitie au bloc suivant, vente du reste une heure plus tard.
@@ -188,50 +179,69 @@ export async function checkToken(url: string, token: Address): Promise<Report> {
     { time: now + NEXT_S, calls: block2 },
     { time: now + LATER_S, calls: block3 },
   ]);
-  const r = byLabel([...block1, ...block2, ...block3], sim.results);
-
-  if (owner && moved(r["transferFrom by owner()"])) {
-    findings.push({ level: "block", text: `owner() ${owner} takes tokens back by transferFrom without approval` });
-  }
-  if (moved(r["transferFrom by a stranger"])) {
-    findings.push({ level: "block", text: "anyone can take tokens back by transferFrom without approval" });
-  }
-  const quoted = (res: Result) => (ok(res) ? (uint(router, "getAmountsOut", res) as bigint[])[1] : 0n);
-  // Sans devis, la taxe n'est pas mesurable : perte totale supposee, donc block (echec ferme).
-  const loss = (got: bigint, expected: bigint) => (expected > 0n ? 1 - Number(got) / Number(expected) : 1);
-  const taxed = (tax: number, when: string) => {
-    const text = tax >= 1 ? `tax not measurable ${when} (pool quote failed)` : `${Math.round(tax * 100)} % tax ${when}`;
-    if (tax >= TAX_BLOCK) findings.push({ level: "block", text });
-    else if (tax >= TAX_WARN) findings.push({ level: "warn", text });
-  };
-  taxed(loss(amount, quoted(r["buy quote"])), "on the buy");
-  if (!ok(r["sale in next block"])) {
-    findings.push({ level: "block", text: `sale refused in the next block after the buy (${revertReason(r["sale in next block"])})` });
-  } else {
-    taxed(loss(delta(r["WETH after sale"], r["WETH before sale"]), quoted(r["sale quote"])), "on the sale in the next block");
-  }
-  if (!ok(r["sale +1 h"])) {
-    findings.push({ level: "block", text: `sale refused 1 h after the buy (${revertReason(r["sale +1 h"])})` });
-  } else {
-    taxed(loss(delta(r["WETH after sale +1 h"], r["WETH after sale"]), quoted(r["sale quote +1 h"])), "on the sale 1 h after the buy");
-  }
-  return report(proof, sim, findings, [...block1, ...block2, ...block3].map((c) => c.label));
+  return report(proof, sim, [...block1, ...block2, ...block3].map((c) => c.label));
 }
 
-const byLabel = (calls: Call[], results: Result[]) => Object.fromEntries(calls.map((c, i) => [c.label, results[i]]));
+/** Phase achat : quantite recue, proprietaire, premiers constats. `findings` vide = on peut poursuivre. */
+function buyStage(f: Record<string, Result>) {
+  const findings: Finding[] = [];
+  if (!ok(f["buy quote"])) findings.push({ level: "warn", text: "no liquidity: no Uniswap V2 WETH pair, sale not verifiable" });
+  else if (!ok(f["buy 0.01 ETH"])) findings.push({ level: "block", text: `simulated buy failed: ${revertReason(f["buy 0.01 ETH"])}` });
+  const amount = delta(f["tokens after buy"], f["tokens before buy"]);
+  const owner = ok(f["owner()"]) && f["owner()"].returnData !== "0x" ? (uint(erc20, "owner", f["owner()"]) as Address) : null;
+  if (!findings.length && amount < 10n) findings.push({ level: "block", text: "simulated buy received no tokens" });
+  return { findings, amount, owner };
+}
+
+// Une adresse sans code repond "0x" a balanceOf : solde nul, pas une erreur de decodage.
+const bal = (r: Result) => (ok(r) && r.returnData !== "0x" ? (uint(erc20, "balanceOf", r) as bigint) : 0n);
+const delta = (after: Result, before: Result) => (ok(after) && ok(before) ? bal(after) - bal(before) : 0n);
+
+/** Jugement pur : ne depend que des libelles des appels et de leurs resultats, donc rejouable
+ *  par n'importe qui a partir d'une preuve (voir app/replay.ts). */
+export function judge(labels: string[], results: Result[]): { verdict: Verdict; reasons: string } {
+  const r = byLabel(labels, results);
+  const { findings, amount, owner } = buyStage(r);
+  if (!findings.length) {
+    if (owner && moved(r["transferFrom by owner()"])) {
+      findings.push({ level: "block", text: `owner() ${owner} takes tokens back by transferFrom without approval` });
+    }
+    if (moved(r["transferFrom by a stranger"])) {
+      findings.push({ level: "block", text: "anyone can take tokens back by transferFrom without approval" });
+    }
+    const quoted = (res: Result) => (ok(res) ? (uint(router, "getAmountsOut", res) as bigint[])[1] : 0n);
+    // Sans devis, la taxe n'est pas mesurable : perte totale supposee, donc block (echec ferme).
+    const loss = (got: bigint, expected: bigint) => (expected > 0n ? 1 - Number(got) / Number(expected) : 1);
+    const taxed = (tax: number, when: string) => {
+      const text = tax >= 1 ? `tax not measurable ${when} (pool quote failed)` : `${Math.round(tax * 100)} % tax ${when}`;
+      if (tax >= TAX_BLOCK) findings.push({ level: "block", text });
+      else if (tax >= TAX_WARN) findings.push({ level: "warn", text });
+    };
+    taxed(loss(amount, quoted(r["buy quote"])), "on the buy");
+    if (!ok(r["sale in next block"])) {
+      findings.push({ level: "block", text: `sale refused in the next block after the buy (${revertReason(r["sale in next block"])})` });
+    } else {
+      taxed(loss(delta(r["WETH after sale"], r["WETH before sale"]), quoted(r["sale quote"])), "on the sale in the next block");
+    }
+    if (!ok(r["sale +1 h"])) {
+      findings.push({ level: "block", text: `sale refused 1 h after the buy (${revertReason(r["sale +1 h"])})` });
+    } else {
+      taxed(loss(delta(r["WETH after sale +1 h"], r["WETH after sale"]), quoted(r["sale quote +1 h"])), "on the sale 1 h after the buy");
+    }
+  }
+  const verdict: Verdict = findings.some((f) => f.level === "block") ? "block" : findings.some((f) => f.level === "warn") ? "warn" : "allow";
+  const reasons = findings.length ? findings.map((f) => f.text).join(" ; ") : "buy, takeback probes and sales simulated without anomaly";
+  return { verdict, reasons: reasons.slice(0, 280) };
+}
+
+const byLabel = (labels: string[], results: Result[]) => Object.fromEntries(labels.map((l, i) => [l, results[i]]));
 
 function report(
   proof: { chain_id: number; block: bigint; code_hash: Hex; implementation: Address | null },
   sim: { request: unknown; results: Result[] },
-  findings: Finding[],
   labels: string[],
 ): Report {
-  const verdict: Verdict = findings.some((f) => f.level === "block")
-    ? "block"
-    : findings.some((f) => f.level === "warn")
-      ? "warn"
-      : "allow";
-  const reasons = findings.length ? findings.map((f) => f.text).join(" ; ") : "buy, takeback probes and sales simulated without anomaly";
+  const { verdict, reasons } = judge(labels, sim.results);
   const evidence = {
     chain_id: proof.chain_id,
     block: Number(proof.block),
@@ -242,5 +252,5 @@ function report(
     calls: sim.results.map((res, i) => `${labels[i]}: ${ok(res) ? "ok" : "revert"}`),
   };
   if (JSON.stringify(evidence).length > 8000) throw new Error("evidence above 8000 characters");
-  return { verdict, reasons: reasons.slice(0, 280), evidence, request: sim.request, response: sim.results };
+  return { verdict, reasons, evidence, request: sim.request, response: sim.results };
 }
