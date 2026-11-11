@@ -2,6 +2,13 @@
 import { Account, getTransactionLastResult, JsonRpcProvider } from "near-api-js";
 import { homedir } from "node:os";
 
+// near-api-js appelle fetch sans delai : une reponse qui n'arrive jamais suspendait un role pour
+// toujours (vu sur la sentinelle). Tout fetch du processus recoit un delai, sauf signal deja fourni.
+export const RPC_TIMEOUT_MS = Number(process.env.RPC_TIMEOUT_MS ?? 20_000);
+const rawFetch = globalThis.fetch;
+globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) =>
+  rawFetch(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(RPC_TIMEOUT_MS) })) as typeof fetch;
+
 export const RPC = process.env.NEAR_RPC ?? "https://test.rpc.fastnear.com";
 export const provider = new JsonRpcProvider({ url: RPC });
 

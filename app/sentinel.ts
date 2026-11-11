@@ -16,6 +16,16 @@ const failures = new Map<number, number>();
 const MAX_TRIES = 3;
 log(`a l'ecoute de ${env("GUARD")}, simulation sur ${EVM}`);
 for (;;) {
+  try {
+    await scan();
+  } catch (e) {
+    // RPC NEAR indisponible ou trop lent : rien n'est perdu, le tour suivant relit depuis `next`.
+    log(`lecture de la garde en echec, nouvel essai (${e instanceof Error ? e.message.split("\n")[0] : e})`);
+  }
+  await Bun.sleep(1500);
+}
+
+async function scan() {
   const last = await view<number>("last_check_id");
   while (next <= last) {
     const check = await view<Check | null>("get_check", { id: next });
@@ -32,18 +42,24 @@ for (;;) {
         }
         // Echec ferme : un jeton qui fait echouer la simulation ne bloque pas les demandes suivantes,
         // et ne s'achete pas.
-        const { tx } = await call(sentinel, "post_verdict", {
-          id: next,
-          verdict: "block",
-          reasons: `simulation impossible apres ${MAX_TRIES} essais : ${msg}`.slice(0, 280),
-          evidence: JSON.stringify({ error: msg.slice(0, 1000) }),
-        });
-        log(`#${next} : BLOCK, simulation impossible (${msg})  ${tx}`);
+        // Si ce post echoue aussi (RPC NEAR, verdict deja arrive), le tour suivant relit la demande :
+        // un verdict deja en chaine est saute, sinon on reposte.
+        try {
+          const { tx } = await call(sentinel, "post_verdict", {
+            id: next,
+            verdict: "block",
+            reasons: `simulation impossible apres ${MAX_TRIES} essais : ${msg}`.slice(0, 280),
+            evidence: JSON.stringify({ error: msg.slice(0, 1000) }),
+          });
+          log(`#${next} : BLOCK, simulation impossible (${msg})  ${tx}`);
+        } catch (e2) {
+          log(`#${next} : verdict de repli non poste, nouvel essai (${e2 instanceof Error ? e2.message.split("\n")[0] : e2})`);
+          break;
+        }
       }
     }
     next++;
   }
-  await Bun.sleep(1500);
 }
 
 async function judge(id: number, check: Check) {

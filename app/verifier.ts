@@ -58,6 +58,7 @@ async function rpc<T>(url: string, method: string, params: unknown[]): Promise<T
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    signal: AbortSignal.timeout(Number(process.env.RPC_TIMEOUT_MS ?? 20_000)), // jamais d'attente sans fin
   });
   const body = (await res.json()) as { result?: T; error?: { message: string } };
   if (body.error || body.result === undefined) throw new Error(`${method} : ${body.error?.message ?? res.status}`);

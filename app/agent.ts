@@ -16,8 +16,12 @@ export async function requestCheck(target: string): Promise<number> {
 export async function waitVerdict(id: number): Promise<Check | null> {
   const end = Date.now() + TIMEOUT_MS;
   while (Date.now() < end) {
-    const check = await view<Check | null>("get_check", { id }); // null : le noeud lu n'a pas encore le bloc
-    if (check?.verdict) return check;
+    try {
+      const check = await view<Check | null>("get_check", { id }); // null : le noeud lu n'a pas encore le bloc
+      if (check?.verdict) return check;
+    } catch (e) {
+      log(`#${id} : lecture du verdict en echec, nouvel essai (${e instanceof Error ? e.message.split("\n")[0] : e})`);
+    }
     await Bun.sleep(1500);
   }
   return null;
