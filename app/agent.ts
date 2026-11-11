@@ -1,9 +1,9 @@
 // Enveloppe cote agent : aucun achat sans verdict, refus d'acheter sur block. Signe uniquement avec
-// la cle function-call de l'agent, limitee a la garde (request_check, buy, refund_check, sell) ; l'agent
+// la cle function-call de l'agent, limitee a la garde (request_check, buy, refund_check, request_exit,
+// sell_quoted) ; l'agent
 // n'a aucune cle EVM : la garde construit la transaction d'achat et NEAR la signe.
 import { createPublicClient, formatEther, http, parseAbi, parseTransaction, type Address, type Hex } from "viem";
 import { account, call, env, view, type Check } from "./near";
-import { ROUTER, WETH } from "./verifier";
 
 export const agent = account(env("AGENT"), env("AGENT_KEY"));
 /** Gaz attache a `buy` : le sien, l'appel `sign` au MPC (15 TGas reserves) et le callback (10). */
@@ -16,7 +16,7 @@ const TIMEOUT_MS = 300_000; // delai du contrat avant remboursement d'une demand
 
 export async function requestCheck(target: string): Promise<number> {
   const { value: id, tx } = await call<number>(agent, "request_check", { target });
-  log(`request #${id} : verdict on ${target}, 0.01 NEAR taken from credit  ${tx}`);
+  log(`request #${id} : verdict on ${target}, 0.015 NEAR taken from credit  ${tx}`);
   return id;
 }
 
@@ -97,21 +97,28 @@ export async function guardedBuy(
 }
 
 const erc20 = parseAbi(["function balanceOf(address) view returns (uint256)"]);
-const pool = parseAbi(["function getAmountsOut(uint256,address[]) view returns (uint256[])"]);
 
-/** Exit: sells all of `token` held by the guard's EVM address for ETH, back to that address; NEAR
- *  signs approve then swap. No verdict needed. The floor is the agent's own: pool quote now minus
- *  3 %. Returns the nonce of the first signed transaction and the signed transactions. */
-export async function sellAll(token: Address): Promise<{ nonce: number; signed: Hex[] }> {
+/** Exit: sells all of the token the guard bought for the agent's check `buyId`, back to ETH on the
+ *  guard's address. The agent never picks the floor: it asks the sentinel for an exit quote
+ *  (request_exit, the sale simulated from the guard's address), then sell_quoted has NEAR sign
+ *  approve and swap with the floor set by the guard (quote minus the owner's 3 %), charged to the
+ *  armed budget like a buy. Returns the nonce of the first signed transaction and the transactions. */
+export async function sellAll(buyId: number): Promise<{ nonce: number; signed: Hex[] }> {
+  const bought = await view<Check>("get_check", { id: buyId });
+  const token = bought.target as Address;
   const { address } = await view<{ address: Address }>("evm_config");
   const client = createPublicClient({ transport: http(env("EVM_RPC")) });
   const amount = await client.readContract({ address: token, abi: erc20, functionName: "balanceOf", args: [address] });
-  const [, out] = await client.readContract({ address: ROUTER, abi: pool, functionName: "getAmountsOut", args: [amount, [token, WETH]] });
-  const min = (out * 97n) / 100n;
+  const { value: id, tx: asked } = await call<number>(agent, "request_exit", { buy_id: buyId, amount: amount.toString() });
+  log(`request #${id} : exit quote for ${amount} ${token} (bought by #${buyId}), 0.015 NEAR taken from credit  ${asked}`);
+  const quote = await waitVerdict(id);
+  if (quote?.verdict !== "allow") {
+    log(`#${id} : no exit quote (${quote?.reasons ?? "no verdict"}): no sale by the agent; the owner's own exit stays open`);
+    return { nonce: -1, signed: [] };
+  }
   const started = Date.now();
-  const args = { token, amount: amount.toString(), min_out_wei: min.toString() };
-  const { value: signed, tx, burnt } = await call<Hex[]>(agent, "sell", args, 0n, SELL_GAS);
+  const { value: signed, tx, burnt } = await call<Hex[]>(agent, "sell_quoted", { id }, 0n, SELL_GAS);
   const secs = ((Date.now() - started) / 1000).toFixed(1);
-  log(`sell of ${amount} ${token} for at least ${formatEther(min)} ETH (pool quote minus 3 %): ${signed.length}/2 transactions signed by NEAR in ${secs} s (${burnt})  ${tx}`);
+  log(`#${id} : exit quote ${formatEther(BigInt(quote.quote))} ETH; floor set by the guard at the quote minus 3 %, not by the agent: ${signed.length}/2 transactions signed by NEAR in ${secs} s (${burnt})  ${tx}`);
   return { nonce: signed.length ? (parseTransaction(signed[0]).nonce ?? 0) : -1, signed };
 }

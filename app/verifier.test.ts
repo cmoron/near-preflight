@@ -2,7 +2,8 @@
 import { describe, expect, test } from "bun:test";
 import { decodeAbiParameters, encodeFunctionData, keccak256, parseAbi, parseEther, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
-import { checkToken, ROUTER, rpc, specialOf, WETH } from "./verifier";
+import { buildIndex, type Index } from "./index";
+import { checkExit, checkToken, liquidityFindings, ROUTER, rpc, specialOf, WETH, type Holder, type Liquidity, type NearFacts } from "./verifier";
 
 const quoteAbi = parseAbi(["function getAmountsOut(uint256,address[]) view returns (uint256[])"]);
 
@@ -10,7 +11,11 @@ const RPC = process.env.EVM_RPC ?? "http://127.0.0.1:8545";
 /** The guard's EVM address: the one the guard_frozen trap freezes (set by evm/fork.sh). */
 const GUARD_EVM = await specialOf(RPC, tokens.guard_frozen as Address);
 const rand = (): Address => `0x${Buffer.from(crypto.getRandomValues(new Uint8Array(20))).toString("hex")}`;
-const check = (token: string, guard: Address = GUARD_EVM) => checkToken(RPC, token as `0x${string}`, guard, () => ({ buyer: rand(), stranger: rand() }));
+/** Index of every pool the fork setup launched (evm/fork.sh), as the sentinel would load it. */
+const INDEX = await buildIndex(RPC, tokens.fork_block + 1, Number(BigInt(await rpc<Hex>(RPC, "eth_blockNumber", []))));
+const NO_NEAR: NearFacts = { listed: [], previous: null };
+const check = (token: string, guard: Address = GUARD_EVM, index: Index | null = INDEX, near: NearFacts = NO_NEAR) =>
+  checkToken(RPC, token as `0x${string}`, guard, () => ({ buyer: rand(), stranger: rand() }), { index, near: async () => near });
 
 describe("verdict de la sentinelle", () => {
   test("USDC, temoin sain deja sur Base : allow", async () => expect((await check(tokens.usdc)).verdict).toBe("allow"));
@@ -62,6 +67,126 @@ describe("verdict de la sentinelle", () => {
     const r = await check(tokens.sim_detector);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("sale refused in the next block"); // le routeur masque la raison du jeton
+  });
+});
+
+describe("removable liquidity (Uniswap V2 pair of the target)", () => {
+  test("a young pool whose whole LP sits with one EOA: warn, naming the EOA and the removable share", async () => {
+    const r = await check(tokens.lp_held);
+    expect(r.verdict).toBe("warn");
+    expect(r.reasons).toContain("100 % of the LP removable now");
+    expect(r.reasons).toContain("EOA 0x60b1");
+    expect(r.evidence.liquidity?.holders?.some((h) => h.kind === "eoa")).toBe(true);
+  });
+  test("pair created long ago with dust, deep liquidity added within the window: the age is the liquidity's, warn", async () => {
+    const r = await check(tokens.late_liquidity);
+    const l = r.evidence.liquidity!;
+    expect(l.created).toBeNull(); // the pair contract is older than the window
+    expect(BigInt(l.supply_before) * 10n).toBeLessThan(BigInt(l.supply)); // but its liquidity is not
+    expect(r.verdict).toBe("warn");
+    expect(r.reasons).toContain("% of the LP removable now (EOA 0x60b1");
+  });
+  test("a young pool whose LP is burned (0x0, 0xdead): no liquidity finding, allow", async () => {
+    const r = await check(tokens.lp_burned);
+    expect(r.verdict).toBe("allow");
+    expect(r.evidence.liquidity?.holders?.every((h) => h.kind === "burned")).toBe(true);
+  });
+  test("WETH/USDC: at least 90 % of its LP existed 1800 blocks ago, holders not read, allow", async () => {
+    const r = await check(tokens.usdc);
+    expect(r.verdict).toBe("allow");
+    const l = r.evidence.liquidity!;
+    expect(l.holders).toBeNull();
+    expect(BigInt(l.supply_before) * 10n).toBeGreaterThanOrEqual(BigInt(l.supply) * 9n);
+  });
+});
+
+describe("liquidity rule (pure)", () => {
+  const pair = "0x00000000000000000000000000000000000000aa" as Address;
+  const eoa = (a: string, balance: bigint): Holder => ({ address: a as Address, balance: balance.toString(), kind: "eoa" });
+  const burned: Holder = { address: "0x000000000000000000000000000000000000dead", balance: "40", kind: "burned" };
+  const young = (holders: Holder[] | null, candidates = holders?.length ?? 99): Liquidity => ({ pair, supply: "100", supply_before: "0", created: 90, candidates, holders });
+  test("holders that cannot be read (too many candidates): warn, never a pass", () => {
+    expect(liquidityFindings(young(null, 25), 100)[0]).toMatchObject({ level: "warn", text: "pool 10 blocks old: LP spread over 25 addresses, holders not read" });
+  });
+  test("LP not all accounted for by the holders read: warn", () => {
+    expect(liquidityFindings(young([burned]), 100)[0]?.level).toBe("warn");
+  });
+  test("LP split across several EOAs is summed: 60 % removable is a warn", () => {
+    expect(liquidityFindings(young([burned, eoa("0x01", 30n), eoa("0x02", 30n)]), 100)[0]?.text).toContain("60 % of the LP removable now");
+  });
+  test("LP held by a contract (lock terms not read) counts as removable", () => {
+    const locker: Holder = { address: "0x00000000000000000000000000000000000000cc", balance: "60", kind: "contract" };
+    expect(liquidityFindings(young([burned, locker]), 100)[0]?.text).toContain("(contract 0x0000..00cc holds 60 %)");
+  });
+  test("less than half removable: no finding", () => {
+    expect(liquidityFindings(young([{ ...burned, balance: "60" }, eoa("0x01", 40n)]), 100)).toEqual([]);
+  });
+  test("an old pair whose LP grew by more than 10 % within the window is read, not passed on its age", () => {
+    const l: Liquidity = { pair, supply: "100", supply_before: "89", created: null, candidates: 1, holders: [eoa("0x01", 11n)] };
+    expect(liquidityFindings(l, 100)[0]?.text).toContain("11 % of the LP minted in the last 1800 blocks: LP holders not all accounted for");
+  });
+});
+
+describe("template reputation", () => {
+  test("fresh token of a farm template: every simulation step passes, yet block by reputation", async () => {
+    const r = await check(tokens.farm_fresh);
+    const sales = r.evidence.calls.filter((c) => c.includes("buy") || c.includes("sale"));
+    expect(sales.every((c) => c.endsWith(": ok"))).toBe(true);
+    expect(r.verdict).toBe("block");
+    // only the reputation and the removable LP: no simulation finding (tax, sale refused, takeback)
+    expect(r.reasons.split(" ; ").map((f) => f.split(" ")[0])).toEqual(["template", "pool"]);
+    expect(r.reasons).toMatch(/^template 0x[0-9a-f]{4}\.\.[0-9a-f]{4}: 5 of 5 earlier pools drained, median 2 blocks after creation/);
+    expect(r.evidence.reputation).toMatchObject({ pools: 5, drained: 5, median_drain_blocks: 2 });
+  });
+  test("without an index the reputation is unknown: warn, never allow", async () => {
+    const r = await check(tokens.safe, GUARD_EVM, null);
+    expect(r.verdict).toBe("warn");
+    expect(r.reasons).toContain("template reputation not checked");
+  });
+});
+
+describe("shared blocklist and code changes read from NEAR", () => {
+  const listed = (kind: "token" | "code", key: string): NearFacts => ({ listed: [{ kind, key, reporter: "agent-b.testnet", evidence_sha256: "ab".repeat(32) }], previous: null });
+  test("a token listed by another reporter: block, even with a clean simulation", async () => {
+    const r = await check(tokens.usdc, GUARD_EVM, INDEX, listed("token", tokens.usdc.toLowerCase()));
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toStartWith("listed on NEAR by agent-b.testnet (token)");
+    expect(r.evidence.near.listed.length).toBe(1);
+  });
+  test("code changed since the last check (another code hash): warn, the human decides", async () => {
+    const before = { id: 7, code_hash: `0x${"00".repeat(32)}` as const, implementation: null };
+    const r = await check(tokens.lp_burned, GUARD_EVM, INDEX, { listed: [], previous: before });
+    expect(r.verdict).toBe("warn");
+    expect(r.reasons).toContain("code changed since the last check #7");
+  });
+  test("same code as at the last check: no finding", async () => {
+    const first = await check(tokens.lp_burned);
+    const previous = { id: 7, code_hash: first.evidence.code_hash, implementation: first.evidence.implementation };
+    expect((await check(tokens.lp_burned, GUARD_EVM, INDEX, { listed: [], previous })).verdict).toBe("allow");
+  });
+  test("the sentinel asks NEAR about the target and its template", async () => {
+    const asked: string[] = [];
+    await checkToken(RPC, tokens.farm_fresh as Address, GUARD_EVM, () => ({ buyer: rand(), stranger: rand() }), {
+      index: INDEX,
+      near: async (target, template) => (asked.push(target, template), NO_NEAR),
+    });
+    expect(asked[0]).toBe(tokens.farm_fresh as Address);
+    expect(asked[1]).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+});
+
+describe("exit quote (the agent's floor comes from it)", () => {
+  const HOLDER = "0x60B1100000000000000000000000000000000001" as Address; // holds the demo tokens (evm/fork.sh)
+  test("sale of tokens the address holds: allow, quote = WETH out of the simulated sale", async () => {
+    const r = await checkExit(RPC, tokens.lp_burned as Address, HOLDER, parseEther("1000"));
+    expect(r.verdict).toBe("allow");
+    expect(BigInt(r.evidence.quote)).toBeGreaterThan(0n);
+    expect(r.evidence.kind).toBe("exit");
+  });
+  test("sale of more than the address holds: no quote, block (the owner's own exit stays open)", async () => {
+    const r = await checkExit(RPC, tokens.lp_burned as Address, rand(), parseEther("1000"));
+    expect(r.verdict).toBe("block");
+    expect(r.evidence.quote).toBe("0");
   });
 });
 

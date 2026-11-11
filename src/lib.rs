@@ -85,6 +85,36 @@ pub struct Check {
     pub approved: bool,
     /// Transaction EIP-1559 signee par le MPC pour cet achat (base64 en JSON), a diffuser sur Base.
     pub signed_tx: Option<Base64VecU8>,
+    /// The target's code posted with the verdict (none for an exit quote or a fallback block).
+    pub code: Option<Code>,
+    /// An exit quote: tokens to sell (`request_exit`); the quote is then the ETH out, in wei.
+    pub exit_amount: Option<U128>,
+}
+
+/// The target's code as the sentinel read it at the verdict's block: keccak256 of its runtime code
+/// and, behind a proxy, the implementation address (both `0x` + lowercase hex).
+#[near(serializers = [borsh, json])]
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Code {
+    pub code_hash: String,
+    pub implementation: Option<String>,
+}
+
+/// A shared blocklist entry: who listed it, when, and the sha256 of the evidence it rests on.
+#[near(serializers = [borsh, json])]
+pub struct Entry {
+    pub reporter: AccountId,
+    pub at_ns: U64,
+    /// sha256 (64 lowercase hex) of the evidence, kept by the reporter (a proof file for the sentinel).
+    pub evidence_sha256: String,
+    pub note: String,
+}
+
+/// The code a target had at its last verdict, and that verdict's check id.
+#[near(serializers = [json])]
+pub struct LastCode {
+    pub id: u64,
+    pub code: Code,
 }
 
 /// Parametres de l'achat EVM fixes par le proprietaire a l'init ; l'agent n'en choisit aucun.
@@ -139,11 +169,23 @@ pub struct Exit {
     pub signed_txs: Vec<Base64VecU8>,
 }
 
+/// An agent's exit, charged like a buy: `per_tx` yoctoNEAR per transaction (gas at the cap, at the
+/// fixed rate) in escrow until the callback, which keeps what was signed and refunds the rest.
+#[near(serializers = [borsh])]
+struct Charge {
+    agent: AccountId,
+    /// The exit quote used, settled once a transaction is signed.
+    check: u64,
+    per_tx: u128,
+    armed_until_ns: u64,
+}
+
 /// What the single signature slot is waiting for.
 #[near(serializers = [borsh])]
 enum Job {
     Buy(Pending),
-    Exit(Exit),
+    /// An exit, and its charge when an agent asked for it (the owner's exits are not charged).
+    Exit(Exit, Option<Charge>),
 }
 
 /// Reponse de `sign` du contrat MPC (domaine secp256k1).
@@ -171,8 +213,9 @@ const MAX_EVIDENCE: usize = 8_000;
 /// Majorant du stockage d'une demande (cle 9 o, agent <= 64 o, cible 42 o, raisons <= 280 o,
 /// empreinte 64 o, transaction signee <= 396 o, prefixes de longueur, 40 o de surcout par
 /// entree), mesure au pire cas par un test. Le prix doit le couvrir, sinon chaque demande ronge
-/// le solde du contrat.
-const CHECK_STORAGE_BYTES: u128 = 1000;
+/// le solde du contrat. It also covers the code posted with the verdict, the target's `seen` record
+/// and, on a `block`, the blocklist entry the verdict adds.
+const CHECK_STORAGE_BYTES: u128 = 1500;
 /// Duree de validite d'un verdict : la cible peut changer (proprietaire, proxy, liquidite),
 /// un `allow` ancien ne paie donc plus ; l'agent redemande un controle.
 pub const VERDICT_TTL_NS: u64 = 120 * 1_000_000_000;
@@ -185,6 +228,13 @@ const WEEK_NS: u64 = 7 * 24 * 3600 * 1_000_000_000;
 /// entree encore dans la fenetre sous-compterait le cumul, et ne rien borner laisserait l'armeur
 /// faire grossir le stockage du contrat sans fin (un budget de 1 yocto suffit a ajouter une entree).
 const MAX_ARMINGS_7D: usize = 32;
+
+/// Upper bound of one blocklist entry's storage (key `code:0x` + 64 hex, reporter <= 64 bytes, evidence
+/// sha256, note <= `MAX_NOTE`, length prefixes, 40 bytes per record), measured by a test. A reporter's
+/// credit pays it, so reporting cannot eat into the contract's balance.
+const ENTRY_STORAGE_BYTES: u128 = 420;
+/// Longest note on a blocklist entry.
+const MAX_NOTE: usize = 140;
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
@@ -223,11 +273,33 @@ pub struct Guard {
     /// Latest signed exit, overwritten by the next one (bounded storage); earlier ones stay in the
     /// `exit_signed` events.
     last_exit: Option<Exit>,
+    /// Accounts the owner allows to `report` to the blocklist (the sentinel always may).
+    reporters: LookupSet<AccountId>,
+    /// Shared blocklist, keyed `token:0x..` or `code:0x..` (lowercase).
+    blocklist: LookupMap<String, Entry>,
+    /// Per target (lowercase), the check whose verdict saw its code last.
+    seen: LookupMap<String, u64>,
 }
 
 /// Adresse EVM stricte : `0x` + 40 hexadecimaux (42 caracteres, pas un de plus).
 fn is_evm_address(s: &str) -> bool {
     s.len() == 42 && s.starts_with("0x") && s.bytes().skip(2).all(|b| b.is_ascii_hexdigit())
+}
+
+/// `0x` + 64 hexadecimal digits (a 32-byte hash).
+fn is_hash(s: &str) -> bool {
+    s.len() == 66 && s.starts_with("0x") && s.bytes().skip(2).all(|b| b.is_ascii_hexdigit())
+}
+
+/// Blocklist map key `kind:key`, key lowercase: `token` and an EVM address, or `code` and a code hash.
+fn list_key(kind: &str, key: &str) -> String {
+    let valid = match kind {
+        "token" => is_evm_address(key),
+        "code" => is_hash(key),
+        _ => env::panic_str("invalid kind: token or code"),
+    };
+    require!(valid, "invalid key");
+    format!("{kind}:{}", key.to_ascii_lowercase())
 }
 
 /// Signature EVM tiree de la reponse du MPC : r = `big_r` sans son octet de prefixe, v = `recovery_id`,
@@ -346,6 +418,9 @@ impl Guard {
             evm_nonce: 0,
             signing: None,
             last_exit: None,
+            reporters: LookupSet::new(b"r"),
+            blocklist: LookupMap::new(b"l"),
+            seen: LookupMap::new(b"s"),
         }
     }
 
@@ -516,6 +591,37 @@ impl Guard {
             is_evm_address(&target),
             "invalid target: expected 0x + 40 hex digits"
         );
+        require!(
+            !self.blocklist.contains_key(&list_key("token", &target)),
+            "target is on the shared blocklist"
+        );
+        self.new_check(&target, None)
+    }
+
+    /// Exit quote for an agent: asks the sentinel what selling `amount` of the token bought by the
+    /// agent's signed check `buy_id` yields (ETH, in wei). Priced like a check. Only a token the guard
+    /// bought for this agent; a listed or changed token may still be quoted: the exit is never blocked.
+    pub fn request_exit(&mut self, buy_id: u64, amount: U128) -> u64 {
+        let who = env::predecessor_account_id();
+        require!(
+            self.agents.contains(&who) && !self.frozen.contains(&who),
+            "unfrozen registered agent only"
+        );
+        let Some(bought) = self.checks.get(&buy_id) else {
+            env::panic_str("unknown check")
+        };
+        require!(
+            bought.agent == who && bought.exit_amount.is_none() && bought.signed_tx.is_some(),
+            "not a buy signed for this agent"
+        );
+        require!(amount.0 > 0, "zero amount");
+        let target = bought.target.clone();
+        self.new_check(&target, Some(amount))
+    }
+
+    /// Debits the price from the caller and stores a new check of `target` (an exit quote with
+    /// `exit_amount`); returns its id.
+    fn new_check(&mut self, target: &str, exit_amount: Option<U128>) -> u64 {
         let who = env::predecessor_account_id();
         self.debit(&who, self.price);
         self.escrow += self.price;
@@ -524,7 +630,7 @@ impl Guard {
             self.next_id,
             Check {
                 agent: who.clone(),
-                target: target.clone(),
+                target: target.to_owned(),
                 requested_ns: U64(env::block_timestamp()),
                 verdict: None,
                 judged_ns: U64(0),
@@ -534,11 +640,15 @@ impl Guard {
                 settled: false,
                 approved: false,
                 signed_tx: None,
+                code: None,
+                exit_amount,
             },
         );
         emit(
             "check_requested",
-            &near_sdk::serde_json::json!({ "id": self.next_id, "agent": who, "target": target }),
+            &near_sdk::serde_json::json!({
+                "id": self.next_id, "agent": who, "target": target, "exit_amount": exit_amount,
+            }),
         );
         self.next_id
     }
@@ -553,6 +663,7 @@ impl Guard {
         reasons: String,
         evidence: String,
         quote: U128,
+        code: Option<Code>,
     ) {
         require!(
             env::predecessor_account_id() == self.sentinel,
@@ -564,16 +675,54 @@ impl Guard {
             verdict != Verdict::Allow || quote.0 > 0,
             "allow without a quote"
         );
-        let Some(check) = self.checks.get_mut(&id) else {
+        let Some(check) = self.checks.get(&id) else {
             env::panic_str("unknown check")
         };
         require!(check.verdict.is_none(), "verdict already posted");
         require!(!check.settled, "check already settled");
+        let target = check.target.to_ascii_lowercase();
+        let exit = check.exit_amount.is_some();
+        let code = code.map(|c| {
+            require!(is_hash(&c.code_hash), "invalid code hash");
+            require!(
+                c.implementation.as_deref().is_none_or(is_evm_address),
+                "invalid implementation"
+            );
+            Code {
+                code_hash: c.code_hash.to_ascii_lowercase(),
+                implementation: c.implementation.map(|i| i.to_ascii_lowercase()),
+            }
+        });
+        // Code changed since the last verdict on this target: at most warn, the human decides.
+        if !exit {
+            if let Some(code) = &code {
+                let previous = self
+                    .seen
+                    .get(&target)
+                    .and_then(|last| self.checks.get(last))
+                    .and_then(|c| c.code.as_ref());
+                require!(
+                    verdict != Verdict::Allow || previous.is_none_or(|p| p == code),
+                    "code changed since the last check: at most warn"
+                );
+                self.seen.insert(target.clone(), id);
+            } else {
+                require!(
+                    verdict == Verdict::Block,
+                    "allow or warn without the target's code"
+                );
+            }
+        }
+        let evidence_sha256 = hex(&env::sha256(evidence.as_bytes()));
+        let Some(check) = self.checks.get_mut(&id) else {
+            env::panic_str("unknown check")
+        };
         check.verdict = Some(verdict);
         check.judged_ns = U64(env::block_timestamp());
         check.reasons.clone_from(&reasons);
-        check.evidence_sha256 = hex(&env::sha256(evidence.as_bytes()));
+        check.evidence_sha256.clone_from(&evidence_sha256);
         check.quote = quote;
+        check.code = code;
         self.escrow -= self.price;
         self.fees += self.price;
         emit(
@@ -582,6 +731,17 @@ impl Guard {
                 "id": id, "verdict": verdict, "reasons": reasons, "evidence": evidence, "quote": quote,
             }),
         );
+        // Every block of a buy check lists its target, unless already listed (the first entry stays).
+        let key = format!("token:{target}");
+        if verdict == Verdict::Block && !exit && !self.blocklist.contains_key(&key) {
+            let entry = Entry {
+                reporter: self.sentinel.clone(),
+                at_ns: U64(env::block_timestamp()),
+                evidence_sha256,
+                note: format!("verdict #{id}"),
+            };
+            self.list(key, entry);
+        }
     }
 
     /// Achat sur Base signe par NEAR, sur un verdict `allow` non perime de cette demande : la garde
@@ -608,6 +768,16 @@ impl Guard {
         require!(
             env::block_timestamp() < check.judged_ns.0.saturating_add(VERDICT_TTL_NS),
             "verdict expired"
+        );
+        require!(
+            check.exit_amount.is_none(),
+            "an exit quote is not a buy verdict"
+        );
+        require!(
+            !self
+                .blocklist
+                .contains_key(&list_key("token", &check.target)),
+            "target is on the shared blocklist"
         );
         require!(amount_wei.0 > 0, "zero amount");
         let target = check.target.clone();
@@ -652,23 +822,70 @@ impl Guard {
         )
     }
 
-    /// Exit signed by NEAR: sells `amount` of `token` held by the guard's EVM address for ETH,
-    /// back to that address (approve of the router, then the swap: two signatures, two nonces).
-    /// No verdict and no budget: a token that turned bad must never trap the exit. Callable by the
-    /// owner, always, and by registered agents that are not frozen: the emergency freeze stops the
-    /// agent's sales too (the owner still exits). `min_out_wei` is the caller's own floor.
+    /// The owner's exit, signed by NEAR: sells `amount` of `token` held by the guard's EVM address
+    /// for ETH, back to that address (approve of the router, then the swap: two signatures, two
+    /// nonces). No verdict, no quote, no budget, any token, listed or not, frozen agent or not: the
+    /// human can always get out. `min_out_wei` is the owner's own floor. Agents use `sell_quoted`.
     pub fn sell(&mut self, token: String, amount: U128, min_out_wei: U128) -> Promise {
-        let by = env::predecessor_account_id();
-        require!(
-            by == self.owner || (self.agents.contains(&by) && !self.frozen.contains(&by)),
-            "owner or unfrozen registered agent only"
-        );
+        self.assert_owner();
         require!(
             is_evm_address(&token),
             "invalid token: expected 0x + 40 hex digits"
         );
         require!(amount.0 > 0, "zero amount");
-        self.start_exit(by, Some(token), amount, min_out_wei)
+        self.start_exit(self.owner.clone(), Some(token), amount, min_out_wei, None)
+    }
+
+    /// An agent's exit on the sentinel's exit quote `id` (`request_exit`), within 120 s of it, once:
+    /// the floor is the quoted ETH out minus the owner's slippage bound, never the agent's choice. Two
+    /// transactions at the gas cap are charged to the armed budget and credit, like a buy; never
+    /// refused because the token was listed or its code changed.
+    pub fn sell_quoted(&mut self, id: u64) -> Promise {
+        require!(self.signing.is_none(), "a signature is already in progress");
+        let who = env::predecessor_account_id();
+        require!(
+            self.agents.contains(&who) && !self.frozen.contains(&who),
+            "unfrozen registered agent only"
+        );
+        let Some(check) = self.checks.get(&id) else {
+            env::panic_str("unknown check")
+        };
+        require!(check.agent == who, "check belongs to another agent");
+        let Some(amount) = check.exit_amount else {
+            env::panic_str("not an exit quote")
+        };
+        require!(!check.settled, "check already settled");
+        require!(
+            check.verdict == Some(Verdict::Allow),
+            "no exit quote: the sentinel found no sale"
+        );
+        require!(
+            env::block_timestamp() < check.judged_ns.0.saturating_add(VERDICT_TTL_NS),
+            "verdict expired"
+        );
+        let Some(floor) = min_out(check.quote.0, QUOTE_WEI, self.evm.max_slippage_bps) else {
+            env::panic_str("quote too large")
+        };
+        require!(floor > 0, "minimum output rounds to zero");
+        let token = check.target.clone();
+        let Some(per_tx) = u128::from(self.evm.gas_limit)
+            .checked_mul(self.evm.max_fee_per_gas.0)
+            .and_then(|wei| wei.checked_mul(self.evm.yocto_per_wei.0))
+        else {
+            env::panic_str("gas cost too large")
+        };
+        let Some(cost) = per_tx.checked_mul(2) else {
+            env::panic_str("gas cost too large")
+        };
+        self.debit(&who, cost);
+        self.escrow += cost;
+        let charge = Charge {
+            agent: who.clone(),
+            check: id,
+            per_tx,
+            armed_until_ns: self.budgets.get(&who).map_or(0, |b| b.expires_ns),
+        };
+        self.start_exit(who, Some(token), amount, U128(floor), Some(charge))
     }
 
     /// Owner only: sends `amount_wei` from the guard's EVM address to `evm.withdraw_to`, fixed at
@@ -676,7 +893,7 @@ impl Guard {
     pub fn withdraw_eth(&mut self, amount_wei: U128) -> Promise {
         self.assert_owner();
         require!(amount_wei.0 > 0, "zero amount");
-        self.start_exit(self.owner.clone(), None, amount_wei, U128(0))
+        self.start_exit(self.owner.clone(), None, amount_wei, U128(0), None)
     }
 
     fn start_exit(
@@ -685,6 +902,7 @@ impl Guard {
         token: Option<String>,
         amount: U128,
         min_out: U128,
+        charge: Option<Charge>,
     ) -> Promise {
         require!(self.signing.is_none(), "a signature is already in progress");
         let exit = Exit {
@@ -705,10 +923,10 @@ impl Guard {
             "exit_requested",
             &near_sdk::serde_json::json!({
                 "by": exit.by, "token": exit.token, "amount": exit.amount, "min_out": exit.min_out,
-                "nonce": exit.nonce, "hashes": hashes,
+                "nonce": exit.nonce, "hashes": hashes, "check": charge.as_ref().map(|c| c.check),
             }),
         );
-        self.signing = Some(Job::Exit(exit));
+        self.signing = Some(Job::Exit(exit, charge));
         self.sign_all(
             &txs,
             Self::ext(env::current_account_id())
@@ -743,11 +961,12 @@ impl Guard {
     /// nonce by that many and stores them as `last_exit`. Never panics after taking the job.
     #[private]
     pub fn on_exit_signed(&mut self) -> Vec<String> {
-        let Some(Job::Exit(mut exit)) = self.signing.take() else {
+        let Some(Job::Exit(mut exit, charge)) = self.signing.take() else {
             env::panic_str("no exit signature in progress")
         };
+        let txs = self.exit_txs(&exit);
         let mut signed = vec![];
-        for (i, tx) in (0u64..).zip(self.exit_txs(&exit)) {
+        for (i, tx) in (0u64..).zip(txs.iter()) {
             let signature = env::promise_result_checked(i, MAX_SIGN_RESPONSE)
                 .ok()
                 .and_then(|bytes| parse_signature(&bytes));
@@ -762,6 +981,15 @@ impl Guard {
             }),
         );
         self.evm_nonce += signed.len() as u64;
+        if let Some(c) = charge {
+            let (all, done) = (txs.len() as u128, signed.len() as u128);
+            self.escrow -= c.per_tx * all;
+            self.fees += c.per_tx * done;
+            self.refund(&c.agent, c.per_tx * (all - done), c.armed_until_ns);
+            if let Some(check) = self.checks.get_mut(&c.check).filter(|_| done > 0) {
+                check.settled = true;
+            }
+        }
         if !signed.is_empty() {
             exit.signed_txs = signed.into_iter().map(Into::into).collect();
             self.last_exit = Some(exit);
@@ -818,15 +1046,7 @@ impl Guard {
             .ok()
             .and_then(|bytes| parse_signature(&bytes));
         let Some(signature) = signature else {
-            let credit = self.credit_of(&p.agent).0;
-            self.credits.insert(p.agent.clone(), credit + p.cost);
-            if let Some(budget) = self
-                .budgets
-                .get_mut(&p.agent)
-                .filter(|b| b.expires_ns == p.armed_until_ns)
-            {
-                budget.remaining += p.cost;
-            }
+            self.refund(&p.agent, p.cost, p.armed_until_ns);
             emit(
                 "sign_failed",
                 &near_sdk::serde_json::json!({ "id": p.id, "agent": p.agent }),
@@ -1022,6 +1242,120 @@ impl Guard {
         );
     }
 
+    /// Owner only: allows or revokes `account` as a reporter to the shared blocklist.
+    #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
+    pub fn set_reporter(&mut self, account: AccountId, allowed: bool) {
+        self.assert_owner();
+        if allowed {
+            self.reporters.insert(account.clone());
+        } else {
+            self.reporters.remove(&account);
+        }
+        emit(
+            "reporter_set",
+            &near_sdk::serde_json::json!({ "account": account, "allowed": allowed }),
+        );
+    }
+
+    /// Lists `key` (`kind` `token`: an EVM address, `code`: a code template hash) on the shared
+    /// blocklist with the sha256 of the evidence and a note; reporters registered by the owner and
+    /// the sentinel only. The entry's storage is paid from the reporter's credit (`deposit_credit`),
+    /// so a reporter spends its own deposit, never the contract's balance. An entry is never
+    /// overwritten; only the owner removes one.
+    #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
+    pub fn report(&mut self, kind: String, key: String, evidence_sha256: String, note: String) {
+        let who = env::predecessor_account_id();
+        require!(
+            who == self.sentinel || self.reporters.contains(&who),
+            "reporter only"
+        );
+        let map_key = list_key(&kind, &key);
+        require!(
+            evidence_sha256.len() == 64
+                && evidence_sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "invalid evidence sha256: 64 lowercase hex digits"
+        );
+        require!(note.len() <= MAX_NOTE, "note too long");
+        require!(!self.blocklist.contains_key(&map_key), "already listed");
+        let cost = ENTRY_STORAGE_BYTES * env::storage_byte_cost().as_yoctonear();
+        let credit = self.credit_of(&who).0;
+        require!(
+            credit >= cost,
+            "insufficient credit for the entry's storage"
+        );
+        self.credits.insert(who.clone(), credit - cost);
+        self.fees += cost;
+        let entry = Entry {
+            reporter: who,
+            at_ns: U64(env::block_timestamp()),
+            evidence_sha256,
+            note,
+        };
+        self.list(map_key, entry);
+    }
+
+    /// Owner only: removes an entry from the blocklist.
+    #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
+    pub fn unlist(&mut self, kind: String, key: String) {
+        self.assert_owner();
+        let map_key = list_key(&kind, &key);
+        require!(self.blocklist.remove(&map_key).is_some(), "not listed");
+        emit(
+            "unlisted",
+            &near_sdk::serde_json::json!({
+                "kind": kind, "key": key.to_ascii_lowercase(), "by": self.owner,
+            }),
+        );
+    }
+
+    /// The blocklist entry of `key` (`kind` `token` or `code`), if listed.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
+    pub fn get_entry(&self, kind: String, key: String) -> Option<&Entry> {
+        self.blocklist.get(&list_key(&kind, &key))
+    }
+
+    /// The code `target` had at its last verdict, and that verdict's check id.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
+    pub fn last_code(&self, target: String) -> Option<LastCode> {
+        let id = *self.seen.get(&target.to_ascii_lowercase())?;
+        let code = self.checks.get(&id)?.code.clone()?;
+        Some(LastCode { id, code })
+    }
+
+    /// Stores a blocklist entry under `map_key` (`kind:key`) and emits `listed`.
+    fn list(&mut self, map_key: String, entry: Entry) {
+        let (kind, key) = map_key.split_once(':').unwrap_or_default();
+        emit(
+            "listed",
+            &near_sdk::serde_json::json!({
+                "kind": kind, "key": key, "reporter": entry.reporter,
+                "evidence_sha256": entry.evidence_sha256, "note": entry.note,
+            }),
+        );
+        self.blocklist.insert(map_key, entry);
+    }
+
+    /// Gives `amount` back to `agent`'s credit, and to its budget if it is still the arming that
+    /// was debited (`armed_until_ns`): a re-arming in between is never topped up.
+    fn refund(&mut self, agent: &AccountId, amount: u128, armed_until_ns: u64) {
+        if amount == 0 {
+            return;
+        }
+        let credit = self.credit_of(agent).0;
+        self.credits.insert(agent.clone(), credit + amount);
+        if let Some(budget) = self
+            .budgets
+            .get_mut(agent)
+            .filter(|b| b.expires_ns == armed_until_ns)
+        {
+            budget.remaining += amount;
+        }
+    }
+
     fn assert_owner(&self) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
     }
@@ -1034,9 +1368,9 @@ mod tests {
     use near_sdk::test_utils::{get_created_receipts, get_logs, VMContextBuilder};
     use near_sdk::{testing_env, NearToken, PromiseResult};
 
-    /// Unite des montants de test : PRICE = 0,01 NEAR, assez pour le stockage d'une demande.
+    /// Unite des montants de test : PRICE = 0,015 NEAR, assez pour le stockage d'une demande.
     const U: u128 = 1_000_000_000_000_000_000_000;
-    const PRICE: u128 = 10 * U;
+    const PRICE: u128 = 15 * U;
     const ONE_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
     const SEC: u64 = 1_000_000_000;
     const TARGET: &str = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
@@ -1050,6 +1384,15 @@ mod tests {
 
     fn id(s: &str) -> AccountId {
         s.parse().unwrap()
+    }
+
+    /// Code of the target as posted with a verdict: keccak256 `0x` + `b` x 32, no proxy.
+    #[allow(clippy::unnecessary_wraps)] // the verdict's `code` argument
+    fn code(b: &str) -> Option<Code> {
+        Some(Code {
+            code_hash: format!("0x{}", b.repeat(32)),
+            implementation: None,
+        })
     }
 
     /// Gaz 250 000 a 0,05 gwei au plus, pourboire 0,001 gwei.
@@ -1149,7 +1492,7 @@ mod tests {
         ctx("agent.test", 0, 500);
         assert_eq!(g.request_check(TARGET.into()), 1);
         assert_eq!(g.credit_of(&id("agent.test")).0, before - PRICE);
-        assert_eq!(g.budget_left(&id("agent.test")).0, 90 * U);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 100 * U - PRICE);
     }
 
     #[test]
@@ -1484,8 +1827,22 @@ mod tests {
         let a = g.request_check(TARGET.into());
         let b = g.request_check(TARGET.into());
         ctx("sentinel.test", 0, 500);
-        g.post_verdict(a, Verdict::Allow, String::new(), String::new(), U128(QUOTE));
-        g.post_verdict(b, Verdict::Block, String::new(), String::new(), U128(QUOTE));
+        g.post_verdict(
+            a,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+            code("aa"),
+        );
+        g.post_verdict(
+            b,
+            Verdict::Block,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+            code("aa"),
+        );
         assert_eq!(g.fees(), U128(2 * PRICE));
         ctx("owner.test", 0, 500);
         let _ = g.withdraw_fees(U128(15 * U));
@@ -1499,7 +1856,14 @@ mod tests {
         ctx("agent.test", 0, 500);
         let a = g.request_check(TARGET.into());
         ctx("sentinel.test", 0, 500);
-        g.post_verdict(a, Verdict::Allow, String::new(), String::new(), U128(QUOTE));
+        g.post_verdict(
+            a,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+            code("aa"),
+        );
         ctx("owner.test", 0, 500);
         let _ = g.withdraw_fees(U128(PRICE + 1));
     }
@@ -1547,11 +1911,12 @@ mod tests {
             "reprise par transferFrom".into(),
             "{\"block\":1}".into(),
             U128(QUOTE),
+            code("aa"),
         );
         let c = g.get_check(check).unwrap();
         assert_eq!(c.verdict, Some(Verdict::Block));
         assert_eq!(c.reasons, "reprise par transferFrom");
-        let v = last_event();
+        let v = &events()[0]; // then `listed`: a block lists its target
         assert_eq!(v["event"], "verdict_posted");
         assert_eq!(v["data"][0]["id"], 1);
         assert_eq!(v["data"][0]["verdict"], "block");
@@ -1570,6 +1935,7 @@ mod tests {
             String::new(),
             String::new(),
             U128(QUOTE),
+            code("aa"),
         );
     }
 
@@ -1586,6 +1952,7 @@ mod tests {
             String::new(),
             String::new(),
             U128(QUOTE),
+            code("aa"),
         );
         g.post_verdict(
             check,
@@ -1593,6 +1960,7 @@ mod tests {
             String::new(),
             String::new(),
             U128(QUOTE),
+            code("aa"),
         );
     }
 
@@ -1620,7 +1988,14 @@ mod tests {
         ctx("agent.test", 0, 500);
         let check = g.request_check(TARGET.into());
         ctx("sentinel.test", 0, 600);
-        g.post_verdict(check, verdict, String::new(), String::new(), U128(QUOTE));
+        g.post_verdict(
+            check,
+            verdict,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+            code("aa"),
+        );
         ctx("agent.test", 0, 700);
         (g, check)
     }
@@ -1936,6 +2311,7 @@ mod tests {
             String::new(),
             String::new(),
             U128(QUOTE),
+            code("aa"),
         );
         assert_eq!(g.get_check(check).unwrap().quote, U128(QUOTE));
         let v = last_event();
@@ -1948,14 +2324,28 @@ mod tests {
     fn un_allow_sans_devis_est_refuse() {
         let (mut g, check) = pending();
         ctx("sentinel.test", 0, 1);
-        g.post_verdict(check, Verdict::Allow, String::new(), String::new(), U128(0));
+        g.post_verdict(
+            check,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(0),
+            code("aa"),
+        );
     }
 
     #[test]
     fn un_block_sans_devis_est_accepte() {
         let (mut g, check) = pending();
         ctx("sentinel.test", 0, 1);
-        g.post_verdict(check, Verdict::Block, String::new(), String::new(), U128(0));
+        g.post_verdict(
+            check,
+            Verdict::Block,
+            String::new(),
+            String::new(),
+            U128(0),
+            code("aa"),
+        );
         assert_eq!(g.get_check(check).unwrap().verdict, Some(Verdict::Block));
     }
 
@@ -2293,6 +2683,7 @@ mod tests {
             String::new(),
             String::new(),
             U128(QUOTE),
+            code("aa"),
         );
         ctx("agent.test", 0, VERDICT_TIMEOUT_NS);
         g.refund_check(check);
@@ -2320,6 +2711,7 @@ mod tests {
             String::new(),
             String::new(),
             U128(QUOTE),
+            code("aa"),
         );
     }
 
@@ -2352,6 +2744,7 @@ mod tests {
             String::new(),
             "abc".into(),
             U128(QUOTE),
+            code("aa"),
         );
         let v = near_sdk::serde_json::to_value(g.get_check(check).unwrap()).unwrap();
         assert_eq!(
@@ -2393,15 +2786,19 @@ mod tests {
             "r".repeat(MAX_REASONS),
             "e".repeat(MAX_EVIDENCE),
             U128(QUOTE),
+            proxy("11"), // code with a proxy implementation; a block also writes `seen` and a listing
         );
         // Transaction signee la plus longue : type 1, en-tete de liste 3, chain id 3, nonce 9,
         // frais 17 + 17, gaz 9, routeur 21, valeur 17, donnees 3 + 228, acces 1, v 1, r 33, s 33.
         let check = g.checks.get_mut(&check).unwrap();
         check.signed_tx = Some(vec![0xff; 396].into());
         check.settled = true;
+        check.exit_amount = Some(U128(u128::MAX));
         g.checks.flush();
         g.credits.flush();
         g.budgets.flush();
+        g.seen.flush();
+        g.blocklist.flush();
         let used = u128::from(env::storage_usage() - before);
         assert!(
             used > 0 && used <= CHECK_STORAGE_BYTES,
@@ -2419,6 +2816,7 @@ mod tests {
             String::new(),
             String::new(),
             U128(QUOTE),
+            code("aa"),
         );
         assert_eq!(g.fees(), U128(PRICE));
     }
@@ -2469,6 +2867,7 @@ mod tests {
             String::new(),
             String::new(),
             U128(QUOTE),
+            code("aa"),
         );
         (g, check)
     }
@@ -2572,8 +2971,8 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_sells_without_verdict_or_budget_approve_then_swap_signed() {
-        let mut g = sell_as("agent.test");
+    fn the_owner_sells_without_verdict_or_budget_approve_then_swap_signed() {
+        let mut g = sell_as("owner.test");
         assert_eq!(signed_hashes(b"on_exit_signed"), [APPROVE_HASH, SELL_HASH]);
         let raw = exit_signed(&mut g, vec![ok_sig(SIG_A), ok_sig(SIG_B)]);
         assert_eq!(raw, [APPROVE_RAW, SELL_RAW]);
@@ -2588,14 +2987,14 @@ mod tests {
         assert_eq!(stored, [APPROVE_RAW, SELL_RAW]);
         let v = last_event();
         assert_eq!(v["event"], "exit_signed");
-        assert_eq!(v["data"][0]["by"], "agent.test");
+        assert_eq!(v["data"][0]["by"], "owner.test");
         assert_eq!(v["data"][0]["nonce"], 0);
     }
 
     // nonces stay contiguous: a swap without its approve is never kept
     #[test]
     fn a_failed_swap_signature_keeps_the_approve_only() {
-        let mut g = sell_as("agent.test");
+        let mut g = sell_as("owner.test");
         assert_eq!(
             exit_signed(&mut g, vec![ok_sig(SIG_A), PromiseResult::Failed]),
             [APPROVE_RAW]
@@ -2605,11 +3004,11 @@ mod tests {
 
     #[test]
     fn a_failed_approve_signature_keeps_nothing_and_frees_the_lock() {
-        let mut g = sell_as("agent.test");
+        let mut g = sell_as("owner.test");
         assert!(exit_signed(&mut g, vec![PromiseResult::Failed, ok_sig(SIG_B)]).is_empty());
         assert_eq!(g.evm_nonce, 0);
         assert!(g.last_exit().is_none());
-        ctx("agent.test", 0, 900);
+        ctx("owner.test", 0, 900);
         let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN));
         assert_eq!(signed_hashes(b"on_exit_signed"), [APPROVE_HASH, SELL_HASH]);
     }
@@ -2617,7 +3016,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "a signature is already in progress")]
     fn a_sale_takes_the_single_signature_lock() {
-        let mut g = sell_as("agent.test");
+        let mut g = sell_as("owner.test");
         let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN));
     }
 
@@ -2625,19 +3024,19 @@ mod tests {
     #[should_panic(expected = "a signature is already in progress")]
     fn no_buy_while_a_sale_is_being_signed() {
         let (mut g, check) = judged(Verdict::Allow);
+        ctx("owner.test", 0, 700);
         let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN));
+        ctx("agent.test", 0, 700);
         buy(&mut g, check);
     }
 
-    // the emergency freeze stops the agent's sales too; the owner's exit is never blocked
+    // an agent never chooses its exit floor: it sells only on a sentinel exit quote (sell_quoted)
     #[test]
-    #[should_panic(expected = "owner or unfrozen registered agent only")]
-    fn a_frozen_agent_cannot_sell() {
+    #[should_panic(expected = "owner only")]
+    fn an_agent_cannot_sell_at_a_floor_of_its_choice() {
         let mut g = funded(ONE_NEAR, 10 * U, 1000);
-        ctx("owner.test", 0, 0);
-        g.disarm(id("agent.test"));
         ctx("agent.test", 0, 700);
-        let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN));
+        let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(0));
     }
 
     #[test]
@@ -2651,7 +3050,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "owner or unfrozen registered agent only")]
+    #[should_panic(expected = "owner only")]
     fn an_unregistered_account_cannot_sell() {
         let _ = sell_as("intrus.test");
     }
@@ -2660,7 +3059,7 @@ mod tests {
     #[should_panic(expected = "invalid token")]
     fn a_sale_needs_a_valid_token_address() {
         let mut g = credited(ONE_NEAR, 100 * U, 1000, 1000 * U);
-        ctx("agent.test", 0, 700);
+        ctx("owner.test", 0, 700);
         let _ = g.sell("0xabc".into(), U128(SELL_AMOUNT), U128(SELL_MIN));
     }
 
@@ -2681,5 +3080,490 @@ mod tests {
         let mut g = funded(ONE_NEAR, 10 * U, 1000);
         ctx("agent.test", 0, 700);
         let _ = g.withdraw_eth(U128(1));
+    }
+
+    // 14. code changed since the last check: at most warn, the human decides
+    /// A check of `TARGET` requested at `now_ns`, judged by the sentinel 1 ns later with `code`.
+    fn verdict_on(g: &mut Guard, verdict: Verdict, code: Option<Code>, now_ns: u64) -> u64 {
+        ctx("agent.test", 0, now_ns);
+        let check = g.request_check(TARGET.into());
+        ctx("sentinel.test", 0, now_ns + 1);
+        g.post_verdict(
+            check,
+            verdict,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+            code,
+        );
+        check
+    }
+
+    #[allow(clippy::unnecessary_wraps)] // the verdict's `code` argument
+    fn proxy(implementation: &str) -> Option<Code> {
+        Some(Code {
+            code_hash: format!("0x{}", "aa".repeat(32)),
+            implementation: Some(format!("0x{}", implementation.repeat(20))),
+        })
+    }
+
+    #[test]
+    fn the_code_seen_at_the_last_verdict_is_remembered_per_target() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        assert!(g.last_code(TARGET.into()).is_none());
+        verdict_on(&mut g, Verdict::Allow, code("aa"), 10);
+        let second = verdict_on(&mut g, Verdict::Allow, code("aa"), 20);
+        let last = g.last_code(TARGET.to_lowercase()).unwrap();
+        assert_eq!(last.id, second);
+        assert_eq!(Some(last.code), code("aa"));
+    }
+
+    #[test]
+    #[should_panic(expected = "code changed since the last check")]
+    fn an_allow_on_changed_code_is_refused() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        verdict_on(&mut g, Verdict::Allow, code("aa"), 10);
+        verdict_on(&mut g, Verdict::Allow, code("bb"), 20);
+    }
+
+    #[test]
+    #[should_panic(expected = "code changed since the last check")]
+    fn a_new_proxy_implementation_is_a_code_change() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        verdict_on(&mut g, Verdict::Allow, proxy("11"), 10);
+        verdict_on(&mut g, Verdict::Allow, proxy("22"), 20);
+    }
+
+    #[test]
+    fn a_warn_on_changed_code_stands_and_the_human_can_approve_it() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        verdict_on(&mut g, Verdict::Allow, code("aa"), 10);
+        let check = verdict_on(&mut g, Verdict::Warn, code("bb"), 20);
+        ctx("owner.test", 0, 30);
+        g.approve_warn(check);
+        assert!(g.get_check(check).unwrap().approved);
+        assert_eq!(g.last_code(TARGET.into()).unwrap().id, check); // the new code is the reference now
+    }
+
+    #[test]
+    #[should_panic(expected = "allow or warn without the target's code")]
+    fn an_allow_without_the_code_is_refused() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        verdict_on(&mut g, Verdict::Allow, None, 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid code hash")]
+    fn a_malformed_code_hash_is_refused() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        let bad = Code {
+            code_hash: "0x12".into(),
+            implementation: None,
+        };
+        verdict_on(&mut g, Verdict::Allow, Some(bad), 10);
+    }
+
+    // 15. shared blocklist: reporters registered by the owner, evidence sha256 attached, storage paid
+    // by the reporter's credit; every block verdict lists its target; buy refuses a listed target
+    const SHA: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    /// sha256 of the empty string: the evidence posted by `verdict_on`.
+    const SHA_EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    /// Agent funded and armed; `reporter.test` registered by the owner, `credit` deposited for it.
+    fn with_reporter(credit: u128) -> Guard {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        ctx("owner.test", 0, 0);
+        g.set_reporter(id("reporter.test"), true);
+        ctx("owner.test", credit, 0);
+        g.deposit_credit(Some(id("reporter.test")));
+        g
+    }
+
+    fn report_as(g: &mut Guard, who: &str, kind: &str, key: &str) {
+        ctx(who, 0, 50);
+        g.report(
+            kind.into(),
+            key.into(),
+            SHA.into(),
+            "honeypot seen by agent B".into(),
+        );
+    }
+
+    #[test]
+    fn a_registered_reporter_lists_a_token_with_its_evidence_and_pays_the_storage() {
+        let mut g = with_reporter(ONE_NEAR);
+        let credit = g.credit_of(&id("reporter.test")).0;
+        let fees = g.fees().0;
+        report_as(&mut g, "reporter.test", "token", TARGET);
+        let e = g.get_entry("token".into(), TARGET.to_lowercase()).unwrap();
+        assert_eq!(e.reporter, id("reporter.test"));
+        assert_eq!(e.evidence_sha256, SHA);
+        assert_eq!(e.at_ns, U64(50));
+        assert_eq!(e.note, "honeypot seen by agent B");
+        let cost = ENTRY_STORAGE_BYTES * env::storage_byte_cost().as_yoctonear();
+        assert_eq!(g.credit_of(&id("reporter.test")).0, credit - cost);
+        assert_eq!(g.fees().0, fees + cost);
+        let v = last_event();
+        assert_eq!(v["event"], "listed");
+        assert_eq!(v["data"][0]["kind"], "token");
+        assert_eq!(v["data"][0]["key"], TARGET.to_lowercase());
+        assert_eq!(v["data"][0]["reporter"], "reporter.test");
+        assert_eq!(v["data"][0]["evidence_sha256"], SHA);
+    }
+
+    #[test]
+    fn a_code_hash_can_be_listed() {
+        let mut g = with_reporter(ONE_NEAR);
+        let key = format!("0x{}", "AB".repeat(32));
+        report_as(&mut g, "reporter.test", "code", &key);
+        assert!(g.get_entry("code".into(), key.to_lowercase()).is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "reporter only")]
+    fn an_unregistered_account_cannot_report() {
+        let mut g = with_reporter(ONE_NEAR);
+        report_as(&mut g, "agent.test", "token", TARGET);
+    }
+
+    #[test]
+    #[should_panic(expected = "reporter only")]
+    fn a_revoked_reporter_cannot_report() {
+        let mut g = with_reporter(ONE_NEAR);
+        ctx("owner.test", 0, 10);
+        g.set_reporter(id("reporter.test"), false);
+        report_as(&mut g, "reporter.test", "token", TARGET);
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn only_the_owner_registers_reporters() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        ctx("agent.test", 0, 0);
+        g.set_reporter(id("agent.test"), true);
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient credit for the entry's storage")]
+    fn a_report_needs_credit_for_its_storage() {
+        let mut g = with_reporter(2 * U); // about 1 U of credit left after the credit entry's own storage
+        report_as(&mut g, "reporter.test", "token", TARGET);
+    }
+
+    #[test]
+    #[should_panic(expected = "already listed")]
+    fn an_entry_is_never_overwritten() {
+        let mut g = with_reporter(ONE_NEAR);
+        report_as(&mut g, "reporter.test", "token", TARGET);
+        report_as(&mut g, "reporter.test", "token", &TARGET.to_lowercase());
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid kind")]
+    fn a_report_needs_a_known_kind() {
+        let mut g = with_reporter(ONE_NEAR);
+        report_as(&mut g, "reporter.test", "wallet", TARGET);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid key")]
+    fn a_report_needs_a_valid_key() {
+        let mut g = with_reporter(ONE_NEAR);
+        report_as(&mut g, "reporter.test", "code", TARGET);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid evidence sha256")]
+    fn a_report_needs_an_evidence_sha256() {
+        let mut g = with_reporter(ONE_NEAR);
+        ctx("reporter.test", 0, 50);
+        g.report("token".into(), TARGET.into(), "abc".into(), String::new());
+    }
+
+    #[test]
+    fn the_owner_unlists_an_entry_with_an_event() {
+        let mut g = with_reporter(ONE_NEAR);
+        report_as(&mut g, "reporter.test", "token", TARGET);
+        ctx("owner.test", 0, 60);
+        g.unlist("token".into(), TARGET.into());
+        assert!(g.get_entry("token".into(), TARGET.into()).is_none());
+        let v = last_event();
+        assert_eq!(v["event"], "unlisted");
+        assert_eq!(v["data"][0]["key"], TARGET.to_lowercase());
+        assert_eq!(v["data"][0]["by"], "owner.test");
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn a_reporter_cannot_unlist() {
+        let mut g = with_reporter(ONE_NEAR);
+        report_as(&mut g, "reporter.test", "token", TARGET);
+        ctx("reporter.test", 0, 60);
+        g.unlist("token".into(), TARGET.into());
+    }
+
+    #[test]
+    fn a_block_verdict_lists_its_target_automatically() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        let check = verdict_on(&mut g, Verdict::Block, None, 10);
+        let e = g.get_entry("token".into(), TARGET.into()).unwrap();
+        assert_eq!(e.reporter, id("sentinel.test"));
+        assert_eq!(e.evidence_sha256, SHA_EMPTY);
+        assert_eq!(e.note, format!("verdict #{check}"));
+        assert_eq!(last_event()["event"], "listed");
+    }
+
+    #[test]
+    fn a_block_on_a_listed_target_keeps_the_first_entry() {
+        let mut g = with_reporter(ONE_NEAR);
+        report_as(&mut g, "reporter.test", "token", TARGET);
+        ctx("agent.test", 0, 60);
+        // the request is refused once listed: judge one made before the listing
+        let mut g2 = funded(ONE_NEAR, 100 * U, 1000);
+        ctx("agent.test", 0, 10);
+        let check = g2.request_check(TARGET.into());
+        verdict_on(&mut g2, Verdict::Block, None, 20);
+        ctx("sentinel.test", 0, 30);
+        g2.post_verdict(
+            check,
+            Verdict::Block,
+            String::new(),
+            "second".into(),
+            U128(0),
+            None,
+        );
+        assert_eq!(
+            g2.get_entry("token".into(), TARGET.into()).unwrap().note,
+            "verdict #2"
+        );
+        assert!(g.get_entry("token".into(), TARGET.into()).is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "target is on the shared blocklist")]
+    fn a_listed_target_cannot_be_checked_for_a_buy() {
+        let mut g = with_reporter(ONE_NEAR);
+        report_as(&mut g, "reporter.test", "token", TARGET);
+        ctx("agent.test", 0, 60);
+        let _ = g.request_check(TARGET.to_lowercase());
+    }
+
+    #[test]
+    #[should_panic(expected = "target is on the shared blocklist")]
+    fn buy_refuses_a_listed_target_even_with_an_allow() {
+        let (mut g, check) = judged(Verdict::Allow);
+        ctx("owner.test", 0, 0);
+        g.set_reporter(id("reporter.test"), true);
+        ctx("owner.test", ONE_NEAR, 0);
+        g.deposit_credit(Some(id("reporter.test")));
+        report_as(&mut g, "reporter.test", "token", TARGET);
+        ctx("agent.test", 0, 700);
+        buy(&mut g, check);
+    }
+
+    #[test]
+    fn the_owner_still_sells_a_listed_token() {
+        let mut g = with_reporter(ONE_NEAR);
+        report_as(&mut g, "reporter.test", "token", TARGET);
+        ctx("owner.test", 0, 700);
+        let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN));
+        assert_eq!(signed_hashes(b"on_exit_signed"), [APPROVE_HASH, SELL_HASH]);
+    }
+
+    // reporter of 64 characters, code key, note at the maximum: ENTRY_STORAGE_BYTES covers it
+    #[test]
+    fn the_entry_bound_covers_the_worst_case() {
+        let big = id(&"r".repeat(64));
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        ctx("owner.test", 0, 0);
+        g.set_reporter(big.clone(), true);
+        ctx("owner.test", ONE_NEAR, 0);
+        g.deposit_credit(Some(big.clone()));
+        g.credits.flush();
+        ctx(big.as_str(), 0, 50);
+        let before = env::storage_usage();
+        g.report(
+            "code".into(),
+            format!("0x{}", "ab".repeat(32)),
+            SHA.into(),
+            "n".repeat(MAX_NOTE),
+        );
+        g.blocklist.flush();
+        g.credits.flush();
+        let used = u128::from(env::storage_usage() - before);
+        assert!(
+            used > 0 && used <= ENTRY_STORAGE_BYTES,
+            "{used} bytes for an entry"
+        );
+    }
+
+    // 16. agent exits: the floor comes from a sentinel exit quote, the exit is charged to the armed
+    // budget, and only a token the guard bought for that agent can be sold by it
+    /// Quote whose 3 % slippage floor is exactly `SELL_MIN`.
+    const EXIT_QUOTE: u128 = 5_154_639_175_258;
+    /// An exit by an agent: two transactions at the gas cap, at the fixed rate (25 U).
+    const EXIT_COST: u128 = 2 * 250_000 * 50_000_000 * RATE;
+
+    /// The agent's buy of TARGET is signed (nonce 0); it then asks an exit quote of `SELL_AMOUNT` at
+    /// 1000 ns, which the sentinel judges `verdict` with `quote` at 1001 ns.
+    fn exit_judged(verdict: Verdict, quote: u128) -> (Guard, u64, u64) {
+        let (mut g, bought) = judged(Verdict::Allow);
+        buy(&mut g, bought);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        ctx("agent.test", 0, 1000);
+        let exit = g.request_exit(bought, U128(SELL_AMOUNT));
+        ctx("sentinel.test", 0, 1001);
+        g.post_verdict(
+            exit,
+            verdict,
+            String::new(),
+            String::new(),
+            U128(quote),
+            None,
+        );
+        (g, bought, exit)
+    }
+
+    fn sell_quoted_at(g: &mut Guard, check: u64, now_ns: u64) {
+        ctx("agent.test", 0, now_ns);
+        let _ = g.sell_quoted(check);
+    }
+
+    #[test]
+    fn an_agent_sells_at_the_floor_of_the_sentinel_exit_quote() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        let c = g.get_check(exit).unwrap();
+        assert_eq!(c.target, TARGET);
+        assert_eq!(c.exit_amount, Some(U128(SELL_AMOUNT)));
+        sell_quoted_at(&mut g, exit, 1100);
+        let v = last_event();
+        assert_eq!(v["event"], "exit_requested");
+        assert_eq!(v["data"][0]["by"], "agent.test");
+        assert_eq!(v["data"][0]["token"], TARGET);
+        assert_eq!(v["data"][0]["amount"], SELL_AMOUNT.to_string());
+        assert_eq!(v["data"][0]["min_out"], SELL_MIN.to_string()); // quote minus 3 %, not the agent's
+        assert_eq!(v["data"][0]["check"], exit);
+        assert_eq!(v["data"][0]["nonce"], 1);
+    }
+
+    #[test]
+    fn an_agent_exit_is_charged_to_its_budget_and_credit_like_a_buy() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        let (credit, budget, fees) = (
+            g.credit_of(&id("agent.test")).0,
+            g.budget_left(&id("agent.test")).0,
+            g.fees().0,
+        );
+        sell_quoted_at(&mut g, exit, 1100);
+        assert_eq!(g.credit_of(&id("agent.test")).0, credit - EXIT_COST);
+        assert_eq!(g.budget_left(&id("agent.test")).0, budget - EXIT_COST);
+        exit_signed(&mut g, vec![ok_sig(SIG_A), ok_sig(SIG_B)]);
+        assert_eq!(g.fees().0, fees + EXIT_COST);
+        assert!(g.get_check(exit).unwrap().settled);
+    }
+
+    #[test]
+    fn a_failed_swap_signature_refunds_the_unsigned_transaction() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        let (credit, budget, fees) = (
+            g.credit_of(&id("agent.test")).0,
+            g.budget_left(&id("agent.test")).0,
+            g.fees().0,
+        );
+        sell_quoted_at(&mut g, exit, 1100);
+        exit_signed(&mut g, vec![ok_sig(SIG_A), PromiseResult::Failed]);
+        assert_eq!(g.credit_of(&id("agent.test")).0, credit - EXIT_COST / 2);
+        assert_eq!(g.budget_left(&id("agent.test")).0, budget - EXIT_COST / 2);
+        assert_eq!(g.fees().0, fees + EXIT_COST / 2);
+    }
+
+    #[test]
+    fn an_exit_with_no_signature_is_fully_refunded_and_the_quote_stays_usable() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        let credit = g.credit_of(&id("agent.test")).0;
+        sell_quoted_at(&mut g, exit, 1100);
+        exit_signed(&mut g, vec![PromiseResult::Failed, PromiseResult::Failed]);
+        assert_eq!(g.credit_of(&id("agent.test")).0, credit);
+        assert!(!g.get_check(exit).unwrap().settled);
+    }
+
+    #[test]
+    #[should_panic(expected = "check already settled")]
+    fn an_exit_quote_serves_once() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        sell_quoted_at(&mut g, exit, 1100);
+        exit_signed(&mut g, vec![ok_sig(SIG_A), ok_sig(SIG_B)]);
+        sell_quoted_at(&mut g, exit, 1200);
+    }
+
+    #[test]
+    #[should_panic(expected = "verdict expired")]
+    fn an_exit_quote_expires_after_120_s() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        sell_quoted_at(&mut g, exit, 1001 + VERDICT_TTL_NS);
+    }
+
+    #[test]
+    #[should_panic(expected = "no exit quote")]
+    fn a_block_exit_verdict_gives_no_floor() {
+        let (mut g, _, exit) = exit_judged(Verdict::Block, 0);
+        sell_quoted_at(&mut g, exit, 1100);
+    }
+
+    #[test]
+    #[should_panic(expected = "not an exit quote")]
+    fn a_buy_verdict_is_not_an_exit_quote() {
+        let (mut g, bought, _) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        sell_quoted_at(&mut g, bought, 1100);
+    }
+
+    // an exit quote is an `allow` on a token: it must never pay for a buy
+    #[test]
+    #[should_panic(expected = "an exit quote is not a buy verdict")]
+    fn an_exit_quote_cannot_be_used_to_buy() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        ctx("agent.test", 0, 1100);
+        let _ = g.buy(exit, U128(VALUE));
+    }
+
+    #[test]
+    #[should_panic(expected = "not a buy signed for this agent")]
+    fn an_agent_exits_only_a_token_the_guard_bought_for_it() {
+        let (mut g, check) = judged(Verdict::Allow); // allow, but never bought
+        ctx("agent.test", 0, 1000);
+        let _ = g.request_exit(check, U128(SELL_AMOUNT));
+    }
+
+    #[test]
+    #[should_panic(expected = "unfrozen registered agent only")]
+    fn a_frozen_agent_cannot_ask_for_an_exit() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        ctx("owner.test", 0, 1050);
+        g.disarm(id("agent.test"));
+        sell_quoted_at(&mut g, exit, 1100);
+    }
+
+    #[test]
+    fn the_exit_of_a_listed_token_is_never_blocked() {
+        let (mut g, bought) = judged(Verdict::Allow);
+        buy(&mut g, bought);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        ctx("owner.test", ONE_NEAR, 900);
+        g.deposit_credit(Some(id("sentinel.test"))); // the sentinel's report is paid from its credit
+        ctx("sentinel.test", 0, 900);
+        g.report("token".into(), TARGET.into(), SHA.into(), String::new());
+        ctx("agent.test", 0, 1000);
+        let exit = g.request_exit(bought, U128(SELL_AMOUNT));
+        ctx("sentinel.test", 0, 1001);
+        g.post_verdict(
+            exit,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(EXIT_QUOTE),
+            None,
+        );
+        sell_quoted_at(&mut g, exit, 1100);
+        assert_eq!(last_event()["event"], "exit_requested");
     }
 }

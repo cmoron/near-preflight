@@ -83,4 +83,10 @@ export type Check = {
   approved: boolean;
   /** Transaction EIP-1559 signee par le MPC pour l'achat (base64), null tant qu'il n'y en a pas. */
   signed_tx: string | null;
+  /** The target's code posted with the verdict (keccak256, proxy implementation), null if none. */
+  code: { code_hash: string; implementation: string | null } | null;
+  /** An exit quote (request_exit): tokens to sell; its quote is then the ETH out, in wei. */
+  exit_amount: string | null;
 };
+/** A shared blocklist entry (get_entry). */
+export type Entry = { reporter: string; at_ns: string; evidence_sha256: string; note: string };

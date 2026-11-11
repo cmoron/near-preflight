@@ -4,9 +4,10 @@
 // approve <id>: approves a warn verdict so the agent may buy on it (within its 120 s).
 // reset: clears the agent's 7-day arming log (after replacing a compromised armer).
 // withdraw <wei>: ETH from the guard's EVM address to the owner's address fixed at init.
-// sell <token> <amount> [min wei]: the owner's own exit, never blocked by a freeze or a verdict.
+// sell <token> <amount> [min wei]: the owner's own exit, never blocked by a freeze, a verdict or the list.
+// unlist <token|code> <key>: removes an entry from the shared blocklist.
 // The relay broadcasts withdrawals and sales: bun --env-file=.env app/relay.ts exit <nonce>.
-// Usage : bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei]
+// Usage : bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] | unlist <token|code> <key>
 import { parseTransaction, type Hex } from "viem";
 import { call, env, humanAccount } from "./near";
 
@@ -31,10 +32,13 @@ if (cmd === "stop") {
 } else if (cmd === "withdraw" && a) {
   const { value, tx } = await call<Hex[]>(human, "withdraw_eth", { amount_wei: a }, 0n, EXIT_GAS);
   console.log(`  [human] withdrawal of ${a} wei signed by NEAR (${value.length}/1 tx)${relayHint(value)}  ${tx}`);
+} else if (cmd === "unlist" && a && b) {
+  const { tx } = await call(human, "unlist", { kind: a, key: b });
+  console.log(`  [human] ${a} ${b} removed from the shared blocklist  ${tx}`);
 } else if (cmd === "sell" && a && b) {
   const { value, tx } = await call<Hex[]>(human, "sell", { token: a, amount: b, min_out_wei: c }, 0n, EXIT_GAS);
   console.log(`  [human] sale of ${b} ${a} signed by NEAR (${value.length}/2 tx)${relayHint(value)}  ${tx}`);
 } else {
-  console.error("usage: bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei]");
+  console.error("usage: bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] | unlist <token|code> <key>");
   process.exit(2);
 }

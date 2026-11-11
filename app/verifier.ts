@@ -15,9 +15,11 @@ import {
   type Address,
   type Hex,
 } from "viem";
+import { reputationFindings, reputationOf, templateOf, type Index, type Reputation } from "./index";
 
 export const ROUTER: Address = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"; // Uniswap V2 Router02 (Base)
 export const WETH: Address = "0x4200000000000000000000000000000000000006";
+export const FACTORY: Address = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"; // Uniswap V2 factory (Base), ROUTER.factory()
 /** Achat simule ; le devis poste est en jetons pour ce montant (QUOTE_WEI dans src/lib.rs). */
 const BUY = parseEther("0.01");
 /** Le premier bloc simule suit le bloc de la preuve, 2 s apres lui (rythme des blocs de Base) ;
@@ -28,7 +30,7 @@ const LATER_S = 3600n; // timestamp of the late sale: one hour after the buy
 // gasleft() = limite du bloc : un jeton y reconnait la simulation et ne refuse que la vraie vente.
 const TIP = 1_000_000n; // pourboire propose par mainnet.base.org (eth_maxPriorityFeePerGas)
 const GAS = 1_000_000n; // limite de gaz d'un appel, celle d'un vrai swap
-const FUND = parseEther("1"); // solde des sondes neuves, de quoi acheter et payer le gaz
+export const FUND = parseEther("1"); // solde des sondes neuves, de quoi acheter et payer le gaz
 // eth_simulateV1 refuse plus de 256 blocs au-dessus du bloc de base : the late sale is 256 blocks
 // ahead (about 8.5 min of 2 s Base blocks, 1800 blocks would be 1 h) with its timestamp 1 h ahead. A
 // token counting blocks sees 8.5 min, one reading the timestamp sees 1 h.
@@ -42,6 +44,24 @@ const IMPL_SLOTS = [
 ];
 const TAX_WARN = 0.1; // perte au-dela du devis du pool : avertir a 10 %, bloquer a 50 %
 const TAX_BLOCK = 0.5;
+/** Liquidity window, 1 h of 2 s Base blocks. Liquidity is "old" when at least OLD_BPS of today's LP
+ *  supply already existed WINDOW_BLOCKS ago (totalSupply read at both blocks: two eth_call, no logs),
+ *  whatever the age of the pair contract and the depth of the pool. Otherwise the LP holders are read
+ *  from the pair's Transfer logs over the window (from its creation block if the pair is younger,
+ *  found by bisecting eth_getCode): at most 4 eth_getLogs of LOG_CHUNK blocks. */
+export const WINDOW_BLOCKS = 1800n;
+const OLD_BPS = 9_000n;
+/** eth_getLogs window: public RPCs refuse wide ranges. */
+export const LOG_CHUNK = 500n;
+/** More LP holder candidates than this: holders not read, which is a warn. */
+const MAX_HOLDERS = 20;
+/** Warn when at least half the LP can be removed now: past that, more than half the depth we would
+ *  sell into can leave at the will of its holders (several wallets are summed: splitting LP across
+ *  fresh wallets does not hide it). Removable is the normal state of most fresh launches, not proof
+ *  of a rug: warn, the human decides; the template's history (app/index.ts) is what blocks. */
+const REMOVABLE_WARN = 0.5;
+const BURN_ADDRESSES = ["0x0000000000000000000000000000000000000000", "0x000000000000000000000000000000000000dead"];
+const TRANSFER_TOPIC = keccak256(stringToHex("Transfer(address,address,uint256)"));
 
 const erc20 = parseAbi([
   "function balanceOf(address) view returns (uint256)",
@@ -55,10 +75,16 @@ const router = parseAbi([
   "function swapExactTokensForTokensSupportingFeeOnTransferTokens(uint256,uint256,address[],address,uint256)",
 ]);
 
+const pairAbi = parseAbi([
+  "function getPair(address,address) view returns (address)",
+  "function totalSupply() view returns (uint256)",
+  "function balanceOf(address) view returns (uint256)",
+]);
+
 export type Verdict = "allow" | "warn" | "block";
 type Call = { label: string; from: Address; to: Address; data: Hex; value?: Hex };
 export type Result = { status: Hex; returnData: Hex; error?: { message?: string; data?: Hex } };
-type Finding = { level: Verdict; text: string };
+export type Finding = { level: Verdict; text: string };
 export type Report = {
   verdict: Verdict;
   reasons: string;
@@ -76,6 +102,14 @@ export type Report = {
     /** Devis : jetons recus par l'achat simule de 0,01 ETH (decimal, "0" sans achat) ; la garde en
      *  tire le minimum de jetons du swap qu'elle fait signer. */
     quote: string;
+    /** Who can remove the pool's liquidity right now: facts read at `block` (liquidityFacts). */
+    liquidity: Liquidity;
+    /** Template of the target's code (app/index.ts templateOf). */
+    template: Hex;
+    /** What the index says of that template, null without an index for this chain. */
+    reputation: Reputation | null;
+    /** What the guard on NEAR said before the verdict: blocklist entries, code at the last verdict. */
+    near: NearFacts;
   };
   /** Requete et reponse completes, pour rejouer la simulation au meme bloc. */
   request: { method: string; params: unknown[] };
@@ -232,6 +266,94 @@ export function deriveProbes(t: Ticket, blockHash: Hex): { buyer: Address; stran
   return { buyer: at("buyer"), stranger: at("stranger") };
 }
 
+/** An LP holder at the block: `burned` (0x0, 0xdead), `eoa` (no code, or an EIP-7702 delegation:
+ *  still a key that can sign), `contract` (unlock terms not read: counted as removable). */
+export type Holder = { address: Address; balance: string; kind: "burned" | "eoa" | "contract" };
+/** The target's Uniswap V2 WETH pair at the block, null without one. `supply_before`: its LP supply
+ *  WINDOW_BLOCKS earlier ("0" if the pair did not exist). `created`: the pair's creation block when
+ *  it is younger than the window, else null. `holders`: LP holders at the block, from the window's
+ *  Transfer recipients plus 0x0 and 0xdead; null when not read (old liquidity) or when there are
+ *  more than MAX_HOLDERS `candidates`. Deterministic for a block: replay recomputes it. */
+export type Liquidity = {
+  pair: Address;
+  supply: string;
+  supply_before: string;
+  created: number | null;
+  candidates: number;
+  holders: Holder[] | null;
+} | null;
+
+async function read(url: string, to: Address, fn: string, args: unknown[], block: bigint): Promise<any> {
+  const data = encodeFunctionData({ abi: pairAbi, functionName: fn, args } as Parameters<typeof encodeFunctionData>[0]);
+  const out = await rpc<Hex>(url, "eth_call", [{ to, data }, toHex(block)]);
+  return decodeFunctionResult({ abi: pairAbi, functionName: fn, data: out } as Parameters<typeof decodeFunctionResult>[0]);
+}
+const codeAt = (url: string, a: Address, block: bigint) => rpc<Hex>(url, "eth_getCode", [a, toHex(block)]);
+const isOld = (supply: bigint, before: bigint) => before * 10_000n >= supply * OLD_BPS;
+
+/** Who can remove the liquidity of `token`'s V2 WETH pair at `block`, from public-RPC reads only:
+ *  eth_call, eth_getCode, and eth_getLogs over the window only, never below the pair's creation. */
+export async function liquidityFacts(url: string, token: Address, block: bigint): Promise<Liquidity> {
+  const found = (await read(url, FACTORY, "getPair", [token, WETH], block)) as Address;
+  if (BigInt(found) === 0n) return null;
+  const pair = found.toLowerCase() as Address;
+  const supply = (await read(url, pair, "totalSupply", [], block)) as bigint;
+  const from = block - WINDOW_BLOCKS;
+  const pairOld = from >= 0n && (await codeAt(url, pair, from)) !== "0x";
+  const before = pairOld ? ((await read(url, pair, "totalSupply", [], from)) as bigint) : 0n;
+  const base = { pair, supply: supply.toString(), supply_before: before.toString() };
+  if (isOld(supply, before)) return { ...base, created: null, candidates: 0, holders: null };
+  let start = from + 1n;
+  if (!pairOld) {
+    let [lo, hi] = [from < 0n ? -1n : from, block]; // no code at lo, code at hi
+    while (hi - lo > 1n) {
+      const mid = (lo + hi) / 2n;
+      if ((await codeAt(url, pair, mid)) === "0x") lo = mid;
+      else hi = mid;
+    }
+    start = hi;
+  }
+  const seen = new Set<Address>(BURN_ADDRESSES as Address[]);
+  for (let s = start; s <= block; s += LOG_CHUNK) {
+    const end = s + LOG_CHUNK - 1n < block ? s + LOG_CHUNK - 1n : block;
+    const logs = await rpc<{ topics: Hex[] }[]>(url, "eth_getLogs", [{ address: pair, fromBlock: toHex(s), toBlock: toHex(end), topics: [TRANSFER_TOPIC] }]);
+    for (const l of logs) seen.add(`0x${l.topics[2].slice(26)}` as Address);
+  }
+  const created = pairOld ? null : Number(start);
+  const candidates = [...seen].sort();
+  if (candidates.length > MAX_HOLDERS) return { ...base, created, candidates: candidates.length, holders: null };
+  const holders: Holder[] = [];
+  for (const address of candidates) {
+    const balance = (await read(url, pair, "balanceOf", [address], block)) as bigint;
+    if (balance === 0n) continue;
+    const code = BURN_ADDRESSES.includes(address) ? "" : await codeAt(url, address, block);
+    const kind = code === "" ? "burned" : code === "0x" || code.startsWith("0xef0100") ? "eoa" : "contract";
+    holders.push({ address, balance: balance.toString(), kind });
+  }
+  holders.sort((a, b) => (BigInt(b.balance) > BigInt(a.balance) ? 1 : BigInt(b.balance) < BigInt(a.balance) ? -1 : a.address < b.address ? -1 : 1));
+  return { ...base, created, candidates: candidates.length, holders };
+}
+
+/** Short address for reasons (ASCII: the guard counts reasons in bytes). */
+export const short = (a: string) => `${a.slice(0, 6)}..${a.slice(-4)}`;
+
+/** The liquidity rule (WINDOW_BLOCKS, REMOVABLE_WARN): old liquidity passes on its age; otherwise
+ *  holders must be read and add up to the supply, or it is a warn. Pure: replay rejudges it. */
+export function liquidityFindings(l: Liquidity, block: number): Finding[] {
+  if (!l || BigInt(l.supply) === 0n) return []; // no pool or an empty one: the simulated buy says so
+  const supply = BigInt(l.supply);
+  if (isOld(supply, BigInt(l.supply_before))) return [];
+  const pct = (x: bigint) => Math.round((Number(x) / Number(supply)) * 100);
+  const age = l.created !== null ? `pool ${block - l.created} blocks old` : `${pct(supply - BigInt(l.supply_before))} % of the LP minted in the last ${WINDOW_BLOCKS} blocks`;
+  if (!l.holders) return [{ level: "warn", text: `${age}: LP spread over ${l.candidates} addresses, holders not read` }];
+  const sum = (hs: Holder[]) => hs.reduce((n, h) => n + BigInt(h.balance), 0n);
+  if (sum(l.holders) !== supply) return [{ level: "warn", text: `${age}: LP holders not all accounted for (${pct(sum(l.holders))} % of the supply)` }];
+  const removable = l.holders.filter((h) => h.kind !== "burned");
+  if (Number(sum(removable)) / Number(supply) < REMOVABLE_WARN) return [];
+  const top = removable[0];
+  return [{ level: "warn", text: `${age}: ${pct(sum(removable))} % of the LP removable now (${top.kind === "eoa" ? "EOA" : "contract"} ${short(top.address)} holds ${pct(BigInt(top.balance))} %)` }];
+}
+
 /** Implementation derriere un proxy (EIP-1967, puis ZeppelinOS) au bloc, sinon null. */
 export async function implementationAt(url: string, token: Address, block: bigint): Promise<Address | null> {
   for (const slot of IMPL_SLOTS) {
@@ -241,9 +363,28 @@ export async function implementationAt(url: string, token: Address, block: bigin
   return null;
 }
 
+/** A blocklist entry read from the guard (`get_entry`), on the target (`token`) or its template (`code`). */
+export type Listing = { kind: "token" | "code"; key: string; reporter: string; evidence_sha256: string };
+/** What the guard on NEAR says about the target: its blocklist entries, and the code its last verdict
+ *  saw (`last_code`), null if never judged. */
+export type NearFacts = { listed: Listing[]; previous: { id: number; code_hash: Hex; implementation: Address | null } | null };
+/** What the sentinel knows beside the EVM chain: the template index it loaded (app/index.ts) and a
+ *  reader of the guard's blocklist and last code for a target and its template. */
+export type Context = { index: Index | null; near: (target: Address, template: Hex) => Promise<NearFacts> };
+
+/** Listed on NEAR: block. Code (or proxy implementation) changed since the last verdict: warn, the
+ *  human decides (the guard refuses an allow on changed code anyway). */
+export function nearFindings(n: NearFacts, codeHash: Hex, implementation: Address | null): Finding[] {
+  const out: Finding[] = n.listed.map((l) => ({ level: "block", text: `listed on NEAR by ${l.reporter} (${l.kind === "code" ? "template" : "token"})` }));
+  const p = n.previous;
+  const same = (a: string | null, b: string | null) => (a ?? "").toLowerCase() === (b ?? "").toLowerCase();
+  if (p && !(same(p.code_hash, codeHash) && same(p.implementation, implementation))) out.push({ level: "warn", text: `code changed since the last check #${p.id}` });
+  return out;
+}
+
 /** Simulates buying `token` as two buyers, the probe and `guard` (the guard's EVM address); `probes`
  *  gets the block simulated on (the sentinel passes deriveProbes of its ticket). */
-export async function checkToken(url: string, token: Address, guard: Address, probes: (head: Header) => Probe): Promise<Report> {
+export async function checkToken(url: string, token: Address, guard: Address, probes: (head: Header) => Probe, ctx: Context): Promise<Report> {
   const head = await rpc<Header>(url, "eth_getBlockByNumber", ["latest", false]);
   const probe = probes(head);
   const { buyer, stranger } = probe;
@@ -252,7 +393,11 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
   const code = await rpc<Hex>(url, "eth_getCode", [token, toHex(block)]);
   const implementation = await implementationAt(url, token, block);
-  const proof = { chain_id: chainId, block, code_hash: keccak256(code), implementation };
+  const liquidity = await liquidityFacts(url, token, block);
+  const template = templateOf(code);
+  const reputation = ctx.index?.chain_id === chainId ? reputationOf(ctx.index, template, liquidity?.pair ?? null) : null;
+  const near = await ctx.near(token, template);
+  const proof = { chain_id: chainId, block, code_hash: keccak256(code), implementation, liquidity, template, reputation, near };
   const [first1] = plan(token, buyer, guard, block, now);
 
   // 1re simulation : quantites achetees et proprietaire, pour construire la seconde.
@@ -324,12 +469,16 @@ function sideFindings(r: Record<string, Result>, p: string, stop: boolean): Find
 /** Jugement pur : ne depend que des libelles des appels et de leurs resultats, donc rejouable
  *  par n'importe qui a partir d'une preuve (voir app/replay.ts). The guard side's findings that the
  *  probe buyer does not share are reported as "guard address: ...". */
-export function judge(labels: string[], results: Result[]): { verdict: Verdict; reasons: string } {
+export function judge(labels: string[], results: Result[], facts: Facts): { verdict: Verdict; reasons: string } {
   const r = byLabel(labels, results);
   const { stop } = buyStages(r);
   const findings = sideFindings(r, "", stop);
   const seen = new Set(findings.map((f) => f.text));
   for (const f of sideFindings(r, GUARD, stop)) if (!seen.has(f.text)) findings.push({ ...f, text: `guard address: ${f.text}` });
+  findings.unshift(...nearFindings(facts.near, facts.code_hash, facts.implementation), ...reputationFindings(facts.reputation));
+  findings.push(...liquidityFindings(facts.liquidity, facts.block));
+  const rank = (f: Finding) => (f.level === "block" ? 0 : 1);
+  findings.sort((a, b) => rank(a) - rank(b)); // stable: blocks first, so the 280-byte cut keeps them
   const verdict: Verdict = findings.some((f) => f.level === "block") ? "block" : findings.some((f) => f.level === "warn") ? "warn" : "allow";
   const reasons = findings.length ? findings.map((f) => f.text).join(" ; ") : "buy, takeback probes and sales simulated without anomaly";
   return { verdict, reasons: reasons.slice(0, 280) };
@@ -344,12 +493,15 @@ export function quoteOf(labels: string[], results: Result[]): bigint {
 
 export const byLabel = (labels: string[], results: Result[]) => Object.fromEntries(labels.map((l, i) => [l, results[i]]));
 
+/** Facts beside the simulation that the verdict rests on, all in the evidence. */
+export type Facts = Pick<Report["evidence"], "block" | "code_hash" | "implementation" | "liquidity" | "reputation" | "near">;
+
 function report(
-  proof: { chain_id: number; block: bigint; code_hash: Hex; implementation: Address | null },
+  proof: Omit<Facts, "block"> & { chain_id: number; block: bigint; template: Hex },
   sim: { request: Report["request"]; results: Result[] },
   labels: string[],
 ): Report {
-  const { verdict, reasons } = judge(labels, sim.results);
+  const { verdict, reasons } = judge(labels, sim.results, { ...proof, block: Number(proof.block) });
   const evidence = {
     chain_id: proof.chain_id,
     block: Number(proof.block),
@@ -359,8 +511,68 @@ function report(
     implementation: proof.implementation,
     calls: sim.results.map((res, i) => `${labels[i]}: ${ok(res) ? "ok" : "revert"}`),
     quote: quoteOf(labels, sim.results).toString(),
+    liquidity: proof.liquidity,
+    template: proof.template,
+    reputation: proof.reputation,
+    near: proof.near,
   };
   if (JSON.stringify(evidence).length > 8000) throw new Error("evidence above 8000 characters");
+  return { verdict, reasons, evidence, request: sim.request, response: sim.results };
+}
+
+/** Exit quote: the guard's EVM address sells `amount` of the token it holds, in one simulated block
+ *  over the latest one (its real token balance, ETH topped up for gas). The quote is the WETH out:
+ *  the guard sets the agent's floor from it. */
+export function exitPlan(token: Address, guard: Address, amount: bigint, now: bigint): Block[] {
+  const path = [token, WETH];
+  return [
+    {
+      time: now,
+      calls: [
+        call("WETH before exit", guard, WETH, erc20, "balanceOf", [guard]),
+        call("approve router", guard, token, erc20, "approve", [ROUTER, amount]),
+        call("exit quote", guard, ROUTER, router, "getAmountsOut", [amount, path]),
+        call("exit sale", guard, ROUTER, router, "swapExactTokensForTokensSupportingFeeOnTransferTokens", [amount, 0n, path, guard, now + 10_000n]),
+        call("WETH after exit", guard, WETH, erc20, "balanceOf", [guard]),
+      ],
+    },
+  ];
+}
+
+export type ExitReport = {
+  verdict: Verdict;
+  reasons: string;
+  evidence: { kind: "exit"; chain_id: number; block: number; method: "eth_simulateV1"; request_sha256: Hex; amount: string; calls: string[]; quote: string };
+  request: Report["request"];
+  response: Result[];
+};
+
+/** Pure: allow with the WETH out of the simulated sale, or block without a quote. */
+export function judgeExit(labels: string[], results: Result[]): { verdict: Verdict; reasons: string; quote: bigint } {
+  const r = byLabel(labels, results);
+  if (!ok(r["exit sale"])) return { verdict: "block", reasons: `exit sale fails in simulation (${revertReason(r["exit sale"])}): no quote`, quote: 0n };
+  const quote = delta(r["WETH after exit"], r["WETH before exit"]);
+  if (quote <= 0n) return { verdict: "block", reasons: "exit sale simulated but yields no ETH: no quote", quote: 0n };
+  return { verdict: "allow", reasons: "exit sale from the guard's address simulated: quote = its ETH out", quote };
+}
+
+export async function checkExit(url: string, token: Address, guard: Address, amount: bigint): Promise<ExitReport> {
+  const head = await rpc<Header>(url, "eth_getBlockByNumber", ["latest", false]);
+  const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
+  const blocks = exitPlan(token, guard, amount, BigInt(head.timestamp) + NEXT_S);
+  const sim = await simulate(url, head, { [guard]: FUND }, blocks);
+  const labels = blocks[0].calls.map((c) => c.label);
+  const { verdict, reasons, quote } = judgeExit(labels, sim.results);
+  const evidence = {
+    kind: "exit" as const,
+    chain_id: chainId,
+    block: Number(BigInt(head.number)),
+    method: "eth_simulateV1" as const,
+    request_sha256: sha256(stringToHex(JSON.stringify(sim.request))),
+    amount: amount.toString(),
+    calls: sim.results.map((res, i) => `${labels[i]}: ${ok(res) ? "ok" : "revert"}`),
+    quote: quote.toString(),
+  };
   return { verdict, reasons, evidence, request: sim.request, response: sim.results };
 }
 
@@ -368,7 +580,7 @@ function report(
  *  contrat stocke le sha256 ; app/replay.ts la relit telle quelle. */
 export type ProofFile = Omit<Report, "evidence"> & { id: number; target: string; evidence: string };
 
-export function toProof(id: number, target: string, r: Report): ProofFile {
+export function toProof(id: number, target: string, r: Report | ExitReport): ProofFile {
   return { id, target, verdict: r.verdict, reasons: r.reasons, evidence: JSON.stringify(r.evidence), request: r.request, response: r.response };
 }
 

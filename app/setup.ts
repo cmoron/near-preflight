@@ -1,5 +1,6 @@
 // Deploie la garde sur testnet sous un compte parent (l'humain) et ecrit .env et un fichier de cle
-// par role (.env.agent, .env.sentinel, .env.armer).
+// par role (.env.agent, .env.sentinel, .env.armer), plus .env.agent2 for a second agent (demo: the
+// shared blocklist refuses it a token the sentinel listed).
 // Usage : bun app/setup.ts <parent>.testnet [owner EVM address for ETH withdrawals]
 import { actions, KeyPair, nearToYocto, teraToGas } from "near-api-js";
 import { homedir } from "node:os";
@@ -13,9 +14,12 @@ if (!parent?.endsWith(".testnet") || !/^0x[0-9a-fA-F]{40}$/.test(withdrawTo)) {
 }
 const human = await humanAccount(parent);
 const id = (name: string) => `${name}.${parent}`;
-const PRICE = nearToYocto("0.01"); // prix d'un verdict, couvre le stockage d'une demande
-// Demo bounds set by the human: 0.2 NEAR per arming (the demo arms 0.12), 1 h at most, 1 NEAR per 7 days.
-const BOUNDS = { max_budget: nearToYocto("0.2").toString(), max_duration_s: 3600, max_7d: nearToYocto("1").toString() };
+// Price of a verdict: covers the storage of a check, its code record and, on a block, its listing
+// (CHECK_STORAGE_BYTES = 1500 in src/lib.rs, at 10^19 yoctoNEAR per byte).
+const PRICE = nearToYocto("0.015");
+// Demo bounds set by the human: 0.3 NEAR per arming (the demo arms 0.2), 1 h at most, 2 NEAR per 7 days.
+const BOUNDS = { max_budget: nearToYocto("0.3").toString(), max_duration_s: 3600, max_7d: nearToYocto("2").toString() };
+const AGENT_METHODS = ["request_check", "buy", "refund_check", "request_exit", "sell_quoted"];
 // Achat EVM fixe par l'humain : gaz 250 000 (un swap V2 en use ~140 000 sur le fork), frais au plus
 // 0,05 gwei (base fee de Base ~0,005 gwei), pourboire 0,001 gwei ; budget debite a 1 ETH = 1000 NEAR ;
 // minimum de jetons = devis de la sentinelle moins 3 %.
@@ -53,8 +57,9 @@ async function scopedKey(name: string, methods: string[], allowance: `${number}`
   return key.toString();
 }
 
-const guardKey = await subAccount("guard", "3");
+const guardKey = await subAccount("guard", "4"); // wasm of ~294 KB: ~2.9 NEAR of storage
 await subAccount("agent", "0.5");
+await subAccount("agent2", "0.3");
 await subAccount("sentinel", "0.5");
 await subAccount("armer", "0.3");
 // Adresse EVM que NEAR signe pour la garde : derivee de la cle maitresse du MPC, du compte et du chemin fixe.
@@ -80,21 +85,23 @@ await guard.signAndSendTransaction({
     ),
   ],
 });
-console.log(`guard deployed and initialized on ${id("guard")} (owner ${parent}, armer ${id("armer")}, price 0.01 NEAR)`);
+console.log(`guard deployed and initialized on ${id("guard")} (owner ${parent}, armer ${id("armer")}, price 0.015 NEAR)`);
 console.log(`derived EVM address of ${id("guard")} (path ${GUARD_PATH}, signer ${MPC_CONTRACT}): ${evmAddress}`);
 console.log(`ETH withdrawals from it go only to ${withdrawTo}, fixed at init${process.argv[3] ? "" : " (default burn address: pass your own EVM address as 2nd argument)"}`);
 
 // buy attache 100 TGas : le protocole exige 0,101 NEAR d'allocation libre pour l'envoyer (gaz au prix
-// pessimiste), puis ne retire que le gaz brule (mesure : 0,0014 NEAR par achat signe). sell attaches
-// 150 TGas (two signatures). 0,5 NEAR, le solde du compte de l'agent qui paie ce gaz.
-const agentKey = await scopedKey("agent", ["request_check", "buy", "refund_check", "sell"], "0.5");
-const sentinelKey = await scopedKey("sentinel", ["post_verdict"]);
+// pessimiste), puis ne retire que le gaz brule (mesure : 0,0014 NEAR par achat signe). sell_quoted
+// attaches 150 TGas (two signatures). 0,5 NEAR, le solde du compte de l'agent qui paie ce gaz.
+const agentKey = await scopedKey("agent", AGENT_METHODS, "0.5");
+const agent2Key = await scopedKey("agent2", AGENT_METHODS);
+const sentinelKey = await scopedKey("sentinel", ["post_verdict", "report"]);
 const armerKey = await scopedKey("armer", ["arm", "disarm"]);
 
 const owner = (methodName: string, args: Record<string, unknown>) => human.callFunction({ contractId: id("guard"), methodName, args });
 await owner("set_bounds", BOUNDS);
 await owner("register_agent", { agent: id("agent") });
-console.log(`bounds: 0.2 NEAR per arming, 3600 s max, 1 NEAR per 7 days; ${id("agent")} registered`);
+await owner("register_agent", { agent: id("agent2") });
+console.log(`bounds: 0.3 NEAR per arming, 3600 s max, 2 NEAR per 7 days; ${id("agent")} and ${id("agent2")} registered`);
 await human.callFunction({
   contractId: id("guard"),
   methodName: "deposit_credit",
@@ -102,6 +109,15 @@ await human.callFunction({
   deposit: nearToYocto("1"),
 });
 console.log(`1 NEAR of credit deposited for ${id("agent")}`);
+// The sentinel reports templates to the shared blocklist: each entry's storage (420 bytes, 0.0042 NEAR)
+// is paid from its credit, never from the guard's balance.
+await human.callFunction({
+  contractId: id("guard"),
+  methodName: "deposit_credit",
+  args: { account_id: id("sentinel") },
+  deposit: nearToYocto("0.05"),
+});
+console.log(`0.05 NEAR of credit deposited for ${id("sentinel")} (storage of its blocklist reports)`);
 
 // Config partagee sans cle ; chaque cle function-call dans son fichier, charge par son seul processus
 // (bun --env-file=.env --env-file=.env.agent ...) : l'agent ne lit jamais la cle de la sentinelle
@@ -119,10 +135,11 @@ await write(".env", [
 await write(".env.agent", [`AGENT_KEY=${agentKey}`]);
 await write(".env.sentinel", [`SENTINEL_KEY=${sentinelKey}`]);
 await write(".env.armer", [`ARMER_KEY=${armerKey}`]);
+await write(".env.agent2", [`AGENT=${id("agent2")}`, `AGENT_KEY=${agent2Key}`]);
 // The RPC spreads reads over nodes more or less up to date: a node behind the deposit says 0.
 let credit = "0";
 for (let i = 0; i < 20 && credit === "0"; i++) {
   if (i) await Bun.sleep(1500);
   credit = (await provider.callFunction({ contractId: id("guard"), method: "credit_of", args: { account: id("agent") } })) as string;
 }
-console.log(`.env, .env.agent, .env.sentinel, .env.armer written; agent credit: ${credit} yoctoNEAR`);
+console.log(`.env, .env.agent, .env.agent2, .env.sentinel, .env.armer written; agent credit: ${credit} yoctoNEAR`);
