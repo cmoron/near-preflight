@@ -48,7 +48,7 @@ export async function guardedBuy(target: string, amount: bigint): Promise<{ id: 
     log(`#${id} : ALLOW expired (${Math.round(age / 1000)} s old, limit ${VERDICT_TTL_MS / 1000} s), I REFUSE TO SIGN the purchase`);
     return { id, paid: false };
   }
-  const { tx } = await call(agent, "spend", { id, recipient: env("SHOP"), amount: amount.toString() });
+  const { tx } = await call(agent, "spend", { id, target, recipient: env("SHOP"), amount: amount.toString() });
   log(`#${id} : ALLOW, purchase signed, ${formatNearAmount(amount.toString())} NEAR paid to ${env("SHOP")}  ${tx}`);
   return { id, paid: true };
 }

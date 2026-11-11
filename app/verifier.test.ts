@@ -44,6 +44,11 @@ describe("verdict de la sentinelle", () => {
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("1 h after");
   });
+  test("vente permise seulement en simulation (prix du gaz ou base fee nuls) : block", async () => {
+    const r = await check(tokens.sim_detector);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toContain("sale refused in the next block"); // le routeur masque la raison du jeton
+  });
 });
 
 describe("preuve", () => {
@@ -56,6 +61,25 @@ describe("preuve", () => {
     });
     const { result: code } = (await res.json()) as { result: `0x${string}` };
     expect(r.evidence.code_hash).toBe(keccak256(code));
+  });
+  test("la simulation reprend l'environnement du bloc reel (gaz, base fee, prevrandao, coinbase, numero)", async () => {
+    const r = await check(tokens.safe);
+    const res = await fetch(RPC, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getBlockByNumber", params: [`0x${r.evidence.block.toString(16)}`, false] }),
+    });
+    const { result: h } = (await res.json()) as { result: { baseFeePerGas: string; mixHash: string; miner: string } };
+    const blocks = (r.request.params[0] as { blockStateCalls: { blockOverrides: Record<string, string>; calls: Record<string, string>[] }[] }).blockStateCalls;
+    for (const b of blocks) {
+      expect(b.blockOverrides).toMatchObject({ baseFeePerGas: h.baseFeePerGas, prevRandao: h.mixHash, feeRecipient: h.miner });
+      for (const c of b.calls) {
+        expect(BigInt(c.maxPriorityFeePerGas)).toBeGreaterThan(0n);
+        expect(BigInt(c.maxFeePerGas)).toBeGreaterThan(BigInt(h.baseFeePerGas));
+        expect(c.gas).toBe("0xf4240"); // 1 M, pas la limite du bloc
+      }
+    }
+    expect(BigInt(blocks[2].blockOverrides.number)).toBe(BigInt(r.evidence.block) + 256n); // vente +1 h : dernier bloc permis
   });
   test("porte l'implementation d'un proxy (USDC)", async () => {
     const r = await check(tokens.usdc);

@@ -23,6 +23,14 @@ const BUY = parseEther("0.01");
  *  la premiere vente est simulee au bloc d'apres, encore 2 s plus tard. */
 export const NEXT_S = 2n;
 const LATER_S = 3600n; // la seconde vente est simulee une heure apres l'achat
+// Sans prix du gaz ni limite par appel, eth_simulateV1 donne tx.gasprice = 0, block.basefee = 0 et
+// gasleft() = limite du bloc : un jeton y reconnait la simulation et ne refuse que la vraie vente.
+const TIP = 1_000_000n; // pourboire propose par mainnet.base.org (eth_maxPriorityFeePerGas)
+const GAS = 1_000_000n; // limite de gaz d'un appel, celle d'un vrai swap
+const FUND = parseEther("1"); // solde des sondes neuves, de quoi acheter et payer le gaz
+// eth_simulateV1 refuse plus de 256 blocs au-dessus du bloc de base : la vente +1 h est simulee au
+// dernier permis (1800 blocs de Base en vrai), blocs vides intercales par le noeud.
+const MAX_BLOCKS = 256n;
 // Emplacements de l'adresse d'implementation d'un proxy : EIP-1967, puis ZeppelinOS (USDC).
 const IMPL_SLOTS = [
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc",
@@ -84,24 +92,43 @@ export async function rpc<T>(url: string, method: string, params: unknown[]): Pr
   return body.result;
 }
 
-export type Block = { time: bigint; calls: Call[] };
+export type Block = { number?: bigint; time: bigint; calls: Call[] };
+/** Bloc reel au-dessus duquel on simule : sa base fee, son prevrandao et son coinbase sont repris, le
+ *  noeud les mettrait sinon a zero (prevrandao, base fee) dans les blocs simules. */
+export type Header = { number: Hex; timestamp: Hex; baseFeePerGas: Hex; mixHash: Hex; miner: Address };
 
 /** Requete eth_simulateV1 complete, telle qu'envoyee et sauvegardee dans la preuve. */
-export function buildRequest(block: bigint, buyer: Address, blocks: Block[]) {
+export function buildRequest(head: Header, balances: Record<string, bigint>, blocks: Block[]) {
+  const baseFee = BigInt(head.baseFeePerGas);
+  const env = { baseFeePerGas: toHex(baseFee), prevRandao: head.mixHash, feeRecipient: head.miner };
+  const fees = { gas: toHex(GAS), maxFeePerGas: toHex(2n * baseFee + TIP), maxPriorityFeePerGas: toHex(TIP) };
   const request = {
     blockStateCalls: blocks.map((b, i) => ({
-      blockOverrides: { time: toHex(b.time) },
-      ...(i === 0 ? { stateOverrides: { [buyer]: { balance: toHex(parseEther("1")) } } } : {}),
-      calls: b.calls.map(({ label: _, ...c }) => c),
+      blockOverrides: { ...(b.number ? { number: toHex(b.number) } : {}), time: toHex(b.time), ...env },
+      ...(i === 0 ? { stateOverrides: Object.fromEntries(Object.entries(balances).map(([a, v]) => [a, { balance: toHex(v) }])) } : {}),
+      calls: b.calls.map(({ label: _, ...c }) => ({ ...c, ...fees })),
     })),
     validation: false,
   };
-  return { method: "eth_simulateV1", params: [request, toHex(block)] };
+  return { method: "eth_simulateV1", params: [request, toHex(BigInt(head.number))] };
 }
 
-/** Simule des blocs successifs au-dessus de `block` ; renvoie la requete et un resultat par appel. */
-async function simulate(url: string, block: bigint, buyer: Address, blocks: Block[]) {
-  const request = buildRequest(block, buyer, blocks);
+/** Soldes poses par la simulation : sondes neuves financees ; owner() complete seulement s'il ne peut
+ *  pas payer le gaz de son appel, sinon son solde reel reste (un vrai owner() paie aussi son gaz). */
+export async function balances(url: string, head: Header, buyer: Address, full?: { stranger: Address; owner: Address | null }) {
+  const out: Record<string, bigint> = { [buyer]: FUND };
+  if (!full) return out;
+  out[full.stranger] = FUND;
+  if (full.owner) {
+    const need = GAS * (2n * BigInt(head.baseFeePerGas) + TIP);
+    if (BigInt(await rpc<Hex>(url, "eth_getBalance", [full.owner, head.number])) < need) out[full.owner] = FUND;
+  }
+  return out;
+}
+
+/** Simule des blocs successifs au-dessus de `head` ; renvoie la requete et un resultat par appel. */
+async function simulate(url: string, head: Header, funds: Record<string, bigint>, blocks: Block[]) {
+  const request = buildRequest(head, funds, blocks);
   const out = await rpc<{ calls: Result[] }[]>(url, request.method, request.params);
   return { request, results: out.flatMap((b) => b.calls) };
 }
@@ -110,7 +137,7 @@ async function simulate(url: string, block: bigint, buyer: Address, blocks: Bloc
  *  achetee et proprietaire, ces deux derniers lus dans la 1re simulation) : la preuve complete en trois
  *  blocs, achat + reprises sans approbation + approve, vente de la moitie au bloc suivant, vente du
  *  reste une heure plus tard. Partage avec app/replay.ts, qui reconstruit ainsi la requete attendue. */
-export function plan(token: Address, buyer: Address, now: bigint, full?: { stranger: Address; amount: bigint; owner: Address | null }): Block[] {
+export function plan(token: Address, buyer: Address, block: bigint, now: bigint, full?: { stranger: Address; amount: bigint; owner: Address | null }): Block[] {
   const deadline = now + 10_000n;
   const buyPath = [WETH, token];
   const sellPath = [token, WETH];
@@ -146,7 +173,7 @@ export function plan(token: Address, buyer: Address, now: bigint, full?: { stran
   return [
     { time: now, calls: block1 },
     { time: now + NEXT_S, calls: block2 },
-    { time: now + LATER_S, calls: block3 },
+    { number: block + MAX_BLOCKS, time: now + LATER_S, calls: block3 },
   ];
 }
 
@@ -185,23 +212,23 @@ export async function implementationAt(url: string, token: Address, block: bigin
 
 export async function checkToken(url: string, token: Address, probe: Probe = { buyer: fresh(), stranger: fresh() }): Promise<Report> {
   const { buyer, stranger } = probe;
-  const head = await rpc<{ number: Hex; timestamp: Hex }>(url, "eth_getBlockByNumber", ["latest", false]);
+  const head = await rpc<Header>(url, "eth_getBlockByNumber", ["latest", false]);
   const block = BigInt(head.number);
   const now = probe.time ?? BigInt(head.timestamp) + NEXT_S;
   const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
   const code = await rpc<Hex>(url, "eth_getCode", [token, toHex(block)]);
   const implementation = await implementationAt(url, token, block);
   const proof = { chain_id: chainId, block, code_hash: keccak256(code), implementation };
-  const [first1] = plan(token, buyer, now);
+  const [first1] = plan(token, buyer, block, now);
 
   // 1re simulation : quantite achetee et proprietaire, pour construire la seconde.
-  const first = await simulate(url, block, buyer, [first1]);
+  const first = await simulate(url, head, await balances(url, head, buyer), [first1]);
   const buyLabels = first1.calls.map((c) => c.label);
   const st = buyStage(byLabel(buyLabels, first.results));
   if (st.findings.length) return report(proof, first, buyLabels);
 
-  const blocks = plan(token, buyer, now, { stranger, amount: st.amount, owner: st.owner });
-  const sim = await simulate(url, block, buyer, blocks);
+  const blocks = plan(token, buyer, block, now, { stranger, amount: st.amount, owner: st.owner });
+  const sim = await simulate(url, head, await balances(url, head, buyer, { stranger, owner: st.owner }), blocks);
   return report(proof, sim, blocks.flatMap((b) => b.calls.map((c) => c.label)));
 }
 

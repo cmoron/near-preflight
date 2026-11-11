@@ -3,6 +3,7 @@
 // Usage : bun app/replay.ts <preuve.json> [rpc] [--check]
 import { keccak256, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
 import {
+  balances,
   buildRequest,
   buyStage,
   byLabel,
@@ -14,6 +15,7 @@ import {
   ROUTER,
   rpc,
   WETH,
+  type Header,
   type ProofFile,
   type Result,
 } from "./verifier";
@@ -51,7 +53,7 @@ const LIVE_S = 120;
 const msg = (e: unknown) => (e instanceof Error ? e.message.split("\n")[0] : String(e));
 const isObj = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
 const iso = (s: number) => new Date(s * 1000).toISOString().replace(".000", "");
-const blockOf = (url: string, tag: string) => rpc<{ number: Hex; timestamp: Hex }>(url, "eth_getBlockByNumber", [tag, false]);
+const blockOf = (url: string, tag: string) => rpc<Header>(url, "eth_getBlockByNumber", [tag, false]);
 
 /** Contenu de la chaine evidence : exactement les champs que la sentinelle poste, bien types. */
 function parseEvidence(p: Proof): Evidence | string {
@@ -94,15 +96,17 @@ type Rebuilt = { labels: string[]; buyer: Address; stranger: Address | null; own
 /** Reconstruit la requete que checkToken aurait produite pour proof.target (memes appels, memes
  *  adresses, routeur, WETH, blocs aux memes ecarts de temps) et en tire les libelles : ceux du fichier
  *  ne comptent pas. Seuls l'acheteur, l'inconnu et l'heure viennent de la requete ; quantite et
- *  proprietaire viennent de la reponse fraiche. Aucun repli : une sonde absente est un defaut. */
-function rebuild(p: Proof, e: Evidence, fresh: Result[]): Rebuilt | { error: string } {
+ *  proprietaire viennent de la reponse fraiche ; prix du gaz, prevrandao, coinbase et solde reel de
+ *  owner() viennent du noeud, au bloc de la preuve. Aucun repli : une sonde absente est un defaut. */
+async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[]): Promise<Rebuilt | { error: string }> {
   try {
     const bs = (p.request.params[0] as { blockStateCalls: BlockStateCall[] }).blockStateCalls;
     const now = BigInt(bs[0].blockOverrides.time);
     const buyer = bs[0].calls[0]?.from;
     if (!buyer) return { error: "request has no buyer" };
     const token = p.target as Address;
-    const buyOnly = plan(token, buyer, now);
+    const head = await blockOf(url, toHex(e.block));
+    const buyOnly = plan(token, buyer, BigInt(e.block), now);
     const buyLabels = buyOnly[0].calls.map((c) => c.label);
     const st = buyStage(byLabel(buyLabels, fresh.slice(0, buyLabels.length)));
     let blocks = buyOnly;
@@ -111,9 +115,10 @@ function rebuild(p: Proof, e: Evidence, fresh: Result[]): Rebuilt | { error: str
       // l'inconnu suit l'achat et la sonde du proprietaire, comme dans plan()
       stranger = bs[0].calls[buyLabels.length + (st.owner ? 1 : 0)]?.from ?? null;
       if (!stranger) return { error: "request has no stranger probe where checkToken puts one" };
-      blocks = plan(token, buyer, now, { stranger, amount: st.amount, owner: st.owner });
+      blocks = plan(token, buyer, BigInt(e.block), now, { stranger, amount: st.amount, owner: st.owner });
     }
-    const want = JSON.stringify(buildRequest(BigInt(e.block), buyer, blocks));
+    const funds = await balances(url, head, buyer, stranger ? { stranger, owner: st.owner } : undefined);
+    const want = JSON.stringify(buildRequest(head, funds, blocks));
     if (want !== JSON.stringify(p.request)) return { error: "request is not the one checkToken builds for this target" };
     const labels = blocks.flatMap((b) => b.calls.map((c) => c.label));
     if (labels.length !== fresh.length) return { error: `expected ${labels.length} calls, node returned ${fresh.length}` };
@@ -215,7 +220,7 @@ export async function replay(
     add(!diffs.length, diffs.length ? `call results differ: ${diffs.join(" ; ")}` : `status and return data of all ${fresh.length} calls identical`);
 
     // (d) requete reconstruite, sondes neuves, libelles, puis rejugement a partir de la reponse fraiche
-    const r = rebuild(proof, e, fresh);
+    const r = await rebuild(url, proof, e, fresh);
     if ("error" in r) add(false, `request shape: ${r.error}`);
     else {
       try {

@@ -378,8 +378,16 @@ impl Guard {
     }
 
     /// Paie `amount` a un destinataire permis, sur un verdict `allow` de la sentinelle
-    /// pour cette demande, dans le budget arme. Un verdict ne paie qu'un achat.
-    pub fn spend(&mut self, id: u64, recipient: AccountId, amount: U128) -> Promise {
+    /// pour cette demande, dans le budget arme. Un verdict ne paie qu'un achat, et seulement
+    /// celui du jeton controle : `target` doit etre la cible de la demande (casse ignoree).
+    #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
+    pub fn spend(
+        &mut self,
+        id: u64,
+        target: String,
+        recipient: AccountId,
+        amount: U128,
+    ) -> Promise {
         let who = env::predecessor_account_id();
         let Some(check) = self.checks.get(&id) else {
             env::panic_str("unknown check")
@@ -391,6 +399,10 @@ impl Guard {
             Some(Verdict::Allow) => {}
             Some(_) => env::panic_str("verdict does not allow the purchase"),
         }
+        require!(
+            check.target.eq_ignore_ascii_case(&target),
+            "target differs from the checked token"
+        );
         require!(
             env::block_timestamp() < check.judged_ns.0.saturating_add(VERDICT_TTL_NS),
             "verdict expired"
@@ -1068,7 +1080,7 @@ mod tests {
     fn achat_autorise_debite_et_journalise_la_cible() {
         let (mut g, check) = judged(Verdict::Allow);
         let credit = g.credit_of(&id("agent.test")).0;
-        let _ = g.spend(check, id("shop.test"), U128(30 * U));
+        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
         assert_eq!(g.credit_of(&id("agent.test")).0, credit - 30 * U);
         assert_eq!(g.budget_left(&id("agent.test")).0, 100 * U - PRICE - 30 * U);
         let v = last_event();
@@ -1082,14 +1094,14 @@ mod tests {
     #[should_panic(expected = "verdict does not allow the purchase")]
     fn achat_refuse_sur_block() {
         let (mut g, check) = judged(Verdict::Block);
-        let _ = g.spend(check, id("shop.test"), U128(30 * U));
+        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
     }
 
     #[test]
     #[should_panic(expected = "verdict does not allow the purchase")]
     fn achat_refuse_sur_warn_sans_humain() {
         let (mut g, check) = judged(Verdict::Warn);
-        let _ = g.spend(check, id("shop.test"), U128(30 * U));
+        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
     }
 
     #[test]
@@ -1100,21 +1112,26 @@ mod tests {
         g.allow_recipient(id("shop.test"));
         ctx("agent.test", 0, 500);
         let check = g.request_check(TARGET.into());
-        let _ = g.spend(check, id("shop.test"), U128(30 * U));
+        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
     }
 
     #[test]
     #[should_panic(expected = "recipient not allowed")]
     fn achat_refuse_vers_un_destinataire_non_permis() {
         let (mut g, check) = judged(Verdict::Allow);
-        let _ = g.spend(check, id("attacker.test"), U128(30 * U));
+        let _ = g.spend(check, TARGET.into(), id("attacker.test"), U128(30 * U));
     }
 
     #[test]
     #[should_panic(expected = "budget exceeded")]
     fn achat_refuse_au_dela_du_budget_arme() {
         let (mut g, check) = judged(Verdict::Allow);
-        let _ = g.spend(check, id("shop.test"), U128(100 * U - PRICE + 1));
+        let _ = g.spend(
+            check,
+            TARGET.into(),
+            id("shop.test"),
+            U128(100 * U - PRICE + 1),
+        );
     }
 
     #[test]
@@ -1122,7 +1139,7 @@ mod tests {
     fn achat_refuse_apres_l_echeance() {
         let (mut g, check) = judged(Verdict::Allow);
         ctx("agent.test", 0, SEC);
-        let _ = g.spend(check, id("shop.test"), U128(30 * U));
+        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
     }
 
     #[test]
@@ -1130,15 +1147,31 @@ mod tests {
     fn achat_refuse_a_un_autre_agent() {
         let (mut g, check) = judged(Verdict::Allow);
         ctx("intrus.test", 0, 700);
-        let _ = g.spend(check, id("shop.test"), U128(30 * U));
+        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
+    }
+
+    // un verdict ne paie que l'achat du jeton controle : un allow sur USDC ne paie pas un piege
+    #[test]
+    #[should_panic(expected = "target differs from the checked token")]
+    fn achat_refuse_pour_un_autre_jeton_que_celui_controle() {
+        let (mut g, check) = judged(Verdict::Allow);
+        let piege = "0xaabfF6E27fdc021573753978741a5F88e01000C8";
+        let _ = g.spend(check, piege.into(), id("shop.test"), U128(30 * U));
+    }
+
+    #[test]
+    fn la_cible_de_l_achat_se_compare_sans_la_casse() {
+        let (mut g, check) = judged(Verdict::Allow);
+        let _ = g.spend(check, TARGET.to_lowercase(), id("shop.test"), U128(30 * U));
+        assert!(g.get_check(check).unwrap().settled);
     }
 
     #[test]
     #[should_panic(expected = "check already settled")]
     fn un_seul_achat_par_verdict() {
         let (mut g, check) = judged(Verdict::Allow);
-        let _ = g.spend(check, id("shop.test"), U128(30 * U));
-        let _ = g.spend(check, id("shop.test"), U128(30 * U));
+        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
+        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
     }
 
     #[test]
@@ -1528,7 +1561,7 @@ mod tests {
     fn achat_paye_juste_avant_l_echeance_du_verdict() {
         let (mut g, check) = judged_at_1s();
         ctx("agent.test", 0, SEC + VERDICT_TTL_NS - 1);
-        let _ = g.spend(check, id("shop.test"), U128(30 * U));
+        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
         assert!(g.get_check(check).unwrap().settled);
     }
 
@@ -1537,6 +1570,6 @@ mod tests {
     fn achat_refuse_sur_verdict_perime() {
         let (mut g, check) = judged_at_1s();
         ctx("agent.test", 0, SEC + VERDICT_TTL_NS);
-        let _ = g.spend(check, id("shop.test"), U128(30 * U));
+        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
     }
 }

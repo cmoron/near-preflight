@@ -11,7 +11,8 @@ contract DemoToken {
         SellBlockedLater, // la vente passe juste apres l'achat, plus apres 10 minutes
         SellTax, // 90 % de chaque vente part au proprietaire
         SellTaxLater, // vente sans taxe juste apres l'achat, taxee a 90 % apres 10 minutes
-        HoldOneBlock // honnete : pas de vente dans le bloc de l'achat (anti-sandwich), libre ensuite
+        HoldOneBlock, // honnete : pas de vente dans le bloc de l'achat (anti-sandwich), libre ensuite
+        SimDetector // la vente ne passe qu'en simulation : prix du gaz ou base fee nuls
     }
 
     string public name;
@@ -74,6 +75,7 @@ contract DemoToken {
                 revert("vente fermee apres 10 minutes");
             }
             if (trap == Trap.HoldOneBlock && block.number <= boughtBlock[from]) revert("hold one block");
+            if (trap == Trap.SimDetector && tx.gasprice != 0 && block.basefee != 0) revert("real sale refused");
             if (trap == Trap.SellTax) fee = (value * 90) / 100;
             if (trap == Trap.SellTaxLater && block.timestamp > boughtAt[from] + 10 minutes) {
                 fee = (value * 90) / 100;

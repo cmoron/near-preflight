@@ -38,7 +38,7 @@ kill $SENTINEL
 trap - EXIT # sinon le piege retue un processus deja recolte, et sous set -e son echec devient le code de sortie
 
 echo
-echo "5. Emergency stop by the human (own process, full-access key from the near-cli keychain):"
+echo "6. Emergency stop by the human (own process, full-access key from the near-cli keychain):"
 "${HUMAN[@]}" stop
 refused "agent frozen by the owner" "${ARMER[@]}" 0.06 900
 "${HUMAN[@]}" unfreeze

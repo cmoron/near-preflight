@@ -3,6 +3,9 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "bs58": "^6.0.0",
     "near-api-js": "^7.5.2",
     "viem": "^2.57.18"
   },

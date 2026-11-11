@@ -42,6 +42,12 @@ export function view<T>(method: string, args: Record<string, unknown> = {}): Pro
   return provider.callFunction({ contractId: env("GUARD"), method, args }) as Promise<T>;
 }
 
+/** Vue et hauteur du bloc lu : le RPC repartit les lectures sur des noeuds plus ou moins a jour. */
+export async function viewAt<T>(method: string, args: Record<string, unknown> = {}): Promise<{ value: T; height: number }> {
+  const raw = await provider.callFunctionRaw({ contractId: env("GUARD"), method, args });
+  return { value: JSON.parse(new TextDecoder().decode(new Uint8Array(raw.result))) as T, height: raw.block_height };
+}
+
 /** Message d'erreur du contrat (panique) ou du protocole, sans la pile. */
 export function reason(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);

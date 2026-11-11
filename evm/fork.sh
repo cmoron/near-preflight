@@ -47,11 +47,12 @@ LATER=$(deploy "Demo Vente Fermee Plus Tard" PLUSTARD 3)
 TAX=$(deploy "Demo Taxe 90" TAXE 4)
 TAX_LATER=$(deploy "Demo Taxe 90 Plus Tard" TAXETARD 5)
 HOLD=$(deploy "Demo Detention Un Bloc" DETENTION 6)
+SIM=$(deploy "Demo Detecteur De Simulation" SIMU 7) # en dernier : les adresses precedentes ne changent pas
 
 jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked "$BLOCKED" \
-  --arg later "$LATER" --arg tax "$TAX" --arg taxlater "$TAX_LATER" --arg hold "$HOLD" --argjson block "$FORK_BLOCK" \
+  --arg later "$LATER" --arg tax "$TAX" --arg taxlater "$TAX_LATER" --arg hold "$HOLD" --arg sim "$SIM" --argjson block "$FORK_BLOCK" \
   '{fork_block: $block, usdc: $usdc, safe: $safe, owner_reclaim: $reclaim, sell_blocked: $blocked,
-    sell_blocked_later: $later, sell_tax: $tax, sell_tax_later: $taxlater, hold_one_block: $hold}' > tokens.json
+    sell_blocked_later: $later, sell_tax: $tax, sell_tax_later: $taxlater, hold_one_block: $hold, sim_detector: $sim}' > tokens.json
 echo "fork de Base au bloc $FORK_BLOCK pret sur $RPC ; jetons dans evm/tokens.json :"
 cat tokens.json
 wait $ANVIL
