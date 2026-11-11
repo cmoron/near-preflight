@@ -35,7 +35,7 @@ refused() {
 
 echo "0. The armer (own process, function-call key limited to arm/disarm) arms the agent within the human's bounds."
 [[ $FULL ]] && refused "budget above the human's bound" "${ARMER[@]}" 0.6 900
-# Default run: 4 checks and 2 buys (0.105 NEAR), with the model up to 2 more checks; --full: about
+# Default run: 4 checks and 2 buys (0.121 NEAR), with the model up to 2 more checks; --full: about
 # 0.3 NEAR (exit, warn, second trap, the model's runs and buy). Armed with some margin.
 "${ARMER[@]}" 0.4 900
 # The second agent (--full) asks for one check.

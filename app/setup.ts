@@ -1,6 +1,6 @@
 // Deploys the guard on testnet under a parent account (the human) and writes .env and one key file
-// per role (.env.agent, .env.sentinel, .env.armer), plus .env.agent2 for a second agent (demo: the
-// shared blocklist refuses it a token the sentinel listed).
+// per role (.env.agent, .env.sentinel, .env.armer), plus .env.agent2 for a second agent (demo --full:
+// it checks the farm token and gets the template block).
 // Usage: bun app/setup.ts <parent>.testnet [owner EVM address for ETH withdrawals]
 import { actions, KeyPair, nearToYocto, teraToGas } from "near-api-js";
 import { homedir } from "node:os";
@@ -15,8 +15,8 @@ if (!parent?.endsWith(".testnet") || !/^0x[0-9a-fA-F]{40}$/.test(withdrawTo)) {
 const human = await humanAccount(parent);
 const id = (name: string) => `${name}.${parent}`;
 // Price of a verdict: covers the storage of a check, its code record and, on a block, its listing
-// (CHECK_STORAGE_BYTES = 1700 in src/lib.rs, at 10^19 yoctoNEAR per byte).
-const PRICE = nearToYocto("0.017");
+// (CHECK_STORAGE_BYTES = 1900 in src/lib.rs, at 10^19 yoctoNEAR per byte).
+const PRICE = nearToYocto("0.019");
 // Demo bounds set by the human: 0.5 NEAR per arming (the demo arms 0.4), 1 h at most, 5 NEAR per 7 days.
 const BOUNDS = { max_budget: nearToYocto("0.5").toString(), max_duration_s: 3600, max_7d: nearToYocto("5").toString() };
 const AGENT_METHODS = ["request_check", "buy", "refund_check", "request_exit", "sell_quoted"];
@@ -87,7 +87,7 @@ await guard.signAndSendTransaction({
     ),
   ],
 });
-console.log(`guard deployed and initialized on ${id("guard")} (owner ${parent}, armer ${id("armer")}, price 0.017 NEAR)`);
+console.log(`guard deployed and initialized on ${id("guard")} (owner ${parent}, armer ${id("armer")}, price 0.019 NEAR)`);
 console.log(`derived EVM address of ${id("guard")} (path ${GUARD_PATH}, signer ${MPC_CONTRACT}): ${evmAddress}`);
 console.log(`ETH withdrawals from it go only to ${withdrawTo}, fixed at init`);
 if (!process.argv[3]) console.log("  0x...dEaD is a demo placeholder (a burn address), not an owner's address: pass your own EVM address as 2nd argument");

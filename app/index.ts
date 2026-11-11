@@ -82,19 +82,27 @@ export function templateOf(code: Hex): Hex {
 
 type Log = { address: Address; topics: Hex[]; data: Hex; blockNumber: Hex };
 const word = (t: Hex) => `0x${t.slice(26)}` as Address;
+/** Net WETH the providers added after a `Mint` or `Burn` log, floored at 0 (a burn also pays out the
+ *  WETH buyers swapped in). `wethIs0`: WETH is the pair's token0, so its amount is amount0. */
+const addWeth = (net: bigint, l: Log, wethIs0: boolean) => {
+  const weth = BigInt(`0x${wethIs0 ? l.data.slice(2, 66) : l.data.slice(66, 130)}`);
+  return l.topics[0] === MINT ? net + weth : net > weth ? net - weth : 0n;
+};
+/** eth_getLogs over [from, to] in LOG_CHUNK windows. */
+async function logsIn(call: <T>(method: string, params: unknown[]) => Promise<T>, filter: Record<string, unknown>, from: number, to: number): Promise<Log[]> {
+  const out: Log[] = [];
+  for (let start = BigInt(from); start <= BigInt(to); start += LOG_CHUNK) {
+    const end = start + LOG_CHUNK - 1n < BigInt(to) ? start + LOG_CHUNK - 1n : BigInt(to);
+    out.push(...(await call<Log[]>("eth_getLogs", [{ ...filter, fromBlock: toHex(start), toBlock: toHex(end) }])));
+  }
+  return out;
+}
 
 /** Rebuilds the index of [from, to] from eth_getLogs (in LOG_CHUNK windows) and eth_getCode. `pace`
  *  runs before every request (the CLI waits there to stay polite with public RPCs). */
 export async function buildIndex(url: string, from: number, to: number, pace: () => Promise<void> = async () => {}): Promise<Index> {
   const call = async <T>(method: string, params: unknown[]) => (await pace(), rpc<T>(url, method, params));
-  const logs = async (filter: Record<string, unknown>, first = from) => {
-    const out: Log[] = [];
-    for (let start = BigInt(first); start <= BigInt(to); start += LOG_CHUNK) {
-      const end = start + LOG_CHUNK - 1n < BigInt(to) ? start + LOG_CHUNK - 1n : BigInt(to);
-      out.push(...(await call<Log[]>("eth_getLogs", [{ ...filter, fromBlock: toHex(start), toBlock: toHex(end) }])));
-    }
-    return out;
-  };
+  const logs = (filter: Record<string, unknown>, first = from) => logsIn(call, filter, first, to);
   const chain_id = Number(await call<Hex>("eth_chainId", []));
   const weth = WETH.toLowerCase() as Address;
   const pools: Pool[] = [];
@@ -114,9 +122,7 @@ export async function buildIndex(url: string, from: number, to: number, pace: ()
       if (!s) continue;
       const block = Number(BigInt(l.blockNumber));
       if (l.topics[0] === MINT || l.topics[0] === BURN) {
-        const weth = BigInt(`0x${wethIs0.has(s.pool.pair) ? l.data.slice(2, 66) : l.data.slice(66, 130)}`);
-        // Net of removals, floored at 0: a burn also pays out the WETH buyers swapped in.
-        s.weth = l.topics[0] === MINT ? s.weth + weth : s.weth > weth ? s.weth - weth : 0n;
+        s.weth = addWeth(s.weth, l, wethIs0.has(s.pool.pair));
         if (s.pool.funded === null && s.weth >= MIN_POOL_WETH) s.pool.funded = block;
         continue;
       }
@@ -140,23 +146,40 @@ export async function buildIndex(url: string, from: number, to: number, pace: ()
 export const indexSha256 = (i: Index): Hex => sha256(stringToHex(JSON.stringify(i)));
 
 /** Template reputation judges a target only against pools funded before its own (`ownPair`, its V2
- *  WETH pair), so copies funded and drained after it cannot poison it. That order is known in two
- *  cases: its pool was funded within the index window (the pools funded before that block count), or
- *  it was created after the window (`ownAfter`, no code at `to`: every pool of the index is earlier,
- *  `to + 1`). Otherwise (its pool predates the window, was never funded to MIN_POOL_WETH within it, or
- *  there is none) the rule does not apply: null. Pure. */
-export function beforeBlock(index: Index, ownPair: Address | null, ownAfter: boolean): number | null {
+ *  WETH pair), so copies funded and drained after it cannot poison it. In the index, its pool counts
+ *  from its funding block, or from the window's end (`to + 1`: every pool of the index is earlier) when
+ *  it was not funded within the window. Outside the index, `outside` (ownFunding) says when. Without a
+ *  pair, or for a pool funded before the window, the rule does not apply: null. Pure. */
+export function beforeBlock(index: Index, ownPair: Address | null, outside: number | null): number | null {
   if (!ownPair) return null;
   const own = Object.values(index.templates).flat().find((p) => p.pair === ownPair.toLowerCase());
-  if (own) return own.funded;
-  return ownAfter ? index.to + 1 : null;
+  return own ? (own.funded ?? index.to + 1) : outside;
 }
 
-/** True when `ownPair` is not in the index because it was created after the window: no code at `to`. */
-export async function ownAfterIndex(url: string, index: Index, ownPair: Address | null): Promise<boolean> {
-  if (!ownPair || Object.values(index.templates).flat().some((p) => p.pair === ownPair.toLowerCase())) return false;
-  return (await rpc<Hex>(url, "eth_getCode", [ownPair, toHex(index.to)])) === "0x";
+/** For a pair not in the index, the block its pool counts from: `to + 1` when it was created after the
+ *  window (no code at `to`) or funded after it; its funding block (MIN_POOL_WETH net, from its Mint and
+ *  Burn logs) when that falls within the window; null only when it already held MIN_POOL_WETH of WETH in
+ *  reserve at the block before the window: older than the window by its funding, not by its code (a
+ *  pair created empty before the window and funded inside it is judged). */
+export async function ownFunding(url: string, index: Index, ownPair: Address | null): Promise<number | null> {
+  if (!ownPair || Object.values(index.templates).flat().some((p) => p.pair === ownPair.toLowerCase())) return null;
+  const call = <T>(method: string, params: unknown[]) => rpc<T>(url, method, params);
+  if ((await call<Hex>("eth_getCode", [ownPair, toHex(index.to)])) === "0x") return index.to + 1;
+  const wethIs0 = `0x${(await call<Hex>("eth_call", [{ to: ownPair, data: TOKEN0 }, toHex(index.to)])).slice(-40)}` === WETH.toLowerCase();
+  const at = toHex(index.from - 1);
+  if ((await call<Hex>("eth_getCode", [ownPair, at])) !== "0x") {
+    const reserves = await call<Hex>("eth_call", [{ to: ownPair, data: GET_RESERVES }, at]);
+    if (BigInt(`0x${reserves.slice(wethIs0 ? 2 : 66, wethIs0 ? 66 : 130)}`) >= MIN_POOL_WETH) return null;
+  }
+  let net = 0n;
+  for (const l of await logsIn(call, { address: ownPair, topics: [[MINT, BURN]] }, index.from, index.to)) {
+    net = addWeth(net, l, wethIs0);
+    if (net >= MIN_POOL_WETH) return Number(BigInt(l.blockNumber));
+  }
+  return index.to + 1;
 }
+const TOKEN0 = "0x0dfe1681"; // token0()
+const GET_RESERVES = "0x0902f1ac"; // getReserves()
 
 /** The template's pools funded before `before` (beforeBlock; none when null); a drain counts within
  *  SHORT_BLOCKS of the funding. */
@@ -172,7 +195,7 @@ export function reputationOf(index: Index, template: Hex, before: number | null)
  *  (level allow, which changes no verdict), so the reasons say the token was not judged on it. */
 export function reputationFindings(r: Reputation | null): Finding[] {
   if (!r) return [{ level: "warn", text: "template reputation not checked: no index for this chain" }];
-  if (r.before_block === null) return [{ level: "allow", text: `template reputation not applied: the token's own pool was not funded within the index window (blocks ${r.from}..${r.to})` }];
+  if (r.before_block === null) return [{ level: "allow", text: `template reputation not applied: the token's own pool was funded before the index window (blocks ${r.from}..${r.to})` }];
   if (r.pools < MIN_POOLS || r.drained / r.pools < FARM_SHARE) return [];
   return [{ level: "block", text: `template ${short(r.template)}: ${r.drained} of ${r.pools} earlier pools drained, median ${r.median_drain_blocks} blocks after funding` }];
 }

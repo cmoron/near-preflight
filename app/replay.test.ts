@@ -1,6 +1,6 @@
 // Replay of a proof against the local copy of Base (run evm/fork.sh first).
 import { describe, expect, test } from "bun:test";
-import { encodeFunctionData, maxUint256, parseAbi, sha256, stringToHex, type Address, type Hex } from "viem";
+import { encodeFunctionData, maxUint256, parseAbi, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
 import { buildIndex } from "./index";
 import { replay, summary, type OnChain, type Proof } from "./replay";
@@ -35,8 +35,8 @@ const proofOf = async (token: Address = TRAP, probe?: Partial<Probe>, guard: Add
       preview: localPreviews({ guard, target: token, amount: AMOUNT, requestedS: await headTime() }),
     }),
   );
-/** The request's calls of block `i`, editable. */
-const callsIn = (p: Proof, i: number) => (p.request as any).params[0].blockStateCalls[i].calls as Record<string, string>[];
+/** The calls of block `i` of request `side` (0 the guard side, 1 the probe side, 2 the synthetic calls), editable. */
+const callsIn = (p: Proof, side: number, i: number) => (p.request as any)[side].params[0].blockStateCalls[i].calls as Record<string, string>[];
 const failed = (lines: { ok: boolean; line: string }[]) => lines.filter((l) => !l.ok).map((l) => l.line);
 const evidenceOf = (p: Proof) => JSON.parse(p.evidence);
 /** Modifies the content of the evidence string (as a forger would) and reserializes it. */
@@ -84,8 +84,8 @@ describe("replay", () => {
   });
   test("a tampered calldata in the request is detected (hash)", async () => {
     const proof = structuredClone(await proofOf());
-    const calls = (proof.request as any).params[0].blockStateCalls[0].calls;
-    calls[2].data = calls[2].data.slice(0, -2) + "ff";
+    const [buy] = callsIn(proof, 0, 0);
+    buy.data = buy.data.slice(0, -2) + "ff";
     const bad = failed(await replay(proof, RPC));
     expect(bad.some((l) => l.includes("request hash"))).toBe(true);
   });
@@ -99,16 +99,16 @@ describe("replay", () => {
     expect(bad[0]).toContain("labels");
   });
   test("a request whose shape is not checkToken's is detected (token, buyer)", async () => {
-    const proof = structuredClone(await proofOf());
-    const calls = (proof.request as any).params[0].blockStateCalls[2].calls;
-    calls[1].from = "0x" + "11".repeat(20); // the +1 h sale comes from another address than the buyer
+    const proof = structuredClone(await proofOf(tokens.safe as Address));
+    const calls = callsIn(proof, 1, 255);
+    calls[1].from = "0x" + "11".repeat(20); // the probe's late sale comes from another address than the buyer
     const bad = failed(await replay(proof, RPC));
     expect(bad.some((l) => l.includes("request hash"))).toBe(true); // hash and shape fail together
     expect(bad.some((l) => l.includes("request shape"))).toBe(true);
   });
   test("another RPC method is refused without any request being sent", async () => {
     const proof = structuredClone(await proofOf());
-    (proof.request as any).method = "anvil_setBalance";
+    (proof.request as any)[1].method = "anvil_setBalance";
     const real = globalThis.fetch;
     let sent = 0;
     globalThis.fetch = ((...a: Parameters<typeof fetch>) => (sent++, real(...a))) as typeof fetch;
@@ -122,7 +122,7 @@ describe("replay", () => {
   });
   test("a block number different from evidence.block is refused without a request", async () => {
     const proof = structuredClone(await proofOf());
-    (proof.request as any).params[1] = "0x1";
+    (proof.request as any)[2].params[1] = "0x1";
     expect(failed(await replay(proof, RPC)).some((l) => l.includes("request shape"))).toBe(true);
   });
   test("without --check, the summary says nothing is tied to the chain", () => {
@@ -149,13 +149,14 @@ describe("replay: the evidence string is the one posted on chain", () => {
   });
   test("a guard buy simulated at another nonce than evidence.tx_hashes says is detected", async () => {
     const proof = structuredClone(await proofOf());
-    const buy = callsIn(proof, 0).find((c) => c.value && c.from.toLowerCase() === GUARD_EVM.toLowerCase())!;
+    const [buy] = callsIn(proof, 0, 0);
     buy.nonce = "0x7";
+    callsIn(proof, 2, 0)[2].nonce = "0x7"; // its copy before the takebacks too: a consistent forgery
     expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("the guard's buy simulated hashes to"))).toBe(true);
   });
   test("a guard sale simulated with an approve of 2^256 - 1 instead of the exact amount is refused (request shape)", async () => {
     const proof = structuredClone(await proofOf(tokens.safe as Address));
-    const approve = callsIn(proof, 1).find((c) => c.from.toLowerCase() === GUARD_EVM.toLowerCase() && c.data.startsWith("0x095ea7b3"))!;
+    const [approve] = callsIn(proof, 0, 1);
     approve.data = encodeFunctionData({ abi: parseAbi(["function approve(address,uint256) returns (bool)"]), args: [ROUTER, maxUint256] });
     expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("request shape: sale 1: not approve(router"))).toBe(true);
   });
@@ -381,21 +382,50 @@ describe("replay: probe addresses", () => {
     expect(bad[0]).toContain("buyer and stranger");
   });
   test("no stranger probe in the request: explicit refusal, no fallback on the buyer", async () => {
-    const proof = structuredClone(await proofOf());
-    const calls = (proof.request as any).params[0].blockStateCalls[0].calls;
-    calls.splice(10); // keeps both buys (5 calls each), drops the transferFrom probes and the approvals
+    const proof = structuredClone(await proofOf(tokens.safe as Address));
+    callsIn(proof, 2, 0).splice(4); // keeps the quote, owner() and both buys, drops the takebacks
     const bad = failed(await replay(rehashed(proof), RPC));
     expect(bad.some((l) => l.includes("no stranger probe"))).toBe(true);
   });
 });
 
+// Judge pass 5's JudgeTrap was let through by a top-level balanceOf the simulation sent from the guard's
+// address before its buy. Replay refuses a guard-side request holding anything but the guard's buy,
+// approves and swaps, in that order and at consecutive nonces.
+describe("replay: the guard-side request holds only the guard's own transactions", () => {
+  const balanceOf = (who: Address, token: string) => ({ from: who, to: token, data: encodeFunctionData({ abi: parseAbi(["function balanceOf(address) view returns (uint256)"]), args: [who] }) });
+  const guardBlocks = (p: Proof) => (p.request as any)[0].params[0].blockStateCalls as { calls: Record<string, string>[] }[];
+  test("an intact proof says so", async () => {
+    const lines = await replay(await proofOf(tokens.safe as Address), RPC);
+    expect(lines.some((l) => l.ok && l.line.includes("guard-side request holds only the guard's"))).toBe(true);
+  });
+  test("a top-level balanceOf from the guard before its buy: refused", async () => {
+    const proof = structuredClone(await proofOf(tokens.safe as Address));
+    const [b1] = guardBlocks(proof);
+    b1.calls.unshift({ ...b1.calls[0], ...balanceOf(GUARD_EVM, tokens.safe) });
+    expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("guard-side request"))).toBe(true);
+  });
+  test("a read between the guard's approve and its swap: refused", async () => {
+    const proof = structuredClone(await proofOf(tokens.safe as Address));
+    const b2 = guardBlocks(proof)[1];
+    b2.calls.splice(1, 0, { ...b2.calls[0], ...balanceOf(GUARD_EVM, tokens.safe) });
+    expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("guard-side request"))).toBe(true);
+  });
+  test("a probe call moved into the guard-side request: refused", async () => {
+    const proof = structuredClone(await proofOf(tokens.safe as Address));
+    const probeBuy = (proof.request as any)[1].params[0].blockStateCalls[0].calls[0];
+    guardBlocks(proof)[0].calls.unshift(probeBuy);
+    expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("guard-side request"))).toBe(true);
+  });
+});
+
 describe("replay: time of the first simulated block", () => {
   test("time of the first simulated block != timestamp of evidence.block + 2: refused", async () => {
-    const block = Number(BigInt((await rpc<{ number: Hex }>(RPC, "eth_getBlockByNumber", ["latest", false])).number));
-    const proof = await proofOf(TRAP, { time: BigInt(await blockTime(block)) + 86_400n }); // one day later
-    const bad = failed(await replay(proof, RPC));
-    expect(bad.length).toBe(1);
-    expect(bad[0]).toContain("first simulated block time");
+    const proof = structuredClone(await proofOf());
+    const first = (proof.request as any)[0].params[0].blockStateCalls[0].blockOverrides;
+    first.time = toHex(BigInt(first.time) + 86_400n); // one day later
+    const bad = failed(await replay(rehashed(proof), RPC));
+    expect(bad.some((l) => l.includes("first simulated block time"))).toBe(true); // the node refuses it too: not in order
   });
   test("--check on a node whose clock is not real time: check reported as not verifiable", async () => {
     const proof = await proofOf();

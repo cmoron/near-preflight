@@ -96,12 +96,16 @@ export async function attest(p: Package, deps: Deps = live): Promise<Line[]> {
 }
 
 /** The package's sha256 against check #id read on the guard: stored as the decision of request_check
- *  or of buy, and the signed response asked for that very action. */
-export function onChain(p: Package, sha: string, id: number, check: Check | null): Line[] {
+ *  or of buy, anchored by the guard on that check alone (`anchored`: decision_of, the check the guard
+ *  says this digest backs; it refuses a digest twice), and the signed response asked for that very
+ *  action. */
+export function onChain(p: Package, sha: string, id: number, check: Check | null, anchored: string | null): Line[] {
   if (!check) return [line(false, `check #${id} not found on the guard`)];
   const kind = check.decision_sha256 === sha ? "request_check" : check.buy_decision_sha256 === sha ? "buy" : null;
   if (!kind) return [line(false, `check #${id} carries ${check.decision_sha256 ?? "no digest"} (request_check) and ${check.buy_decision_sha256 ?? "no digest"} (buy), not this package's sha256 ${sha}`)];
   const out = [line(true, `check #${id} on the guard carries this package's sha256 ${sha.slice(0, 12)}... as the decision of its ${kind}`)];
+  const alone = anchored === String(id);
+  out.push(line(alone, alone ? `the guard anchors this decision on check #${id} alone (it refuses a digest already anchored)` : `the guard anchors this decision on ${anchored ? `check #${anchored}` : "no check"}, not #${id}`));
   const calls = (JSON.parse(p.response).choices?.[0]?.message?.tool_calls ?? []) as { function: { name: string; arguments: string } }[];
   const asked = calls.map((c) => ({ name: c.function.name, args: JSON.parse(c.function.arguments || "{}") }));
   const match = asked.find((c) => c.name === kind && (kind === "buy" ? Number(c.args.check_id) === id : String(c.args.token).toLowerCase() === check.target.toLowerCase()));
@@ -159,7 +163,8 @@ if (import.meta.main) {
   if (id !== null) {
     const { env, view } = await import("./near");
     const check = await view<Check | null>("get_check", { id }).catch((e) => (lines.push(line(false, `get_check(${id}) on ${env("GUARD")} failed: ${why(e)}`)), null));
-    if (lines.at(-1)?.ok !== false || check) lines.push(...onChain(pkg, sha, id, check).map((l) => ({ ...l, line: l.line.replace("the guard", env("GUARD")) })));
+    const anchored = check ? await view<string | null>("decision_of", { decision_sha256: sha }).catch((e) => (lines.push(line(false, `decision_of on ${env("GUARD")} failed: ${why(e)}`)), null)) : null;
+    if (lines.at(-1)?.ok !== false || check) lines.push(...onChain(pkg, sha, id, check, anchored).map((l) => ({ ...l, line: l.line.replace("the guard", env("GUARD")) })));
     if (check) {
       const { provider } = await import("./near");
       const nearBlock: NearBlock = async (hash) => {

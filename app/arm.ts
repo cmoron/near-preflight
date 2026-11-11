@@ -8,8 +8,8 @@ import { account, call, env, reason, view } from "./near";
 const armer = account(env("ARMER"), env("ARMER_KEY"));
 const agent = env("AGENT");
 const [budget = "0.06", duration = "900"] = process.argv.slice(2);
-// Integrity check: the armer arms the state it read; if the credit changes before the transaction,
-// the contract refuses the arming.
+// Integrity check: the armer passes the credit it read; the contract refuses the arming if the credit
+// drops below it before the transaction (the agent spent or was drained), and accepts a top-up.
 const credit = await view<`${bigint}`>("credit_of", { account: agent });
 try {
   const args = { agent, budget: nearToYocto(budget as `${number}`).toString(), duration_s: Number(duration), expected_credit: credit };

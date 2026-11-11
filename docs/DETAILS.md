@@ -11,44 +11,55 @@ goes into the evidence, whose sha256 the guard stores with the verdict; `app/rep
 
 | Check                | How (read-only, public RPC calls)                                                | Verdict         |
 | -------------------- | -------------------------------------------------------------------------------- | --------------- |
-| Buy, takeback, sales | `eth_simulateV1`: the guard's own transactions, then their twins from a probe    | see below       |
+| Buy, takeback, sales | `eth_simulateV1`: the guard's own transactions alone; a probe's twins, apart      | see below       |
 | Removable liquidity  | the Uniswap V2 WETH pair's LP supply now and 1,800 blocks (1 h) back             | see below       |
 | Template reputation  | the index of V2 WETH pools by code template (`bun app/index.ts`)                 | see below       |
 | Shared blocklist     | `get_entry` on the guard for the token                                           | listed: `block` |
 | Code changed         | `last_code` on the guard: code hash and proxy implementation at the last verdict | changed: `warn` |
-| Agent exit quote     | `eth_simulateV1`: the guard's own approve and swap, from its address             | quote = ETH out |
+| Agent exit quote     | `eth_simulateV1`: the guard's own approve and swap, alone, from its address      | quote = ETH in  |
 
-**Simulation: the exact bytes the guard signs.** The agent states the amount of its buy at `request_check`;
-the guard stores it and `buy` accepts no other. The guard side of the simulation does not rebuild the
-guard's transactions: it reads them from the guard (`preview_check(id, quote)`, `preview_sale(token,
-amount, deadline)`, unsigned EIP-1559 bytes built by the same code `buy` and `sell_quoted` sign with) and
-sends them as is from the guard's EVM address: same calldata (router function, path, recipient, floor,
-deadline), value, nonce, gas limit and fee fields, with the guard's real balance when it covers them. Its
-buy runs first, on the block's real state. The verdict carries the keccak256 of that buy (the MPC payload);
-`post_verdict` refuses an `allow` or a `warn` whose hashes are not what the guard would sign at that moment,
-and `buy` signs only a transaction with that hash. A verdict is therefore tied to a nonce: if another
-signature happens between the verdict and the buy, or the owner changes gas or fees, the buy is refused
-(`transaction differs from the one simulated`) and the agent asks a new check. The swap deadline is fixed by
-the check (its request time + 300 s), so it is part of the simulated bytes too.
+**Simulation: the exact bytes the guard signs, and nothing else.** The agent states the amount of its buy at
+`request_check`; the guard stores it and `buy` accepts no other. The sentinel reads the guard's transactions
+from the guard (`preview_check(id, quote)`, `preview_sale(token, amount, deadline)`, unsigned EIP-1559 bytes
+built by the same code `buy` and `sell_quoted` sign with) and sends them as is from the guard's EVM address:
+same calldata (router function, path, recipient, floor, deadline), value, nonce, gas limit and fee fields,
+with the guard's real balance when it covers them. The verdict carries the keccak256 of that buy (the MPC
+payload); `post_verdict` refuses an `allow` or a `warn` whose hashes are not what the guard would sign at
+that moment, and `buy` signs only a transaction with that hash. A verdict is therefore tied to a nonce: if
+another signature happens between the verdict and the buy, or the owner changes gas or fees, the buy is
+refused (`transaction differs from the one simulated`) and the agent asks a new check. The swap deadline is
+fixed by the check (its request time + 300 s), so it is part of the simulated bytes too.
 
-Two buyers in the same blocks: the guard's address, then a probe whose address is derived from the check and
-the EVM block hash (a token cannot whitelist it in advance), whose calls are the guard's own with the probe as
-recipient. Each runs:
+A check is three `eth_simulateV1` requests on the same block, sharing no state:
 
-- the buy of the amount stated;
-- `transferFrom` without approval, by `owner()` and by a stranger (a takeback);
-- a sale of half in the next block, and of the rest 256 blocks later (timestamp +1 h), each an approve of
-  the exact amount then `swapExactTokensForETHSupportingFeeOnTransferTokens`, as the guard signs an exit.
+- **guard side**: the guard's buy on the block's real state, then a sale of half in the next block and of the
+  rest 256 blocks (512 s) after the proof's block, each an approve of the exact amount then
+  `swapExactTokensForETHSupportingFeeOnTransferTokens`, as the guard signs an exit. Nothing else: no read, no
+  probe, no other sender before or between them;
+- **probe side**: the same from a probe, whose address is derived from the check and the EVM block hash (a
+  token cannot whitelist it in advance), with the probe as recipient;
+- **synthetic calls**: the pool's quote and `owner()`, then both buys and a `transferFrom` without approval
+  of each buyer's tokens by `owner()` and by a stranger (a takeback).
 
-The class this closes: the guard-side simulation runs the exact bytes the contract signs, so a token keyed on
-a difference between a looser simulation and the real transaction (gas price, buyer, gas limit, amount,
-approve) is caught. What remains: a token can still behave differently on the real chain later, after the
-buy (an owner action, a time or block it was not simulated at).
+Amounts come from logs, never from a read between transactions: tokens bought from the token's `Transfer`
+logs; the ETH a sale pays from the logs `traceTransfers` gives ETH transfers; a sale's quote from the pool's
+last `Sync` before its approve. Blocks follow Base's cadence: 2 s per block, every block up to the late
+sale listed (empty in between; a node fills a gap with 12 s blocks), the real base fee and coinbase, and a
+prevrandao per block, keccak256 of the proof block's and the block number, which replay recomputes.
+
+The class this closes: tokens keyed on a difference between the simulation and the real transactions (the
+guard's gas price, gas limit, fees, amount, approve, calldata) and on extra calls of the simulation (a
+top-level read, a probe's or a stranger's call before a sale). What stays open: a token can behave
+differently on the real chain after the buy (an owner action, a sale later than 512 s), and no simulated
+future block can be proven indistinguishable from the real one (its prevrandao, base fee, time and number
+are unknown in advance).
 
 Verdicts: a revert, a takeback or a tax of 50 % or more is a `block`; a tax from 10 % is a `warn`; no V2 pair
-is a `warn`. A `block` found on the probe side lists the token on the guard. A failure on the guard's side
-only (its address is public: anyone can send it tokens or get a token to freeze it) blocks that check but
-lists nothing, and its reason starts with `guard address only, not listed`.
+is a `warn`. A sale's tax is measured on the ETH the seller receives, and a pool that pays out more WETH than
+the seller receives is a `block` (a token that sells for itself during the sale; honest tokens that swap
+their fees during a sale fall here too). A `block` found on the probe side lists the token on the guard. A
+failure on the guard's side only (its address is public: anyone can send it tokens or get a token to freeze
+it) blocks that check but lists nothing, and its reason starts with `guard address only, not listed`.
 
 **Removable liquidity.** If at least 90 % of today's LP supply already existed 1,800 blocks ago, the
 liquidity is old and its holders are not read. Otherwise the holders come from the pair's `Transfer` logs
@@ -62,14 +73,15 @@ half the LP removable (an EOA, a contract, or several summed; only 0x0 and 0xdea
 added (`Mint` minus `Burn` amounts, floored at 0) reaches 0.5 ETH, not the pair's creation (a pair created
 empty long before says nothing); liquidity added and removed again does not add up. It is drained when 90 % of
 the LP ever minted is burned after that. Reputation judges a token only against pools funded before its own,
-so copies funded and drained after it cannot get it blocked. That order is known in two cases: its pool was
-funded (0.5 ETH net) within the index window, and the pools funded before that block count; or its pair was
-created after the window (no code at the window's last block), and every pool of the index counts. Otherwise
-(its pool predates the window, was never funded within it, or there is none) the rule does not apply: the
-verdict says `template reputation not applied: the token's own pool was not funded within the index window`
-and changes nothing else. At least 3 counted pools with at least 80 % drained within 1 day of funding is a
-`block`, which never lists anything. No index for the chain is a `warn`: an unknown reputation is never a
-pass, and stays distinct from "not applied" and from "checked and clean" (no finding).
+so copies funded and drained after it cannot get it blocked. Its own pool counts from its funding block when
+that falls within the index window, and from the window's end (every pool of the index counts) when it was
+funded after the window or created after it. A pair created before the window is older than it only by its
+funding: if it held 0.5 ETH of WETH in reserve at the block before the window, the rule does not apply and
+the verdict says `template reputation not applied: the token's own pool was funded before the index window`;
+otherwise it is dated by its funding inside the window, read from its own `Mint` and `Burn` logs. At least 3
+counted pools with at least 80 % drained within 1 day of funding is a `block`, which never lists anything.
+No index for the chain is a `warn`: an unknown reputation is never a pass, and stays distinct from "not
+applied" and from "checked and clean" (no finding).
 
 ## What NEAR enforces
 
@@ -96,12 +108,13 @@ pass, and stays distinct from "not applied" and from "checked and clean" (no fin
 | Arming refused if the agent's credit dropped below what the armer read (a top-up is fine)      | `arm`                         |
 | Emergency stop: `disarm` by the owner freezes the agent until `unfreeze`                       | `disarm`, `unfreeze`          |
 | One signature at a time; a failed signature returns credit and budget, the nonce stays free    | `on_signed`                   |
-| A check's price (0.017 NEAR) covers its worst-case storage, 1,700 bytes, measured by tests     | `request_check`               |
+| A decision digest backs one call: a digest already anchored is refused                         | `request_check`, `buy`        |
+| A check's price (0.019 NEAR) covers its worst-case storage, 1,900 bytes, measured by tests     | `request_check`               |
 
 Details:
 
 - **Floor.** The sentinel's quote (tokens the guard's address received in its simulated buy of the amount
-  stated) minus 3 %. The exit floor is the exit quote's ETH out minus 3 %. The agent never chooses a floor.
+  stated) minus 3 %. The exit floor is the exit quote's ETH received minus 3 %. The agent never chooses a floor.
 - **Arming integrity.** The armer passes the credit it read; `arm` refuses a lower one (the agent spent or
   was drained since) and accepts a higher one: anyone may top up an agent with `deposit_credit`, and refusing
   any change let one yoctoNEAR every 2 s block every arming. The extra credit is still capped by the armed
@@ -121,8 +134,11 @@ Details:
   21,000 to 2,000,000, fees up to 10 gwei) and sells again. Measured on the fork with `gas_hungry` (a sale
   needs 500,000 gas left): at 250,000 the swap reverted (receipt status 0), at 600,000 the same sale went
   through. Whether a token lets any sale through is up to its code.
-- **Decision digest.** `request_check` and `buy` take an optional `decision_sha256`, stored on the check and
-  logged in `check_requested` and `sign_requested`. The guard does not check it (see Limits).
+- **Decision digest.** `request_check` and `buy` take an optional `decision_sha256`, stored on the check,
+  logged in `check_requested` and `sign_requested`, and anchored: a digest already anchored is refused
+  (`decision already anchored on check #n`), so one signed decision backs one guard call; `decision_of`
+  names the check it backs. A refunded check or a failed signature frees its digest. Each anchor (at most
+  117 bytes) is paid by the check's price. The guard does not check the package itself (see Limits).
 
 ## Roles
 
@@ -175,7 +191,8 @@ holds no key: its tools call the agent's wrapper (`app/agent.ts`).
 `bun app/attest.ts <package> [--check <id>]` verifies cryptographically: the signature, the hashes of the
 archived request and response, the TDX quote (DCAP, `@phala/dcap-qvl-node` as in `nearai-cloud-verifier`),
 its report_data (signing address and our nonce), the docker compose measured in `mr_config_id`, and with
-`--check` the sha256 on chain and that the signed response asked for that very action. Taken on trust:
+`--check` the sha256 on chain, that the guard anchors it on that check alone (`decision_of`), and that the
+signed response asked for that very action. Taken on trust:
 NVIDIA NRAS's GPU verdict (over TLS, its JWT signature not checked, as in the official verifiers) and
 Intel PCS's collateral. `attest` calls Intel and NVIDIA, not NEAR AI.
 
@@ -183,11 +200,13 @@ A package is bound to its check. The system message of every signed request ends
 agent <agent>, NEAR block <hash> (height <n>).`, the latest final block read when the run starts. With
 `--check <id>`, `attest` requires that guard to be the one it reads (GUARD), that agent to be the check's,
 and that block (fetched from the NEAR RPC) to be at most 600 s before the check's request, never after. A
-package recorded for one deployment cannot be anchored on another, nor replayed on a later check.
+package recorded for one deployment cannot be anchored on another, nor replayed on a check more than 600 s
+later; within those 600 s, the guard refuses its digest on a second check or on a buy, so one decision
+backs one guard call.
 
 Without a key, the demo verifies `app/fixtures/decision.json`: the model's decision on the same poisoned
-inbox, anchored as check #1 of this deployment, `guard.goblin-guard-31220.testnet` (its signed request names
-that guard, `agent.goblin-guard-31220.testnet` and a block 33 s before the check).
+inbox, anchored as check #5 of this deployment, `guard.goblin-guard-63518.testnet` (its signed request names
+that guard, `agent.goblin-guard-63518.testnet` and a block 6 s before the check).
 
 Injection count: `./demo.sh --full` with a key runs the model 3 times on the poisoned inbox and prints how
 many runs resisted; `bun --env-file=.env --env-file=.env.agent --env-file=.env.llm app/llm.ts 20` measures
@@ -225,19 +244,26 @@ there); a pruned node refuses old state, an archive node does not.
 - **Sentinel.** One key on one machine, no TEE. A lying `allow` can be bought within 120 s; replay catches it
   only afterwards. A lying exit quote gives a lower floor; replay catches it afterwards. The owner replaces a
   compromised key (`set_sentinel`); verdicts it already posted stay.
-- **Simulation.** It runs the exact bytes the guard signs, at the verdict's block: a token can still behave
-  differently on the real chain later, after the buy (owner actions, traps after 256 blocks, V4 hooks). The
-  sales after a buy are simulated as half then the rest; an exit of another amount is simulated only by its
-  own exit quote, after the buy. A token whose public state a third party can move (a pool emptied of tokens,
-  for instance) can still fail the probe's buy and get listed; the owner unlists.
+- **Public before broadcast.** The signing request (`sign_requested`, with the transaction's hash) and the
+  signed transaction (`signed`) are public on NEAR before anyone broadcasts it on Base: a token owner watching
+  the guard can react (change its token's state, front-run the buy) before the swap's 300 s deadline.
+- **Simulation.** The guard side runs the exact bytes the guard signs and nothing else, at the verdict's
+  block. A token can still behave differently on the real chain after the buy (owner actions, a sale later
+  than 512 s, V4 hooks), and no simulated future block can be proven indistinguishable: its prevrandao, base
+  fee, time and number are not known in advance (the simulation derives a prevrandao per block and reuses
+  the proof block's base fee). The check's sales are previews (no floor, a fixed deadline): an exit's own
+  bytes are simulated only by its exit quote, after the buy, and an exit of another amount too. When the
+  guard's address cannot pay for its transactions at the check, its balance is set to exactly what they
+  spend. A token whose public state a third party can move (a pool emptied of tokens, for instance) can still
+  fail the probe's buy and get listed; the owner unlists.
 - **Verdicts tied to a nonce.** A verdict buys only the transaction simulated, at the guard's nonce then: a
   signature for another check, or a gas or fee change, between the verdict and the buy refuses that buy, and
   the agent pays a new check. Several busy agents race for the one nonce sequence.
 - **Template reputation.** Keyed by code template only: changing anything other than a `PUSH32` operand or
   the metadata makes a new template. A token is judged only against pools funded before its own, so copies
-  cannot get it blocked; a token whose pool predates the index window, or never held 0.5 ETH within it, is not
-  judged by reputation at all (its reasons say so): an operator who creates its target's pair before the
-  window, or funds it before running its farm, escapes the farm's history. A widely used template has a mixed
+  cannot get it blocked; a token whose pool already held 0.5 ETH of WETH before the index window is not judged
+  by reputation at all (its reasons say so): an operator who keeps 0.5 ETH in its target's pool from before
+  the window escapes the farm's history. A widely used template has a mixed
   history, and the 80 % share is what keeps it from blocking. The sentinel chooses the index window; replay
   does not judge it. A drain counts only as LP burned.
 - **Removable liquidity.** Liquidity older than 1,800 blocks passes without its holders being read, and so
@@ -256,8 +282,9 @@ there); a pruned node refuses old state, an archive node does not.
   reference, since none is published. The same signing address signed every run here: a signature ties a
   response to that key, not to one machine. The GPU evidence is tied to the quote by our nonce only. How long
   NEAR AI keeps a signature is unknown, hence the archived packages (`proofs/llm/`).
-- **Decision digest.** The guard stores the digest the agent sends and does not check it: a compromised agent
-  can omit it or attach another package. It ties an action to a decision after the fact; it does not gate it.
+- **Decision digest.** The guard stores the digest the agent sends and refuses one already anchored, but does
+  not check the package: a compromised agent can omit it or attach another package. It ties an action to a
+  decision after the fact; it does not gate it.
 - **Operations.** The NEAR/ETH rate is fixed by the owner, with no oracle. One signature at a time for all
   agents and exits. The emergency stop does not recall a signature already requested. All roles run under
   one OS user, whose near-cli keychain holds full-access keys.
@@ -267,8 +294,8 @@ there); a pruned node refuses old state, an archive node does not.
 
 ## Closed after review
 
-Each line is a bypass that a review (four judge runs and our own security passes) found, then how it was
-closed. Each has a test.
+Each line is a bypass that a review (five judge runs, automated reviews and our own security passes) found,
+then how it was closed. Each has a test.
 
 - A token that sells only when `tx.gasprice` or `block.basefee` is 0 (the simulation's defaults): calls carry the guard's real fee fields, base fee, prevrandao and coinbase.
 - An `allow` on USDC used to pay a trap: the guard builds and NEAR signs the swap of the verdict's own target; the agent has no EVM key.
@@ -287,3 +314,8 @@ closed. Each has a test.
 - Anyone could block arming by depositing 1 yoctoNEAR to the agent: `arm` refuses only a credit below what the armer read.
 - The recorded decision package re-anchored on a guard that never called the model: the signed request names the guard, the agent and a fresh NEAR block, and `attest --check` verifies all three.
 - A compromised sentinel key could not be revoked: `set_sentinel`, owner only, logged.
+- A token that sells only after a top-level `balanceOf`, which only the simulation sent (the fifth run's JudgeTrap): the guard side holds the guard's own transactions alone, from the block's real state; the probe, the quote, `owner()` and the takebacks run in requests of their own, and replay refuses any other call on the guard side. `judge_trap` and two siblings are on the fork, blocked and listed: `untouched_buyer` (a buyer that never called the token before its buy never sells) and `stranger_key` (a sale keyed by a stranger's failed `transferFrom`).
+- Simulated blocks told apart from real ones (the late sale 256 blocks but 1 h later, one prevrandao for all): 2 s per block, every block up to the late sale listed, a prevrandao per block.
+- A sale tax hidden by a token that sells for itself into the pool during the sale (the pool's WETH outflow was measured): the tax is the ETH the seller receives, and a pool paying out more is a `block`; `pair_pull_tax` on the fork.
+- One signed decision anchored on two checks: the guard refuses a digest already anchored, and `attest --check` verifies `decision_of`.
+- A pair created empty before the index window escaped reputation (having code there was taken for being older): an older pool must have held 0.5 ETH before the window, otherwise it is dated by its funding inside it.

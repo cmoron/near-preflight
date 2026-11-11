@@ -19,7 +19,7 @@ const TIMEOUT_MS = 300_000; // contract delay before refunding a request without
  *  (app/llm.ts) that asked for it, stored with the check. */
 export async function requestCheck(target: string, wei: bigint, decision?: string): Promise<number> {
   const { value: id, tx } = await call<number>(agent, "request_check", { target, amount_wei: wei.toString(), decision_sha256: decision });
-  log(`request #${id} : verdict on a buy of ${formatEther(wei)} ETH of ${target}, 0.017 NEAR taken from credit${decision ? `, decision ${decision.slice(0, 12)}...` : ""}  ${tx}`);
+  log(`request #${id} : verdict on a buy of ${formatEther(wei)} ETH of ${target}, 0.019 NEAR taken from credit${decision ? `, decision ${decision.slice(0, 12)}...` : ""}  ${tx}`);
   return id;
 }
 
@@ -126,7 +126,7 @@ export async function sellAll(buyId: number): Promise<{ nonce: number; signed: H
   ]);
   const amount = balance < BigInt(held) ? balance : BigInt(held);
   const { value: id, tx: asked } = await call<number>(agent, "request_exit", { buy_id: buyId, amount: amount.toString() });
-  log(`request #${id} : exit quote for ${amount} ${token} (bought by #${buyId}), 0.017 NEAR taken from credit  ${asked}`);
+  log(`request #${id} : exit quote for ${amount} ${token} (bought by #${buyId}), 0.019 NEAR taken from credit  ${asked}`);
   const quote = await waitVerdict(id);
   if (quote?.verdict !== "allow") {
     log(`#${id} : no exit quote (${quote?.reasons ?? "no verdict"}): no sale by the agent; the owner's own exit stays open`);

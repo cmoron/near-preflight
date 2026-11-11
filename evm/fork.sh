@@ -159,15 +159,37 @@ for i in 1 2 3; do
   COPIES+=("$copy")
 done
 
+# Deployed after everything above, whose addresses do not move: judge pass 5's JudgeTrap (a sale only
+# after a top-level balanceOf, which only a simulation sent) and its siblings (src/SideTrap.sol), then a
+# tax hidden from a check that measured the pool's WETH outflow. LP burned: the trap is all there is to find.
+cast rpc -r $RPC anvil_setBalance $DEPLOYER 0x56BC75E2D63100000 >/dev/null # 100 ETH again
+side() { # forge create arguments -> token address, 5 ETH against 500,000 tokens, LP burned
+  local token
+  token=$(forge create --rpc-url $RPC --unlocked --from $DEPLOYER --broadcast --json "$@" | jq -r .deployedTo)
+  cast send -r $RPC --unlocked --from $DEPLOYER "$token" 'approve(address,uint256)' $ROUTER 500000ether >/dev/null
+  cast send -r $RPC --unlocked --from $DEPLOYER --value 5ether $ROUTER \
+    'addLiquidityETH(address,uint256,uint256,uint256,address,uint256)' "$token" 500000ether 0 0 $DEPLOYER 9999999999 >/dev/null
+  cast send -r $RPC --unlocked --from $DEPLOYER "$token" 'setPair(address)' \
+    "$(cast call $FACTORY 'getPair(address,address)(address)' "$token" "$WETH" -r $RPC)" >/dev/null
+  burn_lp "$token"
+  echo "$token"
+}
+JUDGE_TRAP=$(side src/JudgeTrap.sol:JudgeTrap)
+UNTOUCHED=$(side src/SideTrap.sol:SideTrap --constructor-args "Side Untouched Buyer" UNTOUCHED 0)
+STRANGER_KEY=$(side src/SideTrap.sol:SideTrap --constructor-args "Side Stranger Key" STRANGERKEY 1)
+PAIR_PULL=$(side src/SideTrap.sol:SideTrap --constructor-args "Side Pair Pull Tax" PAIRPULL 2)
+
 jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked "$BLOCKED" \
   --arg later "$LATER" --arg tax "$TAX" --arg taxlater "$TAX_LATER" --arg hold "$HOLD" --arg sim "$SIM" \
   --arg frozen "$FROZEN" --arg tax20 "$TAX20" --arg late "$LATE" --arg lpburned "$LP_BURNED" --arg lpheld "$LP_HELD" --arg fresh "$FARM_FRESH" --arg gashungry "$GAS_HUNGRY" \
   --arg approvemax "$APPROVE_MAX_ONLY" --arg buy001 "$BUY_001_ONLY" --argjson copies "$(printf '%s\n' "${COPIES[@]}" | jq -R . | jq -s .)" --argjson block "$FORK_BLOCK" \
+  --arg judgetrap "$JUDGE_TRAP" --arg untouched "$UNTOUCHED" --arg strangerkey "$STRANGER_KEY" --arg pairpull "$PAIR_PULL" \
   '{fork_block: $block, usdc: $usdc, safe: $safe, owner_reclaim: $reclaim, sell_blocked: $blocked,
     sell_blocked_later: $later, sell_tax: $tax, sell_tax_later: $taxlater, hold_one_block: $hold, sim_detector: $sim,
     guard_frozen: $frozen, sell_tax_20: $tax20, late_liquidity: $late, lp_burned: $lpburned, lp_held: $lpheld,
     farm_fresh: $fresh, gas_hungry: $gashungry, approve_max_only: $approvemax, buy_001_only: $buy001,
-    usdc_copies: $copies}' > tokens.json
+    usdc_copies: $copies, judge_trap: $judgetrap, untouched_buyer: $untouched, stranger_key: $strangerkey,
+    pair_pull_tax: $pairpull}' > tokens.json
 echo "guard_frozen freezes $GUARD_EVM"
 echo "Base fork at block $FORK_BLOCK ready on $RPC; tokens in evm/tokens.json:"
 cat tokens.json

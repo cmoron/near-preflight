@@ -89,13 +89,19 @@ describe("the package against the check on NEAR (--check)", () => {
   test("its sha256 stored with the check, for the action the signed response asked for: OK", () => {
     const field = call.function.name === "buy" ? "buy_decision_sha256" : "decision_sha256";
     const id = call.function.name === "buy" ? args.check_id : 7;
-    expect(failed(onChain(pkg(), sha, id, check({ [field]: sha })))).toEqual([]);
+    expect(failed(onChain(pkg(), sha, id, check({ [field]: sha }), String(id)))).toEqual([]);
+  });
+  test("the guard anchoring this digest on another check, or on none: MISMATCH (one decision backs one guard call)", () => {
+    const field = call.function.name === "buy" ? "buy_decision_sha256" : "decision_sha256";
+    const id = call.function.name === "buy" ? args.check_id : 7;
+    expect(failed(onChain(pkg(), sha, id, check({ [field]: sha }), String(id + 1)))).toEqual([expect.stringContaining(`on check #${id + 1}, not #${id}`)]);
+    expect(failed(onChain(pkg(), sha, id, check({ [field]: sha }), null))).toEqual([expect.stringContaining("on no check")]);
   });
   test("another digest on chain, no check, or a check for another target: MISMATCH", () => {
-    expect(failed(onChain(pkg(), sha, 7, check({ decision_sha256: "00".repeat(32), buy_decision_sha256: "00".repeat(32) }))).length).toBeGreaterThan(0);
-    expect(failed(onChain(pkg(), sha, 7, null)).length).toBeGreaterThan(0);
+    expect(failed(onChain(pkg(), sha, 7, check({ decision_sha256: "00".repeat(32), buy_decision_sha256: "00".repeat(32) }), "7")).length).toBeGreaterThan(0);
+    expect(failed(onChain(pkg(), sha, 7, null, null)).length).toBeGreaterThan(0);
     const field = call.function.name === "buy" ? "buy_decision_sha256" : "decision_sha256";
-    expect(failed(onChain(pkg(), sha, 99_999, check({ [field]: sha, target: "0x000000000000000000000000000000000000dEaD" }))).length).toBeGreaterThan(0);
+    expect(failed(onChain(pkg(), sha, 99_999, check({ [field]: sha, target: "0x000000000000000000000000000000000000dEaD" }), "99999")).length).toBeGreaterThan(0);
   });
 });
 

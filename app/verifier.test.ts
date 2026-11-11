@@ -1,10 +1,12 @@
 // The sentinel's checks against the local copy of Base (run evm/fork.sh first).
 import { describe, expect, test } from "bun:test";
-import { decodeAbiParameters, encodeFunctionData, keccak256, parseAbi, parseEther, parseTransaction, toHex, type Address, type Hex } from "viem";
+import { concat, decodeAbiParameters, encodeFunctionData, keccak256, pad, parseAbi, parseEther, parseTransaction, stringToHex, toHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
 import { buildIndex, type Index } from "./index";
 import { localPreviews, SETUP_FEES } from "./testkit";
-import { checkExit, checkToken, liquidityFindings, ROUTER, rpc, specialOf, WETH, type Fees, type Holder, type Liquidity, type NearFacts } from "./verifier";
+import { checkExit, checkToken, ETH_LOGS, judgeExit, liquidityFindings, ROUTER, rpc, specialOf, WETH, type Fees, type Holder, type Liquidity, type NearFacts } from "./verifier";
+
+const TRANSFER = keccak256(stringToHex("Transfer(address,address,uint256)"));
 
 const quoteAbi = parseAbi(["function getAmountsOut(uint256,address[]) view returns (uint256[])"]);
 
@@ -46,10 +48,10 @@ describe("sentinel verdict", () => {
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("next block");
   });
-  test("sale closed 1 h after the buy: block", async () => {
+  test("sale closed 5 minutes after the buy: block on the sale 256 blocks (512 s) later", async () => {
     const r = await check(tokens.sell_blocked_later);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toContain("256 blocks (timestamp +1 h) after the buy");
+    expect(r.reasons).toContain("256 blocks (512 s) after the buy");
     expect(r.reasons).not.toContain("next block");
   });
   test("90 % tax on the sale: block", async () => {
@@ -60,7 +62,7 @@ describe("sentinel verdict", () => {
   test("90 % tax only on the late sale: block", async () => {
     const r = await check(tokens.sell_tax_later);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toContain("256 blocks (timestamp +1 h) after the buy");
+    expect(r.reasons).toContain("256 blocks (512 s) after the buy");
   });
   test("a token that freezes only the guard's public EVM address: block, but not listed (it rests on the guard's own state)", async () => {
     const r = await check(tokens.guard_frozen);
@@ -110,11 +112,56 @@ describe("the guard side simulates exactly what the guard signs", () => {
     const [signed] = await p.check(BigInt(r.evidence.quote)); // what buy would sign on this verdict
     expect(r.evidence.tx_hashes).toEqual([keccak256(signed)]);
     const t = parseTransaction(signed);
-    const calls = (r.request.params[0] as { blockStateCalls: { calls: Record<string, string>[] }[] }).blockStateCalls[0].calls;
+    const calls = (r.request[0].params[0] as { blockStateCalls: { calls: Record<string, string>[] }[] }).blockStateCalls[0].calls;
     const buy = calls.find((c) => c.from.toLowerCase() === GUARD_EVM.toLowerCase() && c.to.toLowerCase() === ROUTER.toLowerCase() && c.value)!;
     expect(buy).toEqual({ from: GUARD_EVM, to: t.to!, data: t.data!, value: toHex(t.value!), nonce: toHex(t.nonce!), gas: toHex(t.gas!), maxFeePerGas: toHex(t.maxFeePerGas!), maxPriorityFeePerGas: toHex(t.maxPriorityFeePerGas!) });
     expect(t.value).toBe(AMOUNT); // the amount the agent stated, not a fixed 0.01 ETH
     expect(r.evidence.amount_wei).toBe(AMOUNT.toString());
+  });
+});
+
+// Judge pass 5: tokens that tell a simulation from a real trade by what the simulation does around the
+// guard's own transactions. The guard-side request now holds nothing but the guard's buy, approves and
+// swaps, from the block's real state; every other call runs in a request of its own.
+describe("nothing but the guard's own transactions before each one it signs", () => {
+  test("JudgeTrap, a sale only after a top-level balanceOf (which only a simulation sent): block, listed", async () => {
+    const r = await check(tokens.judge_trap);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toContain("sale refused in the next block");
+    expect(r.list_target).toBe(true); // the probe never calls balanceOf either: the token's own behaviour
+  });
+  test("a buyer that never called the token itself before its buy can never sell: block, listed", async () => {
+    const r = await check(tokens.untouched_buyer);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toContain("sale refused in the next block");
+    expect(r.list_target).toBe(true);
+  });
+  test("a sale keyed by a stranger's failed transferFrom (it returns false and writes state): block, listed", async () => {
+    const r = await check(tokens.stranger_key);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toContain("sale refused in the next block");
+    expect(r.list_target).toBe(true);
+  });
+  test("the guard-side request holds only the guard's buy, approves and swaps, from the block's real state", async () => {
+    const r = await check(tokens.usdc);
+    const [guardSide] = r.request.map((q) => (q.params[0] as { blockStateCalls: { calls: Record<string, string>[]; stateOverrides?: Record<string, unknown> }[] }).blockStateCalls);
+    expect(guardSide.filter((b) => b.calls.length).map((b) => b.calls.length)).toEqual([1, 2, 2]); // buy; approve and swap; approve and swap
+    expect(guardSide.length).toBe(256); // the blocks between the two sales are there, empty
+    const calls = guardSide.flatMap((b) => b.calls);
+    expect(calls.every((c) => c.from.toLowerCase() === GUARD_EVM.toLowerCase() && c.nonce !== undefined)).toBe(true);
+    expect(calls.map((c) => c.data.slice(0, 10))).toEqual(["0xb6f9de95", "0x095ea7b3", "0x791ac947", "0x095ea7b3", "0x791ac947"]);
+    expect(Object.keys(guardSide[0].stateOverrides ?? {}).every((a) => a.toLowerCase() === GUARD_EVM.toLowerCase())).toBe(true);
+    expect(r.request.length).toBe(3); // the probe's twins and the synthetic calls run apart
+  });
+});
+
+describe("a sale's tax is what the seller receives", () => {
+  test("a token that swaps 90 % of each sale into the pool itself and sends that WETH to its owner: block", async () => {
+    const r = await check(tokens.pair_pull_tax);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toMatch(/\d+ % tax on the sale in the next block/);
+    expect(r.reasons).toContain("the pool paid out more WETH than the seller received");
+    expect(r.list_target).toBe(true);
   });
 });
 
@@ -197,7 +244,7 @@ describe("template reputation", () => {
   test("copies of a token's code cannot get it blocked: USDC stays allow, its pool predates the window", async () => {
     const r = await check(tokens.usdc);
     expect(r.verdict).toBe("allow");
-    expect(r.reasons).toContain("template reputation not applied: the token's own pool was not funded within the index window");
+    expect(r.reasons).toContain("template reputation not applied: the token's own pool was funded before the index window");
     expect(r.evidence.reputation?.before_block).toBeNull();
     expect(INDEX.templates[r.evidence.template].filter((p) => p.drained !== null).length).toBe(3);
   });
@@ -255,6 +302,13 @@ describe("exit quote (the agent's floor comes from it)", () => {
     // the approve and swap simulated are those sell_quoted signs on this quote (floor = quote - 3 %)
     expect(r.evidence.tx_hashes).toEqual((await preview(BigInt(r.evidence.quote))).map((t) => keccak256(t)));
   });
+  test("the quote is the ETH the seller receives, not the WETH that left the pool (pure)", () => {
+    const [seller, pair, token] = ["0x00000000000000000000000000000000000000a1", "0x00000000000000000000000000000000000000a2", "0x00000000000000000000000000000000000000a3"] as Address[];
+    const transfer = (asset: Address, from: Address, to: Address, value: bigint) => ({ address: asset, topics: [TRANSFER, pad(from), pad(to)], data: pad(toHex(value)) });
+    const sale = { status: "0x1" as Hex, returnData: "0x" as Hex, logs: [transfer(WETH, pair, ROUTER, 100n), transfer(ETH_LOGS, ROUTER, seller, 10n)] };
+    const r = judgeExit(["approve router", "exit sale"], [{ status: "0x1", returnData: "0x", logs: [] }, sale], { token, seller, pair });
+    expect(r).toMatchObject({ verdict: "allow", quote: 10n });
+  });
   test("sale of more than the address holds: no quote, block (the owner's own exit stays open)", async () => {
     const seller = rand();
     const r = await checkExit(RPC, tokens.lp_burned as Address, seller, parseEther("1000"), await exitPreview(seller, parseEther("1000")));
@@ -287,24 +341,33 @@ describe("proof", () => {
     const { result: code } = (await res.json()) as { result: `0x${string}` };
     expect(r.evidence.code_hash).toBe(keccak256(code));
   });
-  test("the simulation reuses the real block's environment (gas, base fee, prevrandao, coinbase, number)", async () => {
+  test("simulated blocks follow Base's cadence: 2 s per block, the real base fee and coinbase, a prevrandao per block", async () => {
     const r = await check(tokens.safe);
     const res = await fetch(RPC, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getBlockByNumber", params: [`0x${r.evidence.block.toString(16)}`, false] }),
     });
-    const { result: h } = (await res.json()) as { result: { baseFeePerGas: string; mixHash: string; miner: string } };
-    const blocks = (r.request.params[0] as { blockStateCalls: { blockOverrides: Record<string, string>; calls: Record<string, string>[] }[] }).blockStateCalls;
-    for (const b of blocks) {
-      expect(b.blockOverrides).toMatchObject({ baseFeePerGas: h.baseFeePerGas, prevRandao: h.mixHash, feeRecipient: h.miner });
-      for (const c of b.calls) {
-        expect(BigInt(c.maxPriorityFeePerGas)).toBeGreaterThan(0n);
-        expect(BigInt(c.maxFeePerGas)).toBeGreaterThan(BigInt(h.baseFeePerGas));
-        expect(c.gas).toBe("0x3d090"); // the guard's 250,000, not the block's limit
+    const { result: h } = (await res.json()) as { result: { baseFeePerGas: string; mixHash: Hex; miner: string; timestamp: string } };
+    const block = BigInt(r.evidence.block);
+    for (const q of r.request) {
+      const blocks = (q.params[0] as { blockStateCalls: { blockOverrides: Record<string, string>; calls: Record<string, string>[] }[] }).blockStateCalls;
+      for (const b of blocks) {
+        const n = BigInt(b.blockOverrides.number);
+        expect(BigInt(b.blockOverrides.time) - BigInt(h.timestamp)).toBe(2n * (n - block)); // number and time agree
+        expect(b.blockOverrides).toMatchObject({ baseFeePerGas: h.baseFeePerGas, feeRecipient: h.miner });
+        expect(b.blockOverrides.prevRandao).toBe(keccak256(concat([h.mixHash, toHex(n, { size: 32 })])));
+        for (const c of b.calls) {
+          expect(BigInt(c.maxPriorityFeePerGas)).toBeGreaterThan(0n);
+          expect(BigInt(c.maxFeePerGas)).toBeGreaterThan(BigInt(h.baseFeePerGas));
+          expect(c.gas).toBe("0x3d090"); // the guard's 250,000, not the block's limit
+        }
       }
     }
-    expect(BigInt(blocks[2].blockOverrides.number)).toBe(BigInt(r.evidence.block) + 256n); // sale +1 h: last block allowed
+    const guardSide = (r.request[0].params[0] as { blockStateCalls: { blockOverrides: Record<string, string>; calls: unknown[] }[] }).blockStateCalls;
+    expect(guardSide.filter((b) => b.calls.length).map((b) => BigInt(b.blockOverrides.number) - block)).toEqual([1n, 2n, 256n]); // buy, next block, 512 s later
+    expect(guardSide.map((b) => BigInt(b.blockOverrides.number) - block)).toEqual(Array.from({ length: 256 }, (_, i) => BigInt(i + 1))); // no gap for the node to fill
+    expect(new Set(guardSide.map((b) => b.blockOverrides.prevRandao)).size).toBe(256);
   });
   test("carries a proxy's implementation (USDC)", async () => {
     const r = await check(tokens.usdc);

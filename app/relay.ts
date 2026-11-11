@@ -102,6 +102,11 @@ export async function verifyExit(raws: Hex[], exit: { token: Address | null; amo
   return out;
 }
 
+/** anvil applies anvil_setBalance and anvil_setNonce to the state of its latest block, even once that
+ *  block is history: a block a proof simulated on would change after the fact, and its replay with it.
+ *  An empty block first keeps every earlier block as it was. */
+const mineFirst = (client: PublicClient) => client.request({ method: "evm_mine" } as never);
+
 /** Fork setup Base would not need: tops `address` up to the value, max gas and L1 data fee of `raws`. */
 export async function fund(client: PublicClient, raws: Hex[], address: Address, log: (s: string) => void): Promise<void> {
   let need = 0n;
@@ -111,6 +116,7 @@ export async function fund(client: PublicClient, raws: Hex[], address: Address, 
     need += (tx.value ?? 0n) + (tx.gas ?? 0n) * (tx.maxFeePerGas ?? 0n) + l1;
   }
   if ((await client.getBalance({ address })) < need) {
+    await mineFirst(client);
     await client.request({ method: "anvil_setBalance", params: [address, toHex(need)] } as never);
     log(`[fork setup] anvil_setBalance ${address} ${formatEther(need)} ETH (value + max gas + L1 data fee of ${raws.length} tx); on Base it would take a real deposit`);
   }
@@ -139,6 +145,7 @@ export async function broadcast(client: PublicClient, raw: Hex, address: Address
   }
   await fund(client, [raw], address, log);
   if (current < nonce) {
+    await mineFirst(client);
     await client.request({ method: "anvil_setNonce", params: [address, toHex(nonce)] } as never);
     log(`[fork setup] anvil_setNonce ${address} ${nonce} (the fork is behind the guard's nonce: restarted fork, or earlier signed tx not broadcast)`);
   }

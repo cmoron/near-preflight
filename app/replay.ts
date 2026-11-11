@@ -2,13 +2,12 @@
 // The file carries the exact `evidence` string posted on chain; all of its content is rechecked.
 // Usage: bun app/replay.ts <proof.json> [rpc] [--check]
 import { decodeFunctionData, encodeFunctionData, keccak256, parseAbi, parseTransaction, serializeTransaction, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
-import { beforeBlock, buildIndex, indexSha256, ownAfterIndex, reputationOf, templateOf, type Reputation } from "./index";
+import { beforeBlock, buildIndex, indexSha256, ownFunding, reputationOf, templateOf, type Reputation } from "./index";
 import {
   balances,
   buildRequest,
   buyStages,
   byLabel,
-  callsBy,
   deriveProbes,
   exitPlan,
   FACTORY,
@@ -16,6 +15,8 @@ import {
   implementationAt,
   judge,
   judgeExit,
+  labelsOf,
+  LATE_BLOCKS,
   liquidityFacts,
   NEXT_S,
   ok as succeeded,
@@ -24,14 +25,16 @@ import {
   ROUTER,
   rpc,
   saleAmounts,
-  topUp,
+  SIDES,
   WETH,
+  type Block,
   type Fees,
   type GuardTxs,
   type Header,
   type Liquidity,
   type NearFacts,
   type ProofFile,
+  type Request,
   type Result,
 } from "./verifier";
 
@@ -75,7 +78,10 @@ export type OnChain = {
 } | null;
 /** A blocklist entry as get_entry returns it, null if not listed. */
 export type OnChainEntry = { reporter: string; evidence_sha256: string } | null;
-type BlockStateCall = { blockOverrides: { time: Hex }; calls: RequestCall[] };
+type BlockStateCall = { blockOverrides: { number: Hex; time: Hex }; calls: RequestCall[] };
+const blocksOf = (q: Request) => (q.params[0] as { blockStateCalls: BlockStateCall[] }).blockStateCalls;
+/** What replay compares of a call's result: status, return data and logs (emitter, topics, data). */
+const outcome = (r: Result) => JSON.stringify([r.status, r.returnData, (r.logs ?? []).map((l) => [l.address.toLowerCase(), l.topics, l.data])]);
 
 const EVIDENCE_KEYS = "amount_wei,block,calls,chain_id,code_hash,implementation,liquidity,method,near,quote,reputation,request_sha256,template,tx_hashes";
 const EXIT_KEYS = "amount,block,calls,chain_id,kind,method,quote,request_sha256,tx_hashes";
@@ -138,16 +144,38 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
   return typed ? (e as unknown as Evidence) : "evidence fields have unexpected types";
 }
 
-/** Minimal shape of the request, checked BEFORE anything is sent: only eth_simulateV1 (read-only) at
- *  the proof's block goes to the node. Returns the defect found, or null. */
-function shapeError(p: Proof, e: { block: number }): string | null {
-  const r = p.request as unknown;
-  if (!isObj(r) || r.method !== "eth_simulateV1") return "method is not eth_simulateV1";
-  if (!Array.isArray(r.params) || r.params.length !== 2) return "params is not [request, block]";
-  const [req, blk] = r.params;
-  if (!isObj(req) || !Array.isArray(req.blockStateCalls) || !isObj(req.blockStateCalls[0])) return "params[0] has no blockStateCalls";
-  if (blk !== toHex(e.block)) return `params[1] ${String(blk)} is not evidence.block ${toHex(e.block)}`;
-  if (typeof p.target !== "string" || !Array.isArray(p.response)) return "malformed proof file";
+/** Minimal shape of the requests, checked BEFORE anything is sent: only `n` eth_simulateV1 requests
+ *  (read-only) at the proof's block go to the node. Returns the defect found, or null. */
+function shapeError(p: Proof, e: { block: number }, n: number): string | null {
+  const rs = p.request as unknown;
+  if (!Array.isArray(rs) || rs.length !== n) return `request is not ${n} eth_simulateV1 request(s)`;
+  for (const r of rs) {
+    if (!isObj(r) || r.method !== "eth_simulateV1") return "method is not eth_simulateV1";
+    if (!Array.isArray(r.params) || r.params.length !== 2) return "params is not [request, block]";
+    const [req, blk] = r.params;
+    if (!isObj(req) || !Array.isArray(req.blockStateCalls) || !req.blockStateCalls.length || !req.blockStateCalls.every((b) => isObj(b) && Array.isArray(b.calls))) return "params[0] has no blockStateCalls";
+    if (blk !== toHex(e.block)) return `params[1] ${String(blk)} is not evidence.block ${toHex(e.block)}`;
+  }
+  if (typeof p.target !== "string" || !Array.isArray(p.response) || p.response.length !== n || !p.response.every(Array.isArray)) return "malformed proof file";
+  return null;
+}
+
+const SELECTOR = { buy: "0xb6f9de95", approve: "0x095ea7b3", sale: "0x791ac947" } as const;
+/** The guard-side request holds the guard's own transactions and nothing else, nothing before or
+ *  between them: its buy alone in the first block, then (full proof) an approve and a swap in the next
+ *  one and in the last one, the blocks between empty, every call from the same address and carrying its
+ *  nonce. Their content (amounts, recipient, path) is guardShape's to check, the buy's hash the
+ *  evidence's. */
+function guardOnly(bs: BlockStateCall[]): string | null {
+  if (bs.length !== 1 && bs.length !== Number(LATE_BLOCKS)) return `${bs.length} blocks, not 1 or ${LATE_BLOCKS}`;
+  const sale = [SELECTOR.approve, SELECTOR.sale];
+  const from = bs[0].calls[0]?.from ?? "";
+  for (const [i, b] of bs.entries()) {
+    const want: string[] = i === 0 ? [SELECTOR.buy] : i === 1 || i === bs.length - 1 ? sale : [];
+    const got = b.calls.map((c) => String(c.data).slice(0, 10));
+    if (JSON.stringify(got) !== JSON.stringify(want)) return `block ${i + 1} holds ${got.join(", ") || "nothing"}, not ${want.join(", ") || "nothing"}`;
+    if (b.calls.some((c) => !same(c.from, from) || c.nonce === undefined)) return `block ${i + 1} holds a call from another address than ${from}, or without a nonce`;
+  }
   return null;
 }
 
@@ -214,51 +242,56 @@ function saleShape(sale: Hex[], token: Address, guard: Address, x: bigint): stri
   return null;
 }
 
-/** Rebuilds the request checkToken would have produced for proof.target (same calls, same
- *  addresses, router, WETH, blocks at the same time gaps) and derives the labels from it: those of the file
- *  do not count. Only the buyer, the guard's address, the unknown one, the time and the guard's own
- *  transactions come from the request (at the positions plan() gives them; the guard's must have the
- *  shape the guard builds, and their hashes are checked against the evidence and, with --check, the
- *  guard); amounts and owner come from the fresh response; base fee, prevrandao, coinbase and real
- *  balances come from the node, at the proof's block. No fallback: a missing probe is a defect. */
-async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[]): Promise<Rebuilt | { error: string }> {
+/** Rebuilds the requests checkToken would have produced for proof.target (same calls, same addresses,
+ *  router, WETH, blocks at Base's cadence) and derives the labels from them: those of the file do not
+ *  count. Only the buyer, the guard's address, the stranger and the guard's own transactions come from
+ *  the requests (at the positions plan() gives them; the guard's must have the shape the guard builds,
+ *  and their hashes are checked against the evidence and, with --check, the guard); amounts and owner
+ *  come from the fresh responses; base fee, prevrandao, coinbase and real balances come from the node,
+ *  at the proof's block. No fallback: a missing probe is a defect. */
+async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][]): Promise<Rebuilt | { error: string }> {
   try {
-    const bs = (p.request.params[0] as { blockStateCalls: BlockStateCall[] }).blockStateCalls;
-    const now = BigInt(bs[0].blockOverrides.time);
+    const [g, pr, sy] = p.request.map(blocksOf);
     const token = p.target as Address;
     const block = BigInt(e.block);
     const amount = BigInt(e.amount_wei);
-    /** The request's call that plan() labels `label` in block `i`. */
-    const at = (blocks: { calls: { label: string }[] }[], i: number, label: string) => bs[i]?.calls[blocks[i].calls.findIndex((c) => c.label === label)];
-    const layout = plan(token, NOBODY, NOBODY, block, now, amount, SKELETON);
-    const buyer = at(layout, 0, "tokens before buy")?.from;
-    const guard = at(layout, 0, `${GUARD}tokens before buy`)?.from;
-    const buyCall = at(layout, 0, `${GUARD}buy`);
-    if (!buyer || !guard || !buyCall) return { error: "request has no buyer, no guard side or no guard buy" };
+    /** The request's call that plan() labels `label` in `layout`. */
+    const at = (layout: Block[], req: BlockStateCall[], label: string) => {
+      for (const [i, b] of layout.entries()) {
+        const j = b.calls.findIndex((c) => c.label === label);
+        if (j >= 0) return req[i]?.calls[j];
+      }
+      return undefined;
+    };
+    const buyCall = g[0]?.calls[0];
+    const buyer = pr[0]?.calls[0]?.from;
+    if (!buyCall || !buyer) return { error: "request has no guard buy or no probe buy" };
+    const guard = buyCall.from;
     const txs: GuardTxs = { buy: unsignedOf(buyCall, e.chain_id) };
     const fees: Fees = { gas: BigInt(buyCall.gas), maxFeePerGas: BigInt(buyCall.maxFeePerGas), maxPriorityFeePerGas: BigInt(buyCall.maxPriorityFeePerGas) };
     const head = await blockOf(url, toHex(e.block));
-    const buyOnly = plan(token, buyer, guard, block, now, amount, txs);
-    const buyLabels = buyOnly[0].calls.map((c) => c.label);
-    const st = buyStages(byLabel(buyLabels, fresh.slice(0, buyLabels.length)));
-    let blocks = buyOnly;
+    const buyOnly = plan(token, { guard, buyer, stranger: NOBODY }, block, amount, txs);
+    // The 1st simulation's calls open each request: their fresh results give the amounts and owner().
+    const first = SIDES.flatMap((k, i) => fresh[i].slice(0, buyOnly[k].flatMap((b) => b.calls).length));
+    const st = buyStages(byLabel(labelsOf(buyOnly), first), { token, guard, buyer, stranger: NOBODY });
+    let sides = buyOnly;
     let stranger: Address | null = null;
-    if (!st.stop && e.liquidity) {
-      const full = { amounts: st.amounts, owner: st.owner, pair: e.liquidity.pair };
-      const fullLayout = plan(token, buyer, guard, block, now, amount, SKELETON, { ...full, stranger: NOBODY });
-      stranger = at(fullLayout, 0, "transferFrom by a stranger")?.from ?? null;
+    const full = !st.stop && !!e.liquidity;
+    if (full) {
+      const layout = plan(token, { guard, buyer, stranger: NOBODY }, block, amount, SKELETON, { amounts: st.amounts, owner: st.owner });
+      stranger = at(layout.synthetic, sy, "transferFrom by a stranger")?.from ?? null;
       if (!stranger) return { error: "request has no stranger probe where checkToken puts one" };
-      const sale = (i: 1 | 2, when: string) => [`${GUARD}approve router${when}`, `${GUARD}sale${when}`].map((l) => at(fullLayout, i, l)).map((c) => unsignedOf(c!, e.chain_id));
-      txs.sales = [sale(1, " in next block"), sale(2, " +256 blocks")];
-      blocks = plan(token, buyer, guard, block, now, amount, txs, { ...full, stranger });
+      const sale = (when: string) => [`${GUARD}approve router${when}`, `${GUARD}sale${when}`].map((l) => at(layout.guard, g, l)).map((c) => unsignedOf(c!, e.chain_id));
+      txs.sales = [sale(" in next block"), sale(" +256 blocks")];
+      sides = plan(token, { guard, buyer, stranger }, block, amount, txs, { amounts: st.amounts, owner: st.owner });
     }
     const bad = guardShape(txs, token, guard, amount, txs.sales ? saleAmounts(st.amounts.guard) : null);
     if (bad) return { error: bad };
-    const funds = await balances(url, head, { buyer, guard, amount, fees, guardCalls: callsBy(blocks, guard) }, stranger ? { stranger, owner: st.owner } : undefined);
-    const want = JSON.stringify(buildRequest(head, funds, blocks, fees));
-    if (want !== JSON.stringify(p.request)) return { error: "request is not the one checkToken builds for this target" };
-    const labels = blocks.flatMap((b) => b.calls.map((c) => c.label));
-    if (labels.length !== fresh.length) return { error: `expected ${labels.length} calls, node returned ${fresh.length}` };
+    const owner = full ? st.owner : null;
+    const want = await Promise.all(SIDES.map(async (k) => buildRequest(head, await balances(url, head, sides[k], fees, guard, owner), sides[k], fees)));
+    if (JSON.stringify(want) !== JSON.stringify(p.request)) return { error: "requests are not the ones checkToken builds for this target" };
+    const labels = labelsOf(sides);
+    if (labels.length !== fresh.flat().length) return { error: `expected ${labels.length} calls, node returned ${fresh.flat().length}` };
     return { labels, buyer, guard, stranger, owner: st.owner, buy: txs.buy };
   } catch (err) {
     return { error: `request cannot be parsed (${msg(err)})` };
@@ -325,13 +358,14 @@ export async function replay(
   const hash = sha256(stringToHex(JSON.stringify(proof.request)));
   add(hash === e.request_sha256, `request hash ${hash === e.request_sha256 ? "matches evidence" : `${hash} != ${e.request_sha256}`}`);
 
-  const bad = shapeError(proof, e);
+  const bad = shapeError(proof, e, 3);
   if (bad) {
     add(false, `request shape: ${bad} (nothing sent to the node)`);
     return out;
   }
 
-  // (b) same chain; time of the first simulated block = time of the proof's block + 2 s
+  // (b) same chain; time of the first simulated block = time of the proof's block + 2 s (every block's
+  // time, number and prevrandao are checked with the rebuilt requests)
   try {
     const id = Number(await rpc<Hex>(url, "eth_chainId", []));
     add(id === e.chain_id, id === e.chain_id ? `chain id ${id} matches evidence` : `node chain id ${id} != evidence chain id ${e.chain_id}`);
@@ -344,7 +378,7 @@ export async function replay(
     const header = await blockOf(url, toHex(e.block));
     blockTs = Number(BigInt(header.timestamp));
     blockHash = header.hash;
-    const first = BigInt((proof.request.params[0] as { blockStateCalls: BlockStateCall[] }).blockStateCalls[0].blockOverrides.time);
+    const first = BigInt(blocksOf(proof.request[0])[0].blockOverrides.time);
     const want = BigInt(blockTs) + NEXT_S;
     add(
       first === want,
@@ -356,29 +390,33 @@ export async function replay(
     fail(`reading block ${e.block} or the first simulated block time`, err);
   }
 
-  // (c) same request, same block; same statuses and same return data
-  let fresh: Result[] | null = null;
+  // (b2) the guard side holds the guard's own transactions only: no read, no probe, no other call
+  // before or between them (judge pass 5: a top-level balanceOf there let a honeypot sell)
+  const only = guardOnly(blocksOf(proof.request[0]));
+  add(!only, only ? `guard-side request: ${only}` : "guard-side request holds only the guard's own transactions (buy; approve, swap; approve, swap), nothing before or between them");
+
+  // (c) same requests, same block; same statuses, return data and logs
+  let fresh: Result[][] | null = null;
   let rebuilt: Rebuilt | null = null;
   try {
-    const blocks = await rpc<{ calls: Result[] }[]>(url, proof.request.method, proof.request.params);
-    fresh = blocks.flatMap((b) => b.calls);
-    add(true, `request resent to ${url} at block ${e.block} (${fresh.length} calls)`);
+    fresh = await Promise.all(proof.request.map(async (q) => (await rpc<{ calls: Result[] }[]>(url, q.method, q.params)).flatMap((b) => b.calls)));
+    add(true, `${fresh.length} requests resent to ${url} at block ${e.block} (${fresh.flat().length} calls)`);
   } catch (err) {
-    fail("resending the request", err);
+    fail("resending the requests", err);
   }
   if (fresh) {
     const diffs: string[] = [];
-    if (fresh.length !== proof.response.length) diffs.push(`call count ${proof.response.length} -> ${fresh.length}`);
+    const [now, old] = [fresh.flat(), proof.response.flat()];
+    if (now.length !== old.length) diffs.push(`call count ${old.length} -> ${now.length}`);
     const labels = e.calls.map((c) => c.replace(/: (ok|revert)$/, "")); // only to name the discrepancies
-    proof.response.forEach((old, i) => {
-      const now = fresh[i];
-      if (!now) return;
-      if (old.status !== now.status) diffs.push(`${labels[i] ?? i}: status ${old.status} -> ${now.status}`);
-      if (old.returnData !== now.returnData) diffs.push(`${labels[i] ?? i}: return data differs`);
+    old.forEach((o, i) => {
+      if (!now[i]) return;
+      if (o.status !== now[i].status) diffs.push(`${labels[i] ?? i}: status ${o.status} -> ${now[i].status}`);
+      else if (outcome(o) !== outcome(now[i])) diffs.push(`${labels[i] ?? i}: return data or logs differ`);
     });
-    add(!diffs.length, diffs.length ? `call results differ: ${diffs.join(" ; ")}` : `status and return data of all ${fresh.length} calls identical`);
+    add(!diffs.length, diffs.length ? `call results differ: ${diffs.join(" ; ")}` : `status, return data and logs of all ${now.length} calls identical`);
 
-    // (d) rebuilt request, fresh probes, labels, then rejudging from the fresh response
+    // (d) rebuilt requests, fresh probes, labels, then rejudging from the fresh responses
     const r = await rebuild(url, proof, e, fresh);
     if ("error" in r) add(false, `request shape: ${r.error}`);
     else {
@@ -389,13 +427,14 @@ export async function replay(
       } catch (err) {
         fail("checking the probe addresses", err);
       }
-      const want = fresh.map((res, i) => `${r.labels[i]}: ${succeeded(res) ? "ok" : "revert"}`);
+      const want = now.map((res, i) => `${r.labels[i]}: ${succeeded(res) ? "ok" : "revert"}`);
       const same = JSON.stringify(want) === JSON.stringify(e.calls);
-      add(same, same ? "call labels rebuilt from the request match evidence.calls" : "call labels in evidence.calls differ from those rebuilt from the request");
-      const j = judge(r.labels, fresh, { ...e, code_hash: e.code_hash as Hex, implementation: e.implementation as Address | null });
+      add(same, same ? "call labels rebuilt from the requests match evidence.calls" : "call labels in evidence.calls differ from those rebuilt from the requests");
+      const parties = { token: proof.target as Address, guard: r.guard, buyer: r.buyer, stranger: r.stranger ?? NOBODY };
+      const j = judge(r.labels, now, { ...e, code_hash: e.code_hash as Hex, implementation: e.implementation as Address | null }, parties);
       const ok = j.verdict === proof.verdict && j.reasons === proof.reasons;
       add(ok, ok ? `verdict ${j.verdict} rejudged identically (same reasons)` : `verdict/reasons differ: file "${proof.verdict}: ${proof.reasons}" vs rejudged "${j.verdict}: ${j.reasons}"`);
-      const q = quoteOf(r.labels, fresh).toString();
+      const q = quoteOf(r.labels, now, parties).toString();
       add(q === e.quote, q === e.quote ? `quote ${q} tokens for ${e.amount_wei} wei recomputed identically` : `quote in evidence ${e.quote} != recomputed ${q}`);
       const h = keccak256(r.buy);
       add(h === e.tx_hashes[0], h === e.tx_hashes[0] ? `the guard's buy simulated (calldata, value, nonce, gas, fees) hashes to evidence.tx_hashes ${h.slice(0, 10)}...` : `the guard's buy simulated hashes to ${h}, evidence says ${e.tx_hashes[0]}`);
@@ -421,7 +460,7 @@ export async function replay(
       const sha = indexSha256(index);
       add(sha === r.index_sha256, sha === r.index_sha256 ? `template index of blocks ${r.from}..${r.to} rebuilt from the node: same sha256 ${sha.slice(0, 10)}...` : `template index of blocks ${r.from}..${r.to} rebuilt with sha256 ${sha}, evidence says ${r.index_sha256}`);
       const own = e.liquidity?.pair ?? null;
-      const want = JSON.stringify(reputationOf(index, e.template as Hex, beforeBlock(index, own, await ownAfterIndex(url, index, own))));
+      const want = JSON.stringify(reputationOf(index, e.template as Hex, beforeBlock(index, own, await ownFunding(url, index, own))));
       add(want === JSON.stringify(r), want === JSON.stringify(r) ? `template reputation recomputed identically (${r.drained} of ${r.pools} earlier pools drained)` : `template reputation differs: evidence ${JSON.stringify(r)} vs rebuilt ${want}`);
     } catch (err) {
       fail("rebuilding the template index", err);
@@ -530,7 +569,7 @@ async function replayExit(proof: Proof, e: ExitEvidence, url: string, opts: Opts
   const add = (ok: boolean, text: string) => out.push({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
   const hash = sha256(stringToHex(JSON.stringify(proof.request)));
   add(hash === e.request_sha256, hash === e.request_sha256 ? "request hash matches evidence" : `request hash ${hash} != ${e.request_sha256}`);
-  const bad = shapeError(proof, e);
+  const bad = shapeError(proof, e, 1);
   if (bad) {
     add(false, `request shape: ${bad} (nothing sent to the node)`);
     return out;
@@ -539,27 +578,27 @@ async function replayExit(proof: Proof, e: ExitEvidence, url: string, opts: Opts
   try {
     const id = Number(await rpc<Hex>(url, "eth_chainId", []));
     add(id === e.chain_id, id === e.chain_id ? `chain id ${id} matches evidence` : `node chain id ${id} != evidence chain id ${e.chain_id}`);
-    const calls = (proof.request.params[0] as { blockStateCalls: BlockStateCall[] }).blockStateCalls[0].calls;
+    const calls = blocksOf(proof.request[0])[0].calls;
     seller = calls[0]?.from ?? null;
     const head = await blockOf(url, toHex(e.block));
     const token = proof.target as Address;
     const pair = `0x${(await rpc<Hex>(url, "eth_call", [{ to: FACTORY, data: encodeFunctionData({ abi: parseAbi(["function getPair(address,address) view returns (address)"]), args: [token, WETH] }) }, toHex(e.block)])).slice(-40)}` as Address;
     // the approve and swap the guard would sign (positions of exitPlan), from the request; shape checked, hashes against the evidence
-    const txs = [calls[1], calls[3]].map((c) => unsignedOf(c, e.chain_id));
-    const fees: Fees = { gas: BigInt(calls[1].gas), maxFeePerGas: BigInt(calls[1].maxFeePerGas), maxPriorityFeePerGas: BigInt(calls[1].maxPriorityFeePerGas) };
-    const blocks = exitPlan(token, seller ?? NOBODY, BigInt(e.amount), BigInt(head.timestamp) + NEXT_S, pair, txs);
-    const funds = await topUp(url, head, seller ?? NOBODY, BigInt(callsBy(blocks, seller ?? NOBODY)) * fees.gas * fees.maxFeePerGas);
-    const same = JSON.stringify(buildRequest(head, funds, blocks, fees)) === JSON.stringify(proof.request);
-    add(same, same ? `request is the exit sale checkExit builds for ${e.amount} tokens from ${seller}` : "request is not the exit sale checkExit builds for this target and amount");
+    const txs = [calls[0], calls[1]].map((c) => unsignedOf(c, e.chain_id));
+    const fees: Fees = { gas: BigInt(calls[0].gas), maxFeePerGas: BigInt(calls[0].maxFeePerGas), maxPriorityFeePerGas: BigInt(calls[0].maxPriorityFeePerGas) };
+    const blocks = exitPlan(seller ?? NOBODY, BigInt(e.block), txs);
+    const funds = await balances(url, head, blocks, fees, seller ?? NOBODY, null);
+    const same = JSON.stringify([buildRequest(head, funds, blocks, fees)]) === JSON.stringify(proof.request);
+    add(same, same ? `request is the exit sale checkExit builds for ${e.amount} tokens from ${seller}, alone in its block` : "request is not the exit sale checkExit builds for this target and amount");
     const sold = BigInt(e.amount);
     const shapeBad = saleShape(txs, token, seller ?? NOBODY, sold);
     add(!shapeBad, shapeBad ? `exit transactions: ${shapeBad}` : `exit transactions are approve(router, ${sold}) then the swap of ${sold} to ETH for ${seller}`);
     const hs = txs.map((t) => keccak256(t));
     add(JSON.stringify(hs) === JSON.stringify(e.tx_hashes), JSON.stringify(hs) === JSON.stringify(e.tx_hashes) ? "the approve and swap simulated hash to evidence.tx_hashes" : `the approve and swap simulated hash to ${hs.join(", ")}, evidence says ${e.tx_hashes.join(", ")}`);
-    const fresh = (await rpc<{ calls: Result[] }[]>(url, proof.request.method, proof.request.params)).flatMap((b) => b.calls);
-    const sameResults = JSON.stringify(fresh.map((r) => [r.status, r.returnData])) === JSON.stringify(proof.response.map((r) => [r.status, r.returnData]));
-    add(sameResults, sameResults ? `request resent to ${url} at block ${e.block}: status and return data of all ${fresh.length} calls identical` : "call results differ");
-    const j = judgeExit(blocks[0].calls.map((c) => c.label), fresh);
+    const fresh = (await rpc<{ calls: Result[] }[]>(url, proof.request[0].method, proof.request[0].params)).flatMap((b) => b.calls);
+    const sameResults = JSON.stringify(fresh.map(outcome)) === JSON.stringify(proof.response[0].map(outcome));
+    add(sameResults, sameResults ? `request resent to ${url} at block ${e.block}: status, return data and logs of all ${fresh.length} calls identical` : "call results differ");
+    const j = judgeExit(blocks[0].calls.map((c) => c.label), fresh, { token, seller: seller ?? NOBODY, pair });
     add(j.verdict === proof.verdict && j.reasons === proof.reasons, `exit verdict ${j.verdict} ${j.verdict === proof.verdict && j.reasons === proof.reasons ? "rejudged identically" : `differs from the file's ${proof.verdict}`}`);
     add(j.quote.toString() === e.quote, j.quote.toString() === e.quote ? `exit quote ${e.quote} wei recomputed identically` : `exit quote in evidence ${e.quote} != recomputed ${j.quote}`);
   } catch (err) {

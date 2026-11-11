@@ -231,9 +231,9 @@ const MAX_EVIDENCE: usize = 8_000;
 /// entry), measured at worst case by a test. The price must cover it, otherwise each request eats into
 /// the contract's balance. It also covers the code posted with the verdict, the target's `seen` record
 /// and, on a `block`, the blocklist entry the verdict adds. Two exclusive worst cases (a block is
-/// never bought): the block path, and the buy path with the signed tx, both decision hashes and the
-/// agent's holdings entry.
-const CHECK_STORAGE_BYTES: u128 = 1700;
+/// never bought): the block path, and the buy path with the signed tx, both decision hashes, their
+/// anchors (`decisions`) and the agent's holdings entry.
+const CHECK_STORAGE_BYTES: u128 = 1900;
 /// Validity duration of a verdict: the target can change (owner, proxy, liquidity),
 /// so an old `allow` no longer pays; the agent asks for a new check.
 pub const VERDICT_TTL_NS: u64 = 120 * 1_000_000_000;
@@ -311,6 +311,11 @@ pub struct Guard {
     /// buy reverted on Base can never sell another agent's tokens. Only the owner clears or reassigns
     /// a holding (`set_holding`).
     holdings: LookupMap<String, (AccountId, u128)>,
+    /// Decision digests anchored by `request_check` and `buy`, with the check each backs: one signed
+    /// model decision backs one guard call. An entry (at most 117 bytes) is paid by its check's price
+    /// (`CHECK_STORAGE_BYTES` counts the check's and its buy's); a refunded check or a failed signature
+    /// frees its digest, so a check never holds more than two.
+    decisions: LookupMap<String, u64>,
 }
 
 /// Strict EVM address: `0x` + 40 hexadecimal digits (42 characters, not one more).
@@ -497,6 +502,7 @@ impl Guard {
             blocklist: IterableMap::new(b"l"),
             seen: LookupMap::new(b"s"),
             holdings: LookupMap::new(b"h"),
+            decisions: LookupMap::new(b"d"),
         }
     }
 
@@ -697,6 +703,7 @@ impl Guard {
         require!(amount_wei.0 > 0, "zero amount");
         let cost = self.cost(amount_wei.0, 1);
         let id = self.new_check(&target, None, amount_wei, decision.as_deref());
+        self.anchor(decision.as_deref(), id);
         require!(
             cost <= self.budget_left(&env::predecessor_account_id()).0,
             "budget exceeded"
@@ -999,6 +1006,7 @@ impl Guard {
                 "decision_sha256": decision,
             }),
         );
+        self.anchor(decision.as_deref(), id);
         if let Some(check) = self.checks.get_mut(&id) {
             check.buy_decision_sha256 = decision;
         }
@@ -1287,6 +1295,14 @@ impl Guard {
             .and_then(|bytes| parse_signature(&bytes));
         let Some(signature) = signature else {
             self.refund(&p.agent, p.cost, p.armed_until_ns);
+            // The decision that asked for this buy got nothing signed: it may ask again.
+            let digest = self
+                .checks
+                .get_mut(&p.id)
+                .and_then(|c| c.buy_decision_sha256.take());
+            if let Some(d) = digest {
+                self.decisions.remove(&d);
+            }
             emit(
                 "sign_failed",
                 &near_sdk::serde_json::json!({ "id": p.id, "agent": p.agent }),
@@ -1497,6 +1513,10 @@ impl Guard {
             env::block_timestamp() >= check.requested_ns.0.saturating_add(VERDICT_TIMEOUT_NS),
             "timeout not reached"
         );
+        let digest = check.decision_sha256.take(); // the decision backed nothing that happened
+        if let Some(d) = digest {
+            self.decisions.remove(&d);
+        }
         self.checks.remove(&id);
         self.escrow -= price;
         let credit = self.credit_of(&who).0;
@@ -1510,6 +1530,25 @@ impl Guard {
     #[must_use]
     pub fn get_check(&self, id: u64) -> Option<&Check> {
         self.checks.get(&id)
+    }
+
+    /// The check a decision digest backs (anchored by its `request_check` or its `buy`), if any.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)] // near-sdk's JSON ABI requires an owned type
+    pub fn decision_of(&self, decision_sha256: String) -> Option<U64> {
+        self.decisions
+            .get(&decision_sha256.to_ascii_lowercase())
+            .map(|&n| U64(n))
+    }
+
+    /// Anchors `decision`, if any, on check `id`: a digest already anchored is refused, so one signed
+    /// decision backs one guard call.
+    fn anchor(&mut self, decision: Option<&str>, id: u64) {
+        let Some(d) = decision else { return };
+        if let Some(n) = self.decisions.get(d) {
+            env::panic_str(&format!("decision already anchored on check #{n}"));
+        }
+        self.decisions.insert(d.to_owned(), id);
     }
 
     /// Refunds to the caller all of their unused credit (the storage held at opening stays acquired).
@@ -1748,9 +1787,9 @@ mod tests {
     use near_sdk::test_utils::{get_created_receipts, get_logs, VMContextBuilder};
     use near_sdk::{testing_env, NearToken, PromiseResult};
 
-    /// Unit of test amounts: PRICE = 0.017 NEAR, enough for the storage of a request.
+    /// Unit of test amounts: PRICE = 0.019 NEAR, enough for the storage of a request.
     const U: u128 = 1_000_000_000_000_000_000_000;
-    const PRICE: u128 = 17 * U;
+    const PRICE: u128 = 19 * U;
     const ONE_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
     const SEC: u64 = 1_000_000_000;
     const TARGET: &str = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
@@ -3428,7 +3467,8 @@ mod tests {
             // fees 17 + 17, gas 9, router 21, value 17, data 3 + 228, access 1, v 1, r 33, s 33.
             c.signed_tx = Some(vec![0xff; 396].into());
             c.settled = true;
-            c.buy_decision_sha256 = Some("f".repeat(64));
+            c.buy_decision_sha256 = Some("e".repeat(64));
+            g.decisions.insert("e".repeat(64), u64::MAX);
             g.holdings
                 .insert(TARGET.to_ascii_lowercase(), (big.clone(), u128::MAX));
         }
@@ -3438,6 +3478,7 @@ mod tests {
         g.seen.flush();
         g.blocklist.flush();
         g.holdings.flush();
+        g.decisions.flush();
         u128::from(env::storage_usage() - before)
     }
 
@@ -4319,6 +4360,71 @@ mod tests {
         assert_eq!(c.buy_decision_sha256, Some("2".repeat(64)));
     }
 
+    // 17b. one signed decision backs one guard call (judge pass 5: one package anchored on two checks)
+    #[test]
+    #[should_panic(expected = "decision already anchored on check #1")]
+    fn a_decision_digest_backs_one_check_only() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1);
+        ctx("agent.test", 0, 500);
+        g.request_check(TARGET.into(), U128(VALUE), Some(DIGEST.into()));
+        g.request_check(TARGET.into(), U128(VALUE), Some(DIGEST.to_lowercase()));
+        // same digest, other case
+    }
+
+    #[test]
+    #[should_panic(expected = "decision already anchored on check #1")]
+    fn the_check_s_digest_cannot_also_back_its_buy() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1);
+        ctx("agent.test", 0, 500);
+        let check = g.request_check(TARGET.into(), U128(VALUE), Some(DIGEST.into()));
+        ctx("sentinel.test", 0, 600);
+        g.post_verdict(
+            check,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+            code("aa"),
+            true,
+            previewed(&g, check, QUOTE),
+        );
+        ctx("agent.test", 0, 700);
+        let _ = g.buy(check, U128(VALUE), Some(DIGEST.into()));
+    }
+
+    #[test]
+    fn decision_of_names_the_check_a_digest_backs() {
+        let (mut g, check) = judged(Verdict::Allow);
+        assert_eq!(g.decision_of(DIGEST.into()), None);
+        let _ = g.buy(check, U128(VALUE), Some(DIGEST.into()));
+        assert_eq!(g.decision_of(DIGEST.into()), Some(U64(check)));
+        assert_eq!(g.decision_of(DIGEST.to_lowercase()), Some(U64(check)));
+    }
+
+    #[test]
+    fn a_refunded_check_frees_its_digest() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        ctx("agent.test", 0, 0);
+        let check = g.request_check(TARGET.into(), U128(VALUE), Some(DIGEST.into()));
+        ctx("agent.test", 0, VERDICT_TIMEOUT_NS);
+        g.refund_check(check);
+        assert_eq!(g.decision_of(DIGEST.into()), None); // it backs nothing any more
+        let again = g.request_check(TARGET.into(), U128(VALUE), Some(DIGEST.into()));
+        assert_eq!(g.decision_of(DIGEST.into()), Some(U64(again)));
+    }
+
+    #[test]
+    fn a_failed_signature_frees_its_buy_digest() {
+        let (mut g, check) = judged(Verdict::Allow);
+        let _ = g.buy(check, U128(VALUE), Some("1".repeat(64)));
+        signed(&mut g, PromiseResult::Failed);
+        assert_eq!(g.decision_of("1".repeat(64)), None);
+        assert!(g.get_check(check).unwrap().buy_decision_sha256.is_none());
+        ctx("agent.test", 0, 750);
+        let _ = g.buy(check, U128(VALUE), Some("1".repeat(64))); // the same decision may retry
+        assert_eq!(g.decision_of("1".repeat(64)), Some(U64(check)));
+    }
+
     // 18. per-agent holdings: an exit sells at most what the guard's signed buys credited the agent
     /// `who` is registered, credited and armed, gets an allow on TARGET and a signed buy.
     fn bought_for(g: &mut Guard, who: &str, now_ns: u64) -> u64 {
@@ -4459,7 +4565,23 @@ mod tests {
     #[test]
     #[should_panic(expected = "exit amount above the agent's holding")]
     fn two_exit_quotes_for_the_full_holding_the_second_sale_is_refused() {
-        let (mut g, bought) = judged(Verdict::Allow);
+        // a check, a buy, two exit quotes and a sale: 104.5 U at 19 U a check, above `judged`'s 100 U
+        let mut g = credited(ONE_NEAR, 200 * U, 1000, 1000 * U);
+        arm_at(&mut g, 200 * U, 1, 0);
+        ctx("agent.test", 0, 500);
+        let bought = g.request_check(TARGET.into(), U128(VALUE), None);
+        ctx("sentinel.test", 0, 600);
+        g.post_verdict(
+            bought,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+            code("aa"),
+            true,
+            previewed(&g, bought, QUOTE),
+        );
+        ctx("agent.test", 0, 700);
         buy(&mut g, bought);
         signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
         let first = exit_quote(&mut g, "agent.test", bought, MIN_OUT, 1000);
