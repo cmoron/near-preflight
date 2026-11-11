@@ -28,8 +28,8 @@ refused() {
 }
 
 echo "0. The armer (own process, function-call key limited to arm/disarm) arms the agent within the human's bounds."
-refused "budget above the human's bound" "${ARMER[@]}" 0.2 900
-"${ARMER[@]}" 0.08 900 # 3 verdicts a 0,01 NEAR + 2 achats a 0,0225 NEAR (valeur et gaz au plafond)
+refused "budget above the human's bound" "${ARMER[@]}" 0.3 900
+"${ARMER[@]}" 0.12 900 # 5 verdicts at 0.01 NEAR + 3 buys at 0.0225 NEAR (value and gas at the cap); the exit needs no budget
 
 bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts &
 SENTINEL=$!
@@ -40,8 +40,14 @@ kill $SENTINEL
 trap - EXIT # sinon le piege retue un processus deja recolte, et sous set -e son echec devient le code de sortie
 
 echo
-echo "6. Emergency stop by the human (own process, full-access key from the near-cli keychain):"
+echo "7. Emergency stop by the human (own process, full-access key from the near-cli keychain):"
 "${HUMAN[@]}" stop
-refused "agent frozen by the owner" "${ARMER[@]}" 0.08 900
+refused "agent frozen by the owner" "${ARMER[@]}" 0.12 900
 "${HUMAN[@]}" unfreeze
+
+echo
+echo "8. The human withdraws 0.00001 ETH from the guard's EVM address to the owner's address fixed at init:"
+out=$("${HUMAN[@]}" withdraw 10000000000000)
+echo "$out" # not tee /dev/stderr: reopening it truncates a log file the output is redirected to
+bun --env-file=.env app/relay.ts exit "$(sed -n 's/.*relay.ts exit \([0-9]*\).*/\1/p' <<<"$out")" || status=1
 exit $status

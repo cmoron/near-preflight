@@ -1,10 +1,13 @@
 // Diffuseur, sans aucune cle : lit dans la garde la transaction signee par NEAR pour une demande,
 // verifie qu'elle achete la cible de la demande via le routeur, pour l'adresse derivee de la garde
 // et signee par elle, puis la diffuse sur le fork local de Base et affiche le recu.
-// Usage : bun --env-file=.env app/relay.ts <id>
+// `exit <nonce>`: same for the latest signed exit (sale or ETH withdrawal). A transaction already
+// mined is reported with its receipt.
+// Usage : bun --env-file=.env app/relay.ts <id> | exit <nonce>
 import {
   createPublicClient,
   decodeFunctionData,
+  keccak256,
   formatEther,
   formatUnits,
   getAddress,
@@ -13,8 +16,11 @@ import {
   parseTransaction,
   recoverTransactionAddress,
   toHex,
+  TransactionReceiptNotFoundError,
   type Address,
   type Hex,
+  type PublicClient,
+  type TransactionReceipt,
 } from "viem";
 import { ROUTER, WETH } from "./verifier";
 
@@ -52,66 +58,159 @@ export async function verifyBuy(raw: Hex, target: Address, address: Address): Pr
   return { nonce: tx.nonce ?? 0, value: tx.value ?? 0n, minOut, deadline, gas: tx.gas ?? 0n, maxFeePerGas: tx.maxFeePerGas ?? 0n };
 }
 
+const exitAbi = parseAbi([
+  "function approve(address,uint256) returns (bool)",
+  "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint256,uint256,address[],address,uint256)",
+]);
+
+/** Accepts the exit's signed transactions only if, in order, they are approve(router, amount) on
+ *  the token then the swap of `amount` back to `address` (a sale), or the payment of `amount` to
+ *  `withdrawTo` (token null: a withdrawal), all signed by `address` on Base. One line per tx. */
+export async function verifyExit(raws: Hex[], exit: { token: Address | null; amount: bigint }, address: Address, withdrawTo: Address): Promise<string[]> {
+  const reject = (what: string): never => {
+    throw new Error(`signed exit rejected: ${what}`);
+  };
+  const out: string[] = [];
+  for (const [i, raw] of raws.entries()) {
+    const tx = parseTransaction(raw);
+    if (tx.type !== "eip1559" || tx.chainId !== 8453) reject(`tx ${i}: type ${tx.type}, chain id ${tx.chainId}`);
+    const from = await recoverTransactionAddress({ serializedTransaction: raw as Parameters<typeof recoverTransactionAddress>[0]["serializedTransaction"] });
+    if (from !== getAddress(address)) reject(`tx ${i}: signer ${from}, not ${address}`);
+    const to = getAddress(tx.to ?? reject(`tx ${i}: no recipient`));
+    if (!exit.token) {
+      if (raws.length !== 1 || to !== getAddress(withdrawTo) || tx.value !== exit.amount || (tx.data ?? "0x") !== "0x")
+        reject(`withdrawal to ${to} of ${tx.value} wei, not ${exit.amount} wei to ${withdrawTo}`);
+      out.push(`withdraw ${formatEther(exit.amount)} ETH to ${withdrawTo} (fixed at init), nonce ${tx.nonce}`);
+      continue;
+    }
+    const { functionName, args } = decodeFunctionData({ abi: exitAbi, data: tx.data ?? "0x" });
+    if (i === 0) {
+      if (functionName !== "approve" || to !== getAddress(exit.token) || getAddress(args[0] as Address) !== ROUTER || args[1] !== exit.amount)
+        reject(`tx 0 is not approve(router, ${exit.amount}) on ${exit.token}`);
+      out.push(`approve(router, ${exit.amount}) on ${exit.token}, nonce ${tx.nonce}`);
+    } else {
+      if (i !== 1 || functionName !== "swapExactTokensForETHSupportingFeeOnTransferTokens" || to !== ROUTER) reject(`tx ${i} is not the swap on the router`);
+      const [amount, min, path, recipient] = args as readonly [bigint, bigint, readonly Address[], Address, bigint];
+      if (amount !== exit.amount || path.length !== 2 || getAddress(path[0]) !== getAddress(exit.token) || getAddress(path[1]) !== WETH)
+        reject(`path ${path.join(" -> ")} for ${amount}, not ${exit.amount} ${exit.token} -> WETH`);
+      if (getAddress(recipient) !== getAddress(address)) reject(`recipient ${recipient}, not ${address}`);
+      out.push(`swap ${amount} ${exit.token} -> ETH for at least ${min} wei, to ${address}, nonce ${tx.nonce}`);
+    }
+  }
+  return out;
+}
+
+/** Fork setup Base would not need: tops `address` up to the value, max gas and L1 data fee of `raws`. */
+export async function fund(client: PublicClient, raws: Hex[], address: Address, log: (s: string) => void): Promise<void> {
+  let need = 0n;
+  for (const raw of raws) {
+    const tx = parseTransaction(raw);
+    const l1 = await client.readContract({ address: GAS_ORACLE, abi: oracle, functionName: "getL1Fee", args: [raw] });
+    need += (tx.value ?? 0n) + (tx.gas ?? 0n) * (tx.maxFeePerGas ?? 0n) + l1;
+  }
+  if ((await client.getBalance({ address })) < need) {
+    await client.request({ method: "anvil_setBalance", params: [address, toHex(need)] } as never);
+    log(`[fork setup] anvil_setBalance ${address} ${formatEther(need)} ETH (value + max gas + L1 data fee of ${raws.length} tx); on Base it would take a real deposit`);
+  }
+}
+
+/** Broadcasts `raw`, signed by `address`, on the local anvil fork only, after the fork setup Base
+ *  would not need: balance for value, max gas and L1 data fee (anvil_setBalance), nonce aligned after
+ *  a fork restart (anvil_setNonce). */
+export async function broadcast(client: PublicClient, raw: Hex, address: Address, log: (s: string) => void): Promise<{ receipt: TransactionReceipt; already: boolean }> {
+  // Diffusion sur le fork local seulement : la transaction est aussi valable sur Base reel.
+  await client.request({ method: "anvil_nodeInfo" } as never).catch(() => {
+    throw new Error("refusing to broadcast: the EVM node is not a local anvil fork");
+  });
+  const tx = parseTransaction(raw);
+  const nonce = tx.nonce ?? 0;
+  const current = await client.getTransactionCount({ address });
+  if (current > nonce) {
+    // Already broadcast (by this relay or anyone: the signed tx is public on NEAR): report it.
+    const mined = await client.getTransactionReceipt({ hash: keccak256(raw) }).catch((e: unknown) => {
+      if (e instanceof TransactionReceiptNotFoundError) return null;
+      throw e;
+    });
+    if (!mined) throw new Error(`nonce ${nonce} of ${address} already used by another transaction on this chain`);
+    log(`${mined.transactionHash} already broadcast: receipt status ${mined.status === "success" ? 1 : 0}, block ${mined.blockNumber}`);
+    return { receipt: mined, already: true };
+  }
+  await fund(client, [raw], address, log);
+  if (current < nonce) {
+    await client.request({ method: "anvil_setNonce", params: [address, toHex(nonce)] } as never);
+    log(`[fork setup] anvil_setNonce ${address} ${nonce} (the fork is behind the guard's nonce: restarted fork, or earlier signed tx not broadcast)`);
+  }
+  const hash = await client.sendRawTransaction({ serializedTransaction: raw as never });
+  return { receipt: await client.waitForTransactionReceipt({ hash, timeout: 30_000 }), already: false };
+}
+
 if (import.meta.main) {
   // near.ts pose un fetch global et lit .env a l'import : charge ici seulement, pas par les tests.
   const { env, view } = await import("./near");
   const { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH } = await import("./derive");
   const log = (s: string) => console.log(`  [relay] ${s}`);
-  const id = Number(process.argv[2]);
-  if (!Number.isInteger(id)) throw new Error("usage: bun --env-file=.env app/relay.ts <id>");
-
-  // Le RPC repartit les lectures sur des noeuds plus ou moins a jour : un achat qui vient d'etre signe
-  // peut y manquer encore ; relire jusqu'a 30 s.
-  type Stored = { target: Address; verdict: string | null; signed_tx: string | null } | null;
-  let check: Stored = null;
-  for (let i = 0; i < 20 && !check?.signed_tx; i++) {
-    if (i) await Bun.sleep(1500);
-    check = await view<Stored>("get_check", { id });
-  }
-  if (!check?.signed_tx) throw new Error(`#${id}: no signed transaction stored by the guard`);
-  const raw = `0x${Buffer.from(check.signed_tx, "base64").toString("hex")}` as Hex;
+  const usage = "usage: bun --env-file=.env app/relay.ts <check id> | exit <nonce>";
+  const [arg, nonceArg] = process.argv.slice(2);
   // Adresse recalculee ici depuis la cle maitresse du MPC, le compte de la garde et le chemin fixe.
   const address = deriveEvmAddress(await fetchMasterPublicKey(), env("GUARD"), GUARD_PATH);
+  const client = createPublicClient({ transport: http(env("EVM_RPC")) });
+  /** Le RPC repartit les lectures sur des noeuds plus ou moins a jour : ce qui vient d'etre signe peut
+   *  y manquer encore ; relire jusqu'a 30 s. */
+  const reread = async <T>(read: () => Promise<T>, done: (v: T) => boolean): Promise<T> => {
+    let v = await read();
+    for (let i = 1; i < 20 && !done(v); i++) {
+      await Bun.sleep(1500);
+      v = await read();
+    }
+    return v;
+  };
+
+  if (arg === "exit") {
+    const nonce = Number(nonceArg);
+    if (!Number.isInteger(nonce)) throw new Error(usage);
+    type Exit = { by: string; token: Address | null; amount: string; nonce: number; signed_txs: string[] } | null;
+    const exit = await reread(() => view<Exit>("last_exit"), (e) => e?.nonce === nonce);
+    if (exit?.nonce !== nonce) throw new Error(`no signed exit at nonce ${nonce} stored by the guard (latest: ${exit?.nonce ?? "none"})`);
+    const { withdraw_to } = await view<{ withdraw_to: Address }>("evm_config");
+    const raws = exit.signed_txs.map((b) => `0x${Buffer.from(b, "base64").toString("hex")}` as Hex);
+    const lines = await verifyExit(raws, { token: exit.token, amount: BigInt(exit.amount) }, address, withdraw_to);
+    for (const l of lines) log(`exit by ${exit.by}, signed tx decoded: ${l}`);
+    const watched = exit.token ? address : withdraw_to;
+    await fund(client, raws, address, log); // once for all, so the balance change below is the real one
+    const before = await client.getBalance({ address: watched });
+    for (const raw of raws) {
+      const { receipt, already } = await broadcast(client, raw, address, log);
+      if (!already) log(`eth_sendRawTransaction ${receipt.transactionHash}: receipt status ${receipt.status === "success" ? 1 : 0}, block ${receipt.blockNumber}, gas used ${receipt.gasUsed}`);
+      if (receipt.status !== "success") process.exit(1);
+    }
+    const after = await client.getBalance({ address: watched });
+    log(`${watched} holds ${formatEther(after)} ETH (${after >= before ? "+" : ""}${formatEther(after - before)}${exit.token ? ", net of the gas of both transactions" : ""})`);
+    process.exit(raws.length === (exit.token ? 2 : 1) ? 0 : 1);
+  }
+
+  const id = Number(arg);
+  if (!Number.isInteger(id)) throw new Error(usage);
+  type Stored = { target: Address; verdict: string | null; signed_tx: string | null } | null;
+  const check = await reread(() => view<Stored>("get_check", { id }), (c) => !!c?.signed_tx);
+  if (!check?.signed_tx) throw new Error(`#${id}: no signed transaction stored by the guard`);
+  const raw = `0x${Buffer.from(check.signed_tx, "base64").toString("hex")}` as Hex;
   const buy = await verifyBuy(raw, check.target, address);
   log(
     `#${id} (verdict ${check.verdict}) signed tx decoded: router ${ROUTER}, path WETH -> ${check.target}, ` +
       `recipient and signer ${address} (derived from ${env("GUARD")}, path ${GUARD_PATH}), nonce ${buy.nonce}, ` +
       `${formatEther(buy.value)} ETH, amountOutMin ${buy.minOut}`,
   );
-
-  const rpc = env("EVM_RPC");
-  const client = createPublicClient({ transport: http(rpc) });
-  // Diffusion sur le fork local seulement : la transaction est aussi valable sur Base reel.
-  await client.request({ method: "anvil_nodeInfo" } as never).catch(() => {
-    throw new Error(`refusing to broadcast: ${rpc} is not a local anvil fork`);
-  });
-  // Preparation du fork : l'adresse derivee n'a rien sur Base ; on lui donne de quoi payer cet achat
-  // (valeur, gaz au plafond et frais de donnees L1 de Base, sans quoi le noeud ecarte la transaction),
-  // et un fork relance repart du nonce 0 alors que la garde a peut-etre deja signe avant.
-  const l1 = await client.readContract({ address: GAS_ORACLE, abi: oracle, functionName: "getL1Fee", args: [raw] });
-  const need = buy.value + buy.gas * buy.maxFeePerGas + l1;
-  if ((await client.getBalance({ address })) < need) {
-    await client.request({ method: "anvil_setBalance", params: [address, toHex(need)] } as never);
-    log(`[fork setup] anvil_setBalance ${address} ${formatEther(need)} ETH (value + max gas + ${l1} wei L1 data fee); on Base it would take a real deposit`);
-  }
-  const nonce = await client.getTransactionCount({ address });
-  if (nonce > buy.nonce) throw new Error(`nonce ${buy.nonce} already used by ${address} on this chain`);
-  if (nonce < buy.nonce) {
-    await client.request({ method: "anvil_setNonce", params: [address, toHex(buy.nonce)] } as never);
-    log(`[fork setup] anvil_setNonce ${address} ${buy.nonce} (the fork is behind the guard's nonce: restarted fork, or earlier signed tx not broadcast)`);
-  }
-
   const token = { address: check.target, abi: erc20 } as const;
   const [symbol, decimals, before] = await Promise.all([
     client.readContract({ ...token, functionName: "symbol" }),
     client.readContract({ ...token, functionName: "decimals" }),
     client.readContract({ ...token, functionName: "balanceOf", args: [address] }),
   ]);
-  const hash = await client.sendRawTransaction({ serializedTransaction: raw as never });
-  const receipt = await client.waitForTransactionReceipt({ hash, timeout: 30_000 });
+  const { receipt, already } = await broadcast(client, raw, address, log);
+  if (already) process.exit(receipt.status === "success" ? 0 : 1);
   const after = await client.readContract({ ...token, functionName: "balanceOf", args: [address] });
   log(
-    `#${id} eth_sendRawTransaction ${hash}: receipt status ${receipt.status === "success" ? 1 : 0}, block ${receipt.blockNumber}, ` +
+    `#${id} eth_sendRawTransaction ${receipt.transactionHash}: receipt status ${receipt.status === "success" ? 1 : 0}, block ${receipt.blockNumber}, ` +
       `gas used ${receipt.gasUsed}; ${address} holds ${formatUnits(after, decimals)} ${symbol} (+${formatUnits(after - before, decimals)})`,
   );
   if (receipt.status !== "success" || after <= before) process.exit(1);

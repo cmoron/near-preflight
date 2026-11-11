@@ -16,11 +16,14 @@ export function step(check: Check | null, readAt: number, lastAt: number): "judg
 if (import.meta.main) {
   // near.ts pose un fetch global et lit NEAR_RPC a l'import : charge ici seulement, pas par les tests.
   const { account, call, env, viewAt } = await import("./near");
-  const { checkToken, toProof } = await import("./verifier");
+  const { checkToken, deriveProbes, toProof } = await import("./verifier");
+  const { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH } = await import("./derive");
   const { mkdir } = await import("node:fs/promises");
 
   const sentinel = account(env("SENTINEL"), env("SENTINEL_KEY"));
   const EVM = env("EVM_RPC");
+  // The real buyer: the guard's EVM address, public, derived like the relay does. Simulated too.
+  const GUARD_EVM = deriveEvmAddress(await fetchMasterPublicKey(), env("GUARD"), GUARD_PATH);
   const log = (s: string) => console.log(`    [sentinel] ${s}`);
   await mkdir("proofs", { recursive: true });
 
@@ -31,7 +34,9 @@ if (import.meta.main) {
 
   const judge = async (id: number, check: Check) => {
     log(`#${id} : ${check.agent} wants to buy ${check.target}, read-only simulation...`);
-    const r = await checkToken(EVM, check.target as `0x${string}`);
+    // Probes derived from on-chain data, not chosen here: replay --check recomputes them.
+    const ticket = { guard: env("GUARD"), id, requested_ns: check.requested_ns };
+    const r = await checkToken(EVM, check.target as `0x${string}`, GUARD_EVM, (head) => deriveProbes(ticket, head.hash));
     for (const c of r.evidence.calls) log(`#${id}   ${c}`);
     const proof = toProof(id, check.target, r);
     await Bun.write(`proofs/${id}.json`, JSON.stringify(proof, null, 2));
@@ -82,7 +87,7 @@ if (import.meta.main) {
     }
   };
 
-  log(`listening to ${env("GUARD")}, simulating on ${EVM}`);
+  log(`listening to ${env("GUARD")}, simulating on ${EVM} as a derived probe buyer and as the guard's EVM address ${GUARD_EVM}`);
   for (;;) {
     try {
       await scan();

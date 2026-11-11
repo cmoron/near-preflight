@@ -5,8 +5,10 @@ import { keccak256, sha256, stringToHex, toHex, type Address, type Hex } from "v
 import {
   balances,
   buildRequest,
-  buyStage,
+  buyStages,
   byLabel,
+  deriveProbes,
+  GUARD,
   implementationAt,
   judge,
   NEXT_S,
@@ -96,38 +98,44 @@ function shapeError(p: Proof, e: Evidence): string | null {
   return null;
 }
 
-type Rebuilt = { labels: string[]; buyer: Address; stranger: Address | null; owner: Address | null };
+type Rebuilt = { labels: string[]; buyer: Address; guard: Address; stranger: Address | null; owner: Address | null };
+const NOBODY: Address = "0x0000000000000000000000000000000000000000";
 
 /** Reconstruit la requete que checkToken aurait produite pour proof.target (memes appels, memes
  *  adresses, routeur, WETH, blocs aux memes ecarts de temps) et en tire les libelles : ceux du fichier
- *  ne comptent pas. Seuls l'acheteur, l'inconnu et l'heure viennent de la requete ; quantite et
- *  proprietaire viennent de la reponse fraiche ; prix du gaz, prevrandao, coinbase et solde reel de
- *  owner() viennent du noeud, au bloc de la preuve. Aucun repli : une sonde absente est un defaut. */
+ *  ne comptent pas. Seuls l'acheteur, l'adresse de la garde, l'inconnu et l'heure viennent de la
+ *  requete (at the positions plan() gives them); quantites et proprietaire viennent de la reponse
+ *  fraiche ; prix du gaz, prevrandao, coinbase et solde reel de owner() viennent du noeud, au bloc de
+ *  la preuve. Aucun repli : une sonde absente est un defaut. */
 async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[]): Promise<Rebuilt | { error: string }> {
   try {
     const bs = (p.request.params[0] as { blockStateCalls: BlockStateCall[] }).blockStateCalls;
     const now = BigInt(bs[0].blockOverrides.time);
-    const buyer = bs[0].calls[0]?.from;
-    if (!buyer) return { error: "request has no buyer" };
     const token = p.target as Address;
+    const block = BigInt(e.block);
+    /** Sender of the first-block call that plan() labels `label`, in the request. */
+    const from = (blocks: { calls: { label: string }[] }[], label: string) => bs[0].calls[blocks[0].calls.findIndex((c) => c.label === label)]?.from;
+    const buyer = from(plan(token, NOBODY, NOBODY, block, now), "tokens before buy");
+    const guard = from(plan(token, NOBODY, NOBODY, block, now), `${GUARD}tokens before buy`);
+    if (!buyer || !guard) return { error: "request has no buyer or no guard side" };
     const head = await blockOf(url, toHex(e.block));
-    const buyOnly = plan(token, buyer, BigInt(e.block), now);
+    const buyOnly = plan(token, buyer, guard, block, now);
     const buyLabels = buyOnly[0].calls.map((c) => c.label);
-    const st = buyStage(byLabel(buyLabels, fresh.slice(0, buyLabels.length)));
+    const st = buyStages(byLabel(buyLabels, fresh.slice(0, buyLabels.length)));
     let blocks = buyOnly;
     let stranger: Address | null = null;
-    if (!st.findings.length) {
-      // l'inconnu suit l'achat et la sonde du proprietaire, comme dans plan()
-      stranger = bs[0].calls[buyLabels.length + (st.owner ? 1 : 0)]?.from ?? null;
+    if (!st.stop) {
+      const full = { amounts: st.amounts, owner: st.owner };
+      stranger = from(plan(token, buyer, guard, block, now, { ...full, stranger: NOBODY }), "transferFrom by a stranger") ?? null;
       if (!stranger) return { error: "request has no stranger probe where checkToken puts one" };
-      blocks = plan(token, buyer, BigInt(e.block), now, { stranger, amount: st.amount, owner: st.owner });
+      blocks = plan(token, buyer, guard, block, now, { ...full, stranger });
     }
-    const funds = await balances(url, head, buyer, stranger ? { stranger, owner: st.owner } : undefined);
+    const funds = await balances(url, head, buyer, guard, stranger ? { stranger, owner: st.owner } : undefined);
     const want = JSON.stringify(buildRequest(head, funds, blocks));
     if (want !== JSON.stringify(p.request)) return { error: "request is not the one checkToken builds for this target" };
     const labels = blocks.flatMap((b) => b.calls.map((c) => c.label));
     if (labels.length !== fresh.length) return { error: `expected ${labels.length} calls, node returned ${fresh.length}` };
-    return { labels, buyer, stranger, owner: st.owner };
+    return { labels, buyer, guard, stranger, owner: st.owner };
   } catch (err) {
     return { error: `request cannot be parsed (${msg(err)})` };
   }
@@ -155,11 +163,19 @@ async function probeProblems(url: string, e: Evidence, target: Address, r: Rebui
 }
 
 const readCheck = async (id: number) => (await import("./near")).view<OnChain>("get_check", { id }); // near.ts pose un fetch global : charge ici seulement
+/** The guard account (GUARD in .env) and its EVM address derived through Chain Signatures. */
+export type GuardInfo = { account: string; evm: Address };
+async function readGuard(): Promise<GuardInfo> {
+  const { env } = await import("./near");
+  const { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH } = await import("./derive");
+  return { account: env("GUARD"), evm: deriveEvmAddress(await fetchMasterPublicKey(), env("GUARD"), GUARD_PATH) };
+}
+const same = (a: string | null, b: string) => a?.toLowerCase() === b.toLowerCase();
 
 export async function replay(
   proof: Proof,
   url: string,
-  opts: { check?: boolean; chain?: (id: number) => Promise<OnChain>; clock?: () => number } = {},
+  opts: { check?: boolean; chain?: (id: number) => Promise<OnChain>; guard?: GuardInfo; clock?: () => number } = {},
 ): Promise<Line[]> {
   const out: Line[] = [];
   const add = (ok: boolean, text: string) => out.push({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
@@ -189,8 +205,11 @@ export async function replay(
     fail("reading the chain id", err);
   }
   let blockTs: number | null = null;
+  let blockHash: Hex | null = null;
   try {
-    blockTs = Number(BigInt((await blockOf(url, toHex(e.block))).timestamp));
+    const header = await blockOf(url, toHex(e.block));
+    blockTs = Number(BigInt(header.timestamp));
+    blockHash = header.hash;
     const first = BigInt((proof.request.params[0] as { blockStateCalls: BlockStateCall[] }).blockStateCalls[0].blockOverrides.time);
     const want = BigInt(blockTs) + NEXT_S;
     add(
@@ -205,6 +224,7 @@ export async function replay(
 
   // (c) meme requete, meme bloc ; memes statuts et memes donnees de retour
   let fresh: Result[] | null = null;
+  let rebuilt: Rebuilt | null = null;
   try {
     const blocks = await rpc<{ calls: Result[] }[]>(url, proof.request.method, proof.request.params);
     fresh = blocks.flatMap((b) => b.calls);
@@ -228,6 +248,7 @@ export async function replay(
     const r = await rebuild(url, proof, e, fresh);
     if ("error" in r) add(false, `request shape: ${r.error}`);
     else {
+      rebuilt = r;
       try {
         const problems = await probeProblems(url, e, proof.target as Address, r);
         add(!problems.length, problems.length ? `probe addresses: ${problems.join(" ; ")}` : "probe addresses are fresh (no code, not router/WETH/target/owner(), distinct)");
@@ -276,13 +297,37 @@ export async function replay(
           const same = c.verdict === proof.verdict && c.reasons === proof.reasons;
           add(same, same ? `on-chain verdict ${c.verdict} for #${proof.id} matches (same target, same reasons)` : `on-chain "${c.verdict}: ${c.reasons}" != file "${proof.verdict}: ${proof.reasons}"`);
         }
+        if (rebuilt) out.push(...(await derivation(proof.id, rebuilt, c, blockHash, opts.guard ?? (await readGuard()))));
         if (blockTs !== null) out.push(await timing(url, blockTs, c, opts.clock ?? (() => Date.now() / 1000)));
       }
     } catch (err) {
       fail("reading the NEAR contract", err);
     }
+  } else {
+    out.push({ ok: true, skipped: true, line: "SKIPPED  probe addresses not verified: they are derived from on-chain data, checked only with --check" });
   }
   return out;
+}
+
+/** The probes must be deriveProbes(guard, #id, on-chain request time, EVM block hash) and the guard
+ *  side must be the guard's derived EVM address: otherwise the sentinel chose who was simulated. */
+function derivation(id: number, r: Rebuilt, c: NonNullable<OnChain>, blockHash: Hex | null, g: GuardInfo): Line[] {
+  if (!blockHash) return [{ ok: false, line: "ERROR    probe derivation: EVM block hash unknown" }];
+  const want = deriveProbes({ guard: g.account, id, requested_ns: c.requested_ns }, blockHash);
+  const probesOk = same(r.buyer, want.buyer) && (r.stranger === null || same(r.stranger, want.stranger));
+  const line = (ok: boolean, text: string): Line => ({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
+  return [
+    line(
+      probesOk,
+      probesOk
+        ? `probe addresses derived from ${g.account}, #${id}, request time ${c.requested_ns} ns on NEAR and EVM block hash ${blockHash.slice(0, 10)}...`
+        : `probe addresses not derived from on-chain data: buyer ${r.buyer} (derived ${want.buyer}), stranger ${r.stranger ?? "none"} (derived ${want.stranger})`,
+    ),
+    line(
+      same(r.guard, g.evm),
+      same(r.guard, g.evm) ? `guard side simulated as ${g.account}'s derived EVM address ${g.evm}` : `guard side simulated as ${r.guard}, not ${g.account}'s derived EVM address ${g.evm}`,
+    ),
+  ];
 }
 
 /** L'heure du bloc EVM de la preuve doit tomber entre la demande et le verdict NEAR. Verifiable
@@ -308,7 +353,7 @@ export function summary(lines: Line[], checked: boolean, verdict: string): strin
   const bad = lines.filter((l) => !l.ok).length;
   if (bad) return `REPLAY FAILED: ${bad} check(s) not confirmed`;
   const skipped = lines.filter((l) => l.skipped).length;
-  const note = skipped ? ` (${skipped} check(s) not verified on this node, see SKIPPED)` : "";
+  const note = skipped ? ` (${skipped} check(s) not verified, see SKIPPED)` : "";
   return checked
     ? `REPLAY OK: verdict ${verdict} confirmed, same as on chain${note}`
     : `REPLAY OK (not checked against any on-chain verdict; use --check): verdict ${verdict}${note}`;

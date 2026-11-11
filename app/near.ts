@@ -79,6 +79,8 @@ export type Check = {
   /** Jetons recus par l'achat simule de 0,01 ETH (decimal) ; la garde en tire le minimum du swap. */
   quote: string;
   settled: boolean;
+  /** True once the owner approved this warn verdict (approve_warn). */
+  approved: boolean;
   /** Transaction EIP-1559 signee par le MPC pour l'achat (base64), null tant qu'il n'y en a pas. */
   signed_tx: string | null;
 };

@@ -19,6 +19,10 @@ const ROUTER: &str = "4752ba5DBc23f44D87826276BF6Fd6b1C372aD24";
 const WETH: &str = "4200000000000000000000000000000000000006";
 /// `swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256)`
 const SWAP_SELECTOR: [u8; 4] = [0xb6, 0xf9, 0xde, 0x95];
+/// `approve(address,uint256)`
+const APPROVE_SELECTOR: [u8; 4] = [0x09, 0x5e, 0xa7, 0xb3];
+/// `swapExactTokensForETHSupportingFeeOnTransferTokens(uint256,uint256,address[],address,uint256)`
+const SELL_SELECTOR: [u8; 4] = [0x79, 0x1a, 0xc9, 0x47];
 /// Chemin de derivation Chain Signatures, fixe : l'adresse EVM ne depend que du compte de la garde.
 pub const DERIVATION_PATH: &str = "evm-1";
 /// Echeance courte du swap, comptee depuis la demande de signature (~10 s de signature, puis diffusion).
@@ -77,6 +81,8 @@ pub struct Check {
     pub quote: U128,
     /// Vrai une fois la transaction d'achat signee : un verdict ne sert qu'une fois.
     pub settled: bool,
+    /// True once the owner approved this `warn` verdict (`approve_warn`): only then can it buy.
+    pub approved: bool,
     /// Transaction EIP-1559 signee par le MPC pour cet achat (base64 en JSON), a diffuser sur Base.
     pub signed_tx: Option<Base64VecU8>,
 }
@@ -96,6 +102,8 @@ pub struct EvmConfig {
     pub yocto_per_wei: U128,
     /// Glissement tolere sous le devis de la sentinelle, en points de base (300 = 3 %).
     pub max_slippage_bps: u16,
+    /// The owner's EVM address: the only destination of `withdraw_eth`.
+    pub withdraw_to: String,
 }
 
 /// Achat en attente de la signature du MPC.
@@ -111,6 +119,31 @@ struct Pending {
     cost: u128,
     /// Echeance de l'armement debite : un echec ne rend le budget qu'a ce meme armement.
     armed_until_ns: u64,
+}
+
+/// Exit from the guard's EVM address, signed by NEAR: a sale of `token` for ETH (approve, then
+/// swap back to the guard's address) or, with no token, an ETH withdrawal to `evm.withdraw_to`.
+#[near(serializers = [borsh, json])]
+pub struct Exit {
+    pub by: AccountId,
+    /// Token sold, `None` for an ETH withdrawal.
+    pub token: Option<String>,
+    /// Tokens sold, or wei withdrawn.
+    pub amount: U128,
+    /// Minimum ETH out of the sale, chosen by the caller (0 for a withdrawal).
+    pub min_out: U128,
+    pub deadline_s: u64,
+    /// Nonce of the first transaction, the next ones follow.
+    pub nonce: u64,
+    /// Signed transactions in nonce order (base64 in JSON); empty while signing.
+    pub signed_txs: Vec<Base64VecU8>,
+}
+
+/// What the single signature slot is waiting for.
+#[near(serializers = [borsh])]
+enum Job {
+    Buy(Pending),
+    Exit(Exit),
 }
 
 /// Reponse de `sign` du contrat MPC (domaine secp256k1).
@@ -184,9 +217,12 @@ pub struct Guard {
     evm: EvmConfig,
     /// Nonce EVM de l'adresse derivee : avance seulement quand une signature revient.
     evm_nonce: u64,
-    /// Achat en cours de signature. Un seul a la fois : une adresse, une suite de nonces ; un echec
-    /// ne laisse donc pas de trou.
-    signing: Option<Pending>,
+    /// Achat (or exit) en cours de signature. Un seul a la fois : une adresse, une suite de nonces ;
+    /// un echec ne laisse donc pas de trou.
+    signing: Option<Job>,
+    /// Latest signed exit, overwritten by the next one (bounded storage); earlier ones stay in the
+    /// `exit_signed` events.
+    last_exit: Option<Exit>,
 }
 
 /// Adresse EVM stricte : `0x` + 40 hexadecimaux (42 caracteres, pas un de plus).
@@ -287,6 +323,10 @@ impl Guard {
             "priority fee above max fee"
         );
         require!(evm.max_slippage_bps < 10_000, "slippage of 100 % or more");
+        require!(
+            is_evm_address(&evm.withdraw_to),
+            "invalid withdrawal address"
+        );
         Self {
             owner,
             armer,
@@ -305,6 +345,7 @@ impl Guard {
             evm,
             evm_nonce: 0,
             signing: None,
+            last_exit: None,
         }
     }
 
@@ -369,6 +410,23 @@ impl Guard {
         self.assert_owner();
         require!(self.frozen.remove(&agent), "agent not frozen");
         emit("unfrozen", &near_sdk::serde_json::json!({ "agent": agent }));
+    }
+
+    /// Owner only: clears `agent`'s 7-day arming log. A compromised armer can fill the log or the
+    /// 7-day cap and lock the agent out for a week; after `set_armer`, this restores service.
+    /// The cleared armings no longer count toward the cap: the owner decides that, not the armer.
+    #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
+    pub fn reset_armings(&mut self, agent: AccountId) {
+        self.assert_owner();
+        let log = self.armings_in_window(&agent);
+        self.armings.remove(&agent);
+        emit(
+            "armings_reset",
+            &near_sdk::serde_json::json!({
+                "agent": agent, "cleared": log.len(),
+                "armed_7d": U128(log.iter().map(|&(_, b)| b).sum()),
+            }),
+        );
     }
 
     /// Reserve a l'armeur : arme `budget` pour `agent` pendant `duration_s` secondes, dans les
@@ -474,6 +532,7 @@ impl Guard {
                 evidence_sha256: String::new(),
                 quote: U128(0),
                 settled: false,
+                approved: false,
                 signed_tx: None,
             },
         );
@@ -542,7 +601,9 @@ impl Guard {
         match check.verdict {
             None => env::panic_str("no verdict yet"),
             Some(Verdict::Allow) => {}
-            Some(_) => env::panic_str("verdict does not allow the purchase"),
+            Some(Verdict::Warn) if check.approved => {}
+            Some(Verdict::Warn) => env::panic_str("warn verdict not approved by the owner"),
+            Some(Verdict::Block) => env::panic_str("verdict does not allow the purchase"),
         }
         require!(
             env::block_timestamp() < check.judged_ns.0.saturating_add(VERDICT_TTL_NS),
@@ -573,9 +634,8 @@ impl Guard {
             cost,
             armed_until_ns: self.budgets.get(&who).map_or(0, |b| b.expires_ns),
         };
-        let hash = hex(&env::keccak256_array(
-            self.swap_tx(&pending).build_for_signing(),
-        ));
+        let tx = self.swap_tx(&pending);
+        let hash = hex(&env::keccak256_array(tx.build_for_signing()));
         emit(
             "sign_requested",
             &near_sdk::serde_json::json!({
@@ -583,22 +643,165 @@ impl Guard {
                 "min_out": U128(min_out), "nonce": self.evm_nonce, "hash": hash,
             }),
         );
-        self.signing = Some(pending);
-        let args = near_sdk::serde_json::json!({
-            "request": { "path": DERIVATION_PATH, "payload_v2": { "Ecdsa": hash }, "domain_id": 0 },
-        });
-        Promise::new(self.evm.mpc.clone())
-            .function_call(
+        self.signing = Some(Job::Buy(pending));
+        self.sign_all(
+            &[tx],
+            Self::ext(env::current_account_id())
+                .with_static_gas(CALLBACK_GAS)
+                .on_signed(),
+        )
+    }
+
+    /// Exit signed by NEAR: sells `amount` of `token` held by the guard's EVM address for ETH,
+    /// back to that address (approve of the router, then the swap: two signatures, two nonces).
+    /// No verdict and no budget: a token that turned bad must never trap the exit. Callable by the
+    /// owner, always, and by registered agents that are not frozen: the emergency freeze stops the
+    /// agent's sales too (the owner still exits). `min_out_wei` is the caller's own floor.
+    pub fn sell(&mut self, token: String, amount: U128, min_out_wei: U128) -> Promise {
+        let by = env::predecessor_account_id();
+        require!(
+            by == self.owner || (self.agents.contains(&by) && !self.frozen.contains(&by)),
+            "owner or unfrozen registered agent only"
+        );
+        require!(
+            is_evm_address(&token),
+            "invalid token: expected 0x + 40 hex digits"
+        );
+        require!(amount.0 > 0, "zero amount");
+        self.start_exit(by, Some(token), amount, min_out_wei)
+    }
+
+    /// Owner only: sends `amount_wei` from the guard's EVM address to `evm.withdraw_to`, fixed at
+    /// init. One signature.
+    pub fn withdraw_eth(&mut self, amount_wei: U128) -> Promise {
+        self.assert_owner();
+        require!(amount_wei.0 > 0, "zero amount");
+        self.start_exit(self.owner.clone(), None, amount_wei, U128(0))
+    }
+
+    fn start_exit(
+        &mut self,
+        by: AccountId,
+        token: Option<String>,
+        amount: U128,
+        min_out: U128,
+    ) -> Promise {
+        require!(self.signing.is_none(), "a signature is already in progress");
+        let exit = Exit {
+            by,
+            token,
+            amount,
+            min_out,
+            deadline_s: env::block_timestamp() / 1_000_000_000 + SWAP_DEADLINE_S,
+            nonce: self.evm_nonce,
+            signed_txs: vec![],
+        };
+        let txs = self.exit_txs(&exit);
+        let hashes: Vec<String> = txs
+            .iter()
+            .map(|tx| hex(&env::keccak256_array(tx.build_for_signing())))
+            .collect();
+        emit(
+            "exit_requested",
+            &near_sdk::serde_json::json!({
+                "by": exit.by, "token": exit.token, "amount": exit.amount, "min_out": exit.min_out,
+                "nonce": exit.nonce, "hashes": hashes,
+            }),
+        );
+        self.signing = Some(Job::Exit(exit));
+        self.sign_all(
+            &txs,
+            Self::ext(env::current_account_id())
+                .with_static_gas(CALLBACK_GAS)
+                .on_exit_signed(),
+        )
+    }
+
+    /// One `sign` call to the MPC per transaction (1 yoctoNEAR each, from the guard's balance),
+    /// joined, then `callback`.
+    fn sign_all(&self, txs: &[EVMTransaction], callback: Promise) -> Promise {
+        let sign = |tx: &EVMTransaction| {
+            let hash = hex(&env::keccak256_array(tx.build_for_signing()));
+            let args = near_sdk::serde_json::json!({
+                "request": { "path": DERIVATION_PATH, "payload_v2": { "Ecdsa": hash }, "domain_id": 0 },
+            });
+            Promise::new(self.evm.mpc.clone()).function_call(
                 "sign".to_owned(),
                 args.to_string().into_bytes(),
                 NearToken::from_yoctonear(1),
                 SIGN_GAS,
             )
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(CALLBACK_GAS)
-                    .on_signed(),
-            )
+        };
+        let Some(all) = txs.iter().map(sign).reduce(Promise::and) else {
+            env::panic_str("nothing to sign")
+        };
+        all.then(callback)
+    }
+
+    /// Callback of an exit's `sign` calls: keeps the signed transactions up to the first missing
+    /// signature (nonces stay contiguous: a swap without its approve is dropped), advances the
+    /// nonce by that many and stores them as `last_exit`. Never panics after taking the job.
+    #[private]
+    pub fn on_exit_signed(&mut self) -> Vec<String> {
+        let Some(Job::Exit(mut exit)) = self.signing.take() else {
+            env::panic_str("no exit signature in progress")
+        };
+        let mut signed = vec![];
+        for (i, tx) in (0u64..).zip(self.exit_txs(&exit)) {
+            let signature = env::promise_result_checked(i, MAX_SIGN_RESPONSE)
+                .ok()
+                .and_then(|bytes| parse_signature(&bytes));
+            let Some(signature) = signature else { break };
+            signed.push(tx.build_with_signature(&signature));
+        }
+        let hexes: Vec<String> = signed.iter().map(|raw| format!("0x{}", hex(raw))).collect();
+        emit(
+            "exit_signed",
+            &near_sdk::serde_json::json!({
+                "by": exit.by, "token": exit.token, "amount": exit.amount, "nonce": exit.nonce, "txs": hexes,
+            }),
+        );
+        self.evm_nonce += signed.len() as u64;
+        if !signed.is_empty() {
+            exit.signed_txs = signed.into_iter().map(Into::into).collect();
+            self.last_exit = Some(exit);
+        }
+        hexes
+    }
+
+    /// Latest signed exit (sale or withdrawal), for the relay.
+    #[must_use]
+    pub fn last_exit(&self) -> Option<&Exit> {
+        self.last_exit.as_ref()
+    }
+
+    /// EVM parameters fixed at init: derived address, withdrawal address, gas, fees, rate.
+    #[must_use]
+    pub fn evm_config(&self) -> &EvmConfig {
+        &self.evm
+    }
+
+    /// Owner only: approves a `warn` verdict so the agent may buy on it. The approval does not
+    /// extend the verdict: it must come, and the purchase too, within `VERDICT_TTL_NS` of the
+    /// verdict, because what the human approves is that simulation, and it ages the same.
+    pub fn approve_warn(&mut self, id: u64) {
+        self.assert_owner();
+        let Some(check) = self.checks.get_mut(&id) else {
+            env::panic_str("unknown check")
+        };
+        require!(check.verdict == Some(Verdict::Warn), "not a warn verdict");
+        require!(!check.settled, "check already settled");
+        require!(
+            env::block_timestamp() < check.judged_ns.0.saturating_add(VERDICT_TTL_NS),
+            "verdict expired"
+        );
+        check.approved = true;
+        emit(
+            "warn_approved",
+            &near_sdk::serde_json::json!({
+                "id": id, "agent": check.agent, "target": check.target, "by": self.owner,
+            }),
+        );
     }
 
     /// Callback de `sign` : assemble la transaction signee, la stocke avec la demande et renvoie
@@ -607,7 +810,7 @@ impl Guard {
     /// l'achat en attente : un echec ici garderait le verrou pour toujours.
     #[private]
     pub fn on_signed(&mut self) -> Option<String> {
-        let Some(p) = self.signing.take() else {
+        let Some(Job::Buy(p)) = self.signing.take() else {
             env::panic_str("no signature in progress")
         };
         self.escrow -= p.cost;
@@ -650,8 +853,7 @@ impl Guard {
     /// Transaction EIP-1559 du swap WETH -> `p.target` sur le routeur, jetons vers l'adresse
     /// derivee, au nonce courant ; tous les champs viennent de la garde.
     fn swap_tx(&self, p: &Pending) -> EVMTransaction {
-        let mut input = SWAP_SELECTOR.to_vec();
-        for w in [
+        let words = [
             word(&p.min_out.to_be_bytes()),
             word(&[0x80]), // position du tableau `path` apres les 4 mots de tete
             word(&parse_eth_address(&self.evm.address[2..])),
@@ -659,14 +861,53 @@ impl Guard {
             word(&[2]),
             word(&parse_eth_address(WETH)),
             word(&parse_eth_address(&p.target[2..])),
-        ] {
-            input.extend_from_slice(&w);
+        ];
+        self.tx(self.evm_nonce, ROUTER, p.value, SWAP_SELECTOR, &words)
+    }
+
+    /// The exit's transactions from `e.nonce`: approve then swap for a sale, the transfer for a
+    /// withdrawal.
+    fn exit_txs(&self, e: &Exit) -> Vec<EVMTransaction> {
+        let Some(token) = &e.token else {
+            return vec![self.tx(e.nonce, &self.evm.withdraw_to[2..], e.amount.0, [], &[])];
+        };
+        let amount = word(&e.amount.0.to_be_bytes());
+        let approve = [word(&parse_eth_address(ROUTER)), amount];
+        let swap = [
+            amount,
+            word(&e.min_out.0.to_be_bytes()),
+            word(&[0xa0]), // position du tableau `path` apres les 5 mots de tete
+            word(&parse_eth_address(&self.evm.address[2..])),
+            word(&e.deadline_s.to_be_bytes()),
+            word(&[2]),
+            word(&parse_eth_address(&token[2..])),
+            word(&parse_eth_address(WETH)),
+        ];
+        vec![
+            self.tx(e.nonce, &token[2..], 0, APPROVE_SELECTOR, &approve),
+            self.tx(e.nonce + 1, ROUTER, 0, SELL_SELECTOR, &swap),
+        ]
+    }
+
+    /// EIP-1559 transaction from the guard's EVM address: `to` without `0x`, calldata = selector and
+    /// ABI words (no calldata if both are empty); gas and fees from the init.
+    fn tx<const N: usize>(
+        &self,
+        nonce: u64,
+        to: &str,
+        value: u128,
+        selector: [u8; N],
+        words: &[[u8; 32]],
+    ) -> EVMTransaction {
+        let mut input = selector.to_vec();
+        for w in words {
+            input.extend_from_slice(w);
         }
         EVMTransaction {
             chain_id: CHAIN_ID,
-            nonce: self.evm_nonce,
-            to: Some(parse_eth_address(ROUTER)),
-            value: p.value,
+            nonce,
+            to: Some(parse_eth_address(to)),
+            value,
             input,
             gas_limit: self.evm.gas_limit.into(),
             max_fee_per_gas: self.evm.max_fee_per_gas.0,
@@ -804,6 +1045,8 @@ mod tests {
     const RATE: u128 = 1_000_000_000; // yoctoNEAR par wei : 1 ETH = 1000 NEAR
     /// Devis de la sentinelle : jetons recus par l'achat simule de 0,01 ETH (USDC sur le fork).
     const QUOTE: u128 = 20_435_000;
+    /// The owner's EVM address for ETH withdrawals, fixed at init.
+    const WITHDRAW_TO: &str = "0x000000000000000000000000000000000000bEEF";
 
     fn id(s: &str) -> AccountId {
         s.parse().unwrap()
@@ -819,6 +1062,7 @@ mod tests {
             max_priority_fee_per_gas: U128(1_000_000),
             yocto_per_wei: U128(RATE),
             max_slippage_bps: 300,
+            withdraw_to: WITHDRAW_TO.into(),
         }
     }
 
@@ -1576,9 +1820,62 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "verdict does not allow the purchase")]
+    #[should_panic(expected = "warn verdict not approved by the owner")]
     fn achat_refuse_sur_warn_sans_humain() {
         let (mut g, check) = judged(Verdict::Warn);
+        buy(&mut g, check);
+    }
+
+    // warn: the human (owner) approves on chain, then the agent may buy, still within the
+    // verdict's 120 s: the approval does not extend the life of the simulation it approves.
+    fn approve(g: &mut Guard, check: u64, now_ns: u64) {
+        ctx("owner.test", 0, now_ns);
+        g.approve_warn(check);
+    }
+
+    #[test]
+    fn an_approved_warn_is_bought_and_the_approval_is_logged() {
+        let (mut g, check) = judged(Verdict::Warn);
+        approve(&mut g, check, 650);
+        assert!(g.get_check(check).unwrap().approved);
+        let v = last_event();
+        assert_eq!(v["event"], "warn_approved");
+        assert_eq!(v["data"][0]["id"], check);
+        assert_eq!(v["data"][0]["agent"], "agent.test");
+        assert_eq!(v["data"][0]["target"], TARGET);
+        ctx("agent.test", 0, 700);
+        buy(&mut g, check);
+        assert_eq!(sign_args()["request"]["payload_v2"]["Ecdsa"], HASH0);
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn only_the_owner_approves_a_warn() {
+        let (mut g, check) = judged(Verdict::Warn);
+        ctx("armer.test", 0, 650);
+        g.approve_warn(check);
+    }
+
+    #[test]
+    #[should_panic(expected = "not a warn verdict")]
+    fn a_block_cannot_be_approved() {
+        let (mut g, check) = judged(Verdict::Block);
+        approve(&mut g, check, 650);
+    }
+
+    #[test]
+    #[should_panic(expected = "verdict expired")]
+    fn an_expired_warn_cannot_be_approved() {
+        let (mut g, check) = judged(Verdict::Warn);
+        approve(&mut g, check, 600 + VERDICT_TTL_NS);
+    }
+
+    #[test]
+    #[should_panic(expected = "verdict expired")]
+    fn an_approved_warn_still_expires_120_s_after_the_verdict() {
+        let (mut g, check) = judged(Verdict::Warn);
+        approve(&mut g, check, 650);
+        ctx("agent.test", 0, 600 + VERDICT_TTL_NS);
         buy(&mut g, check);
     }
 
@@ -1703,6 +2000,10 @@ mod tests {
             },
             EvmConfig {
                 max_slippage_bps: 10_000,
+                ..evm()
+            },
+            EvmConfig {
+                withdraw_to: "0xbeef".into(),
                 ..evm()
             },
         ];
@@ -1902,6 +2203,47 @@ mod tests {
         arm_at(&mut g, 10 * U, 1000, 5 * DAY);
         arm_at(&mut g, 10 * U, 1000, 8 * DAY);
         assert_eq!(g.armings.get(&id("agent.test")).unwrap().len(), 2);
+    }
+
+    // A compromised armer can lock an agent out for 7 days (full log or exhausted cap): the owner
+    // replaces it and resets the agent's arming log, then the new armer arms again.
+    #[test]
+    fn the_owner_resets_a_full_arming_log_after_replacing_the_armer() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 1000 * U);
+        for _ in 0..MAX_ARMINGS_7D {
+            arm_at(&mut g, 1, 1000, 0);
+        }
+        ctx("owner.test", 0, SEC);
+        g.set_armer(id("armer2.test"));
+        g.reset_armings(id("agent.test"));
+        let v = last_event();
+        assert_eq!(v["event"], "armings_reset");
+        assert_eq!(v["data"][0]["agent"], "agent.test");
+        assert_eq!(v["data"][0]["cleared"], MAX_ARMINGS_7D);
+        assert_eq!(v["data"][0]["armed_7d"], MAX_ARMINGS_7D.to_string());
+        assert_eq!(g.armed_7d(&id("agent.test")), U128(0));
+        ctx("armer2.test", 0, 2 * SEC);
+        let credit = g.credit_of(&id("agent.test"));
+        g.arm(id("agent.test"), U128(10 * U), 60, credit);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 10 * U);
+    }
+
+    #[test]
+    fn the_owner_resets_an_exhausted_7_day_cap() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 100 * U);
+        arm_at(&mut g, 100 * U, 1000, 0);
+        ctx("owner.test", 0, SEC);
+        g.reset_armings(id("agent.test"));
+        arm_at(&mut g, 100 * U, 1000, 2 * SEC);
+        assert_eq!(g.armed_7d(&id("agent.test")), U128(100 * U));
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn the_armer_cannot_reset_the_arming_log() {
+        let mut g = funded(ONE_NEAR, 10 * U, 1000);
+        ctx("armer.test", 0, SEC);
+        g.reset_armings(id("agent.test"));
     }
 
     #[test]
@@ -2151,5 +2493,193 @@ mod tests {
         let (mut g, check) = judged_at_1s();
         ctx("agent.test", 0, SEC + VERDICT_TTL_NS);
         buy(&mut g, check);
+    }
+
+    // Exit signed by NEAR: approve(router, amount) then swapExactTokensForETHSupportingFeeOnTransferTokens
+    // back to the guard's EVM address, two signatures, no verdict and no budget needed.
+    // Vectors from viem 2.57 (scratch script): token TARGET, 1,000,000 tokens, floor 0.000005 ETH,
+    // deadline 300 s, nonces 0 and 1; fictitious signatures (aa, bb, y = 1) and (cc, dd, y = 0).
+    const SELL_AMOUNT: u128 = 1_000_000;
+    const SELL_MIN: u128 = 5_000_000_000_000;
+    const APPROVE_HASH: &str = "655e06dcbeba90aa01c2e4fb6f9b6bf827516faf20694d21488d2d9e168bb101";
+    const APPROVE_RAW: &str = "0x02f8b182210580830f42408402faf0808303d09094dac17f958d2ee523a2206206994597c13d831ec780b844095ea7b30000000000000000000000004752ba5dbc23f44d87826276bf6fd6b1c372ad2400000000000000000000000000000000000000000000000000000000000f4240c001a0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SELL_HASH: &str = "c50b231ab621fdadff0584450841972221d538d10d72c244c302ca1563203b5f";
+    const SELL_RAW: &str = "0x02f9017282210501830f42408402faf0808303d090944752ba5dbc23f44d87826276bf6fd6b1c372ad2480b90104791ac94700000000000000000000000000000000000000000000000000000000000f42400000000000000000000000000000000000000000000000000000048c2739500000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000007e5f4552091a69125d5dfcb7b8c2659029395bdf000000000000000000000000000000000000000000000000000000000000012c0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec70000000000000000000000004200000000000000000000000000000000000006c080a0cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccca0dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    /// 0.001 ETH to `WITHDRAW_TO`, nonce 0, signature (aa, bb, y = 1).
+    const WITHDRAW_HASH: &str = "80db6f822c86663530bbe853e49c3f8196c7959b9c771afa84440fcd2ef4e099";
+    const WITHDRAW_RAW: &str = "0x02f87382210580830f42408402faf0808303d09094000000000000000000000000000000000000beef87038d7ea4c6800080c001a0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SIG_A: (&str, &str, u8) = (
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        1,
+    );
+    const SIG_B: (&str, &str, u8) = (
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        0,
+    );
+
+    fn ok_sig((r, s, v): (&str, &str, u8)) -> PromiseResult {
+        PromiseResult::Successful(mpc_response(r, s, v))
+    }
+
+    /// `who` sells `SELL_AMOUNT` of `TARGET` at 700 ns; the agent is registered, credited, never armed.
+    fn sell_as(who: &str) -> Guard {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 1000 * U);
+        ctx(who, 0, 700);
+        let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN));
+        g
+    }
+
+    /// Payload hashes of the `sign` calls created by the last call, which must end with `callback`.
+    fn signed_hashes(callback: &[u8]) -> Vec<String> {
+        let receipts = get_created_receipts();
+        let (last, signs) = receipts.split_last().unwrap();
+        let MockAction::FunctionCallWeight { method_name, .. } = &last.actions[0] else {
+            panic!("callback attendu")
+        };
+        assert_eq!(method_name, callback);
+        signs
+            .iter()
+            .map(|r| {
+                assert_eq!(r.receiver_id, id("mpc.test"));
+                let MockAction::FunctionCallWeight { args, .. } = &r.actions[0] else {
+                    panic!("appel de sign attendu")
+                };
+                let v: near_sdk::serde_json::Value =
+                    near_sdk::serde_json::from_slice(args).unwrap();
+                v["request"]["payload_v2"]["Ecdsa"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn exit_signed(g: &mut Guard, results: Vec<PromiseResult>) -> Vec<String> {
+        testing_env!(
+            VMContextBuilder::new()
+                .current_account_id(id("guard.test"))
+                .predecessor_account_id(id("guard.test"))
+                .block_timestamp(800)
+                .build(),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            std::collections::HashMap::default(),
+            results,
+        );
+        g.on_exit_signed()
+    }
+
+    #[test]
+    fn an_agent_sells_without_verdict_or_budget_approve_then_swap_signed() {
+        let mut g = sell_as("agent.test");
+        assert_eq!(signed_hashes(b"on_exit_signed"), [APPROVE_HASH, SELL_HASH]);
+        let raw = exit_signed(&mut g, vec![ok_sig(SIG_A), ok_sig(SIG_B)]);
+        assert_eq!(raw, [APPROVE_RAW, SELL_RAW]);
+        assert_eq!(g.evm_nonce, 2);
+        let exit = g.last_exit().unwrap();
+        assert_eq!(exit.token.as_deref(), Some(TARGET));
+        let stored: Vec<String> = exit
+            .signed_txs
+            .iter()
+            .map(|t| format!("0x{}", hex(&t.0)))
+            .collect();
+        assert_eq!(stored, [APPROVE_RAW, SELL_RAW]);
+        let v = last_event();
+        assert_eq!(v["event"], "exit_signed");
+        assert_eq!(v["data"][0]["by"], "agent.test");
+        assert_eq!(v["data"][0]["nonce"], 0);
+    }
+
+    // nonces stay contiguous: a swap without its approve is never kept
+    #[test]
+    fn a_failed_swap_signature_keeps_the_approve_only() {
+        let mut g = sell_as("agent.test");
+        assert_eq!(
+            exit_signed(&mut g, vec![ok_sig(SIG_A), PromiseResult::Failed]),
+            [APPROVE_RAW]
+        );
+        assert_eq!(g.evm_nonce, 1);
+    }
+
+    #[test]
+    fn a_failed_approve_signature_keeps_nothing_and_frees_the_lock() {
+        let mut g = sell_as("agent.test");
+        assert!(exit_signed(&mut g, vec![PromiseResult::Failed, ok_sig(SIG_B)]).is_empty());
+        assert_eq!(g.evm_nonce, 0);
+        assert!(g.last_exit().is_none());
+        ctx("agent.test", 0, 900);
+        let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN));
+        assert_eq!(signed_hashes(b"on_exit_signed"), [APPROVE_HASH, SELL_HASH]);
+    }
+
+    #[test]
+    #[should_panic(expected = "a signature is already in progress")]
+    fn a_sale_takes_the_single_signature_lock() {
+        let mut g = sell_as("agent.test");
+        let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN));
+    }
+
+    #[test]
+    #[should_panic(expected = "a signature is already in progress")]
+    fn no_buy_while_a_sale_is_being_signed() {
+        let (mut g, check) = judged(Verdict::Allow);
+        let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN));
+        buy(&mut g, check);
+    }
+
+    // the emergency freeze stops the agent's sales too; the owner's exit is never blocked
+    #[test]
+    #[should_panic(expected = "owner or unfrozen registered agent only")]
+    fn a_frozen_agent_cannot_sell() {
+        let mut g = funded(ONE_NEAR, 10 * U, 1000);
+        ctx("owner.test", 0, 0);
+        g.disarm(id("agent.test"));
+        ctx("agent.test", 0, 700);
+        let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN));
+    }
+
+    #[test]
+    fn the_owner_sells_even_with_the_agent_frozen() {
+        let mut g = funded(ONE_NEAR, 10 * U, 1000);
+        ctx("owner.test", 0, 0);
+        g.disarm(id("agent.test"));
+        ctx("owner.test", 0, 700);
+        let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN));
+        assert_eq!(signed_hashes(b"on_exit_signed"), [APPROVE_HASH, SELL_HASH]);
+    }
+
+    #[test]
+    #[should_panic(expected = "owner or unfrozen registered agent only")]
+    fn an_unregistered_account_cannot_sell() {
+        let _ = sell_as("intrus.test");
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid token")]
+    fn a_sale_needs_a_valid_token_address() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 1000 * U);
+        ctx("agent.test", 0, 700);
+        let _ = g.sell("0xabc".into(), U128(SELL_AMOUNT), U128(SELL_MIN));
+    }
+
+    #[test]
+    fn the_owner_withdraws_eth_to_the_address_fixed_at_init() {
+        let mut g = guard();
+        ctx("owner.test", 0, 700);
+        let _ = g.withdraw_eth(U128(1_000_000_000_000_000));
+        assert_eq!(signed_hashes(b"on_exit_signed"), [WITHDRAW_HASH]);
+        assert_eq!(exit_signed(&mut g, vec![ok_sig(SIG_A)]), [WITHDRAW_RAW]);
+        assert_eq!(g.evm_nonce, 1);
+        assert!(g.last_exit().unwrap().token.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn only_the_owner_withdraws_eth() {
+        let mut g = funded(ONE_NEAR, 10 * U, 1000);
+        ctx("agent.test", 0, 700);
+        let _ = g.withdraw_eth(U128(1));
     }
 }

@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { sha256, stringToHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
 import { replay, summary, type OnChain, type Proof } from "./replay";
-import { checkToken, rpc, ROUTER, toProof, WETH, type Probe } from "./verifier";
+import { checkToken, deriveProbes, rpc, ROUTER, specialOf, toProof, WETH, type Probe } from "./verifier";
 
 const RPC = process.env.EVM_RPC ?? "http://127.0.0.1:8545";
 const DEPLOYER: Address = "0x60B1100000000000000000000000000000000001"; // owner() des jetons de demo (evm/fork.sh)
@@ -11,8 +11,12 @@ const TRAP = tokens.sell_blocked_later as Address;
 const rand = (): Address => toHexAddr(crypto.getRandomValues(new Uint8Array(20)));
 const toHexAddr = (b: Uint8Array) => `0x${Buffer.from(b).toString("hex")}` as Address;
 
-const proofOf = async (token: Address = TRAP, probe?: Partial<Probe>): Promise<Proof> =>
-  toProof(1, token, await checkToken(RPC, token, { buyer: rand(), stranger: rand(), ...probe }));
+/** The guard's EVM address the guard_frozen trap freezes (evm/fork.sh). */
+const GUARD_EVM = await specialOf(RPC, tokens.guard_frozen as Address);
+const GUARD_INFO = { account: "guard.test", evm: GUARD_EVM };
+/** Proof of check #1 whose probes are derived as the sentinel does, from a request at `requested_ns`. */
+const proofOf = async (token: Address = TRAP, probe?: Partial<Probe>, guard: Address = GUARD_EVM, requested_ns = "0"): Promise<Proof> =>
+  toProof(1, token, await checkToken(RPC, token, guard, (head) => ({ ...deriveProbes({ guard: GUARD_INFO.account, id: 1, requested_ns }, head.hash), ...probe })));
 const failed = (lines: { ok: boolean; line: string }[]) => lines.filter((l) => !l.ok).map((l) => l.line);
 const evidenceOf = (p: Proof) => JSON.parse(p.evidence);
 /** Modifie le contenu de la chaine evidence (comme le ferait un faussaire) et la reserialise. */
@@ -62,7 +66,7 @@ describe("replay", () => {
   });
   test("deux libelles echanges dans evidence.calls sont detectes", async () => {
     const proof = withEvidence(await proofOf(), (e) => {
-      const i = e.calls.findIndex((x: string) => x.startsWith("sale +1 h:"));
+      const i = e.calls.findIndex((x: string) => x.startsWith("sale +256 blocks:"));
       [e.calls[0], e.calls[i]] = [e.calls[i], e.calls[0]];
     });
     const bad = failed(await replay(proof, RPC));
@@ -143,51 +147,51 @@ describe("replay : la chaine evidence est celle postee en chaine", () => {
 describe("replay --check : verdict en chaine", () => {
   test("tout concorde : empreinte, cible (casse ignoree), verdict, raisons", async () => {
     const proof = await proofOf();
-    const lines = await replay(proof, RPC, { check: true, chain: onChain(proof, { target: proof.target.toLowerCase() }) });
+    const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { target: proof.target.toLowerCase() }) });
     expect(failed(lines)).toEqual([]);
     expect(summary(lines, true, proof.verdict)).toContain("same as on chain");
   });
   test("empreinte en chaine differente de sha256(evidence) : refus", async () => {
     const proof = await proofOf();
-    const bad = failed(await replay(proof, RPC, { check: true, chain: onChain(proof, { evidence_sha256: "00".repeat(32) }) }));
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { evidence_sha256: "00".repeat(32) }) }));
     expect(bad.length).toBe(1);
     expect(bad[0]).toContain("evidence_sha256");
   });
   test("evidence alteree : son empreinte ne concorde plus avec celle du contrat", async () => {
     const proof = await proofOf();
     const forged = withEvidence(proof, (e) => (e.code_hash = `0x${"00".repeat(32)}`));
-    const bad = failed(await replay(forged, RPC, { check: true, chain: onChain(proof) }));
+    const bad = failed(await replay(forged, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) }));
     expect(bad.some((l) => l.includes("evidence_sha256"))).toBe(true);
     expect(bad.some((l) => l.includes("code hash"))).toBe(true);
   });
   test("cible en chaine differente : refus", async () => {
     const proof = await proofOf();
-    const bad = failed(await replay(proof, RPC, { check: true, chain: onChain(proof, { target: tokens.safe }) }));
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { target: tokens.safe }) }));
     expect(bad.length).toBe(1);
     expect(bad[0]).toContain("target");
   });
   test("verdict en chaine different : refus", async () => {
     const proof = await proofOf();
-    const bad = failed(await replay(proof, RPC, { check: true, chain: onChain(proof, { verdict: "allow" }) }));
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { verdict: "allow" }) }));
     expect(bad.length).toBe(1);
     expect(bad[0]).toContain("on-chain");
   });
   test("raisons en chaine differentes : refus", async () => {
     const proof = await proofOf();
-    const bad = failed(await replay(proof, RPC, { check: true, chain: onChain(proof, { reasons: "nothing" }) }));
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { reasons: "nothing" }) }));
     expect(bad.length).toBe(1);
     expect(bad[0]).toContain("on-chain");
   });
   test("devis en chaine different de celui de la preuve : refus", async () => {
     const proof = await proofOf();
-    const bad = failed(await replay(proof, RPC, { check: true, chain: onChain(proof, { quote: "1" }) }));
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { quote: "1" }) }));
     expect(bad.length).toBe(1);
     expect(bad[0]).toContain("quote");
   });
   test("demande absente ou sans verdict en chaine : refus", async () => {
     const proof = await proofOf();
-    expect(failed(await replay(proof, RPC, { check: true, chain: async () => null })).length).toBe(1);
-    expect(failed(await replay(proof, RPC, { check: true, chain: onChain(proof, { verdict: null }) })).length).toBe(1);
+    expect(failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: async () => null })).length).toBe(1);
+    expect(failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { verdict: null }) })).length).toBe(1);
   });
 });
 
@@ -210,7 +214,7 @@ describe("replay : adresses de sonde", () => {
     }
   }
   test("l'owner comme acheteur obtiendrait un allow sur un piege : la preuve est refusee", async () => {
-    const proof = await proofOf(TRAP, { buyer: DEPLOYER });
+    const proof = await proofOf(TRAP, { buyer: DEPLOYER }, DEPLOYER); // guard side faked as the owner too
     expect(proof.verdict).toBe("allow"); // le piege exempte son proprietaire
     expect(failed(await replay(proof, RPC)).some((l) => l.includes("is the owner()"))).toBe(true);
   });
@@ -236,7 +240,7 @@ describe("replay : adresses de sonde", () => {
   test("pas de sonde inconnu dans la requete : refus explicite, pas de repli sur l'acheteur", async () => {
     const proof = structuredClone(await proofOf());
     const calls = (proof.request as any).params[0].blockStateCalls[0].calls;
-    calls.splice(5); // garde l'achat (5 appels), retire les sondes transferFrom et l'approbation
+    calls.splice(10); // keeps both buys (5 calls each), drops the transferFrom probes and the approvals
     const bad = failed(await replay(rehashed(proof), RPC));
     expect(bad.some((l) => l.includes("no stranger probe"))).toBe(true);
   });
@@ -252,22 +256,47 @@ describe("replay : heure du premier bloc simule", () => {
   });
   test("--check sur un noeud dont l'horloge n'est pas l'heure reelle : controle dit non verifiable", async () => {
     const proof = await proofOf();
-    const lines = await replay(proof, RPC, { check: true, chain: onChain(proof), clock: () => 4_000_000_000 });
+    const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof), clock: () => 4_000_000_000 });
     expect(failed(lines)).toEqual([]);
     expect(lines.some((l) => l.skipped && l.line.includes("not verifiable"))).toBe(true);
     expect(summary(lines, true, proof.verdict)).toContain("not verified");
   });
   test("--check sur un noeud a l'heure : bloc EVM entre la demande et le verdict NEAR", async () => {
-    const proof = await proofOf();
-    const ts = await blockTime(evidenceOf(proof).block);
-    const head = await blockTime(Number(BigInt((await rpc<{ number: Hex }>(RPC, "eth_getBlockByNumber", ["latest", false])).number)));
+    const ts = await blockTime(Number(BigInt((await rpc<{ number: Hex }>(RPC, "eth_getBlockByNumber", ["latest", false])).number)));
     const ns = (s: number) => (BigInt(s) * 1_000_000_000n).toString();
-    const live = { check: true, clock: () => head };
+    const live = { check: true, guard: GUARD_INFO, clock: () => ts };
+    const proof = await proofOf(TRAP, {}, GUARD_EVM, ns(ts - 5));
+    expect(await blockTime(evidenceOf(proof).block)).toBe(ts);
     const good = await replay(proof, RPC, { ...live, chain: onChain(proof, { requested_ns: ns(ts - 5), judged_ns: ns(ts + 5) }) });
     expect(failed(good)).toEqual([]);
     expect(good.some((l) => l.skipped)).toBe(false);
-    const stale = failed(await replay(proof, RPC, { ...live, chain: onChain(proof, { requested_ns: ns(ts + 3600), judged_ns: ns(ts + 3610) }) }));
+    const late = await proofOf(TRAP, {}, GUARD_EVM, ns(ts + 3600));
+    const stale = failed(await replay(late, RPC, { ...live, chain: onChain(late, { requested_ns: ns(ts + 3600), judged_ns: ns(ts + 3610) }) }));
     expect(stale.length).toBe(1);
     expect(stale[0]).toContain("EVM block time");
+  });
+});
+
+describe("replay --check: probe addresses derived from on-chain data", () => {
+  test("probes chosen by the sentinel instead of derived: refused", async () => {
+    const proof = await proofOf(TRAP, { buyer: rand(), stranger: rand() });
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) }));
+    expect(bad.length).toBe(1);
+    expect(bad[0]).toContain("not derived");
+  });
+  test("guard side simulated as another address than the guard's derived one: refused", async () => {
+    const proof = await proofOf(TRAP, {}, "0x000000000000000000000000000000000000bEEF");
+    expect(failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) })).some((l) => l.includes("guard side"))).toBe(true);
+  });
+  test("probes derived as the sentinel does and the guard's derived address: both confirmed", async () => {
+    const proof = await proofOf();
+    const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) });
+    expect(failed(lines)).toEqual([]);
+    expect(lines.some((l) => l.ok && l.line.includes("probe addresses derived from guard.test, #1"))).toBe(true);
+    expect(lines.some((l) => l.ok && l.line.includes(`guard side simulated as guard.test's derived EVM address ${GUARD_EVM}`))).toBe(true);
+  });
+  test("without --check the probes are reported as not verified", async () => {
+    const lines = await replay(await proofOf(), RPC);
+    expect(lines.some((l) => l.skipped && l.line.includes("probe addresses not verified"))).toBe(true);
   });
 });

@@ -12,7 +12,9 @@ contract DemoToken {
         SellTax, // 90 % de chaque vente part au proprietaire
         SellTaxLater, // vente sans taxe juste apres l'achat, taxee a 90 % apres 10 minutes
         HoldOneBlock, // honnete : pas de vente dans le bloc de l'achat (anti-sandwich), libre ensuite
-        SimDetector // la vente ne passe qu'en simulation : prix du gaz ou base fee nuls
+        SimDetector, // la vente ne passe qu'en simulation : prix du gaz ou base fee nuls
+        FrozenAddress, // tokens held by `special` can never leave it (e.g. the guard's public EVM address)
+        SellTax20 // 20 % of each sale goes to the owner: a warn, not a block
     }
 
     string public name;
@@ -21,6 +23,8 @@ contract DemoToken {
     uint256 public totalSupply;
     address public immutable owner;
     Trap public immutable trap;
+    /// Address targeted by `FrozenAddress`, zero for the other traps.
+    address public immutable special;
     address public pair;
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
@@ -30,10 +34,11 @@ contract DemoToken {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
-    constructor(string memory name_, string memory symbol_, Trap trap_) {
+    constructor(string memory name_, string memory symbol_, Trap trap_, address special_) {
         name = name_;
         symbol = symbol_;
         trap = trap_;
+        special = special_;
         owner = msg.sender;
         totalSupply = 1_000_000 ether;
         balanceOf[msg.sender] = totalSupply;
@@ -68,6 +73,7 @@ contract DemoToken {
 
     function _move(address from, address to, uint256 value) internal {
         require(balanceOf[from] >= value, "balance");
+        if (trap == Trap.FrozenAddress && from == special) revert("address frozen");
         uint256 fee;
         if (to == pair && from != owner) {
             if (trap == Trap.SellBlocked) revert("vente fermee");
@@ -77,6 +83,7 @@ contract DemoToken {
             if (trap == Trap.HoldOneBlock && block.number <= boughtBlock[from]) revert("hold one block");
             if (trap == Trap.SimDetector && tx.gasprice != 0 && block.basefee != 0) revert("real sale refused");
             if (trap == Trap.SellTax) fee = (value * 90) / 100;
+            if (trap == Trap.SellTax20) fee = (value * 20) / 100;
             if (trap == Trap.SellTaxLater && block.timestamp > boughtAt[from] + 10 minutes) {
                 fee = (value * 90) / 100;
             }

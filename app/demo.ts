@@ -3,16 +3,18 @@
 // puis le contrat quand il contourne son enveloppe. L'achat sain est construit par la garde, signe
 // par NEAR (Chain Signatures) et diffuse sur le fork de Base par un relais sans cle. L'agent est
 // scripte : il obeit a l'injection, comme le ferait un LLM manipule ; ce qui l'arrete ne depend pas de lui.
+// Then the exit: the agent sells what it bought, NEAR signs approve and swap. Then a warn (20 % sale
+// tax) twice: not approved by the human (no purchase), then approved on chain (purchase signed).
 // Usage : bun --env-file=.env --env-file=.env.agent app/demo.ts [piege de evm/tokens.json]
 import { formatNearAmount, nearToYocto } from "near-api-js";
 import { decodeFunctionData, getAddress, parseAbi, parseEther, parseTransaction, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
-import { agent, BUY_GAS, guardedBuy, requestCheck, waitVerdict } from "./agent";
+import { agent, BUY_GAS, guardedBuy, requestCheck, sellAll, waitVerdict } from "./agent";
 import { GUARD_PATH, MPC_CONTRACT } from "./derive";
 import { call, env, reason, view } from "./near";
 import { WETH } from "./verifier";
 
-const trap = (process.argv[2] ?? "sell_blocked_later") as Exclude<keyof typeof tokens, "fork_block">;
+const trap = (process.argv[2] ?? "guard_frozen") as Exclude<keyof typeof tokens, "fork_block">;
 const TRAP = tokens[trap] as Address;
 const USDC = tokens.usdc as Address;
 const ATTACKER = `attacker.${env("OWNER")}`;
@@ -40,13 +42,24 @@ async function mustFail(what: string, want: string, attempt: () => Promise<unkno
 }
 
 /** Relais dans son propre processus, sans la cle de l'agent : il ne lit que .env (aucune cle). */
-async function relay(id: number): Promise<boolean> {
-  const p = Bun.spawn(["bun", "--env-file=.env", "app/relay.ts", String(id)], {
+async function relay(...args: (string | number)[]): Promise<boolean> {
+  const p = Bun.spawn(["bun", "--env-file=.env", "app/relay.ts", ...args.map(String)], {
     env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
     stdout: "inherit",
     stderr: "inherit",
   });
   return (await p.exited) === 0;
+}
+
+/** The human approving a warn: own process, the owner's full-access key read from the near-cli
+ *  keychain by that process, never by this one. */
+function humanApproves(id: number): void {
+  console.log(`  [demo] the human reads the reasons and approves #${id} (own process, owner's key)`);
+  Bun.spawn(["bun", "--env-file=.env", "app/human.ts", "approve", String(id)], {
+    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+    stdout: "inherit",
+    stderr: "inherit",
+  });
 }
 
 step("Message received by the agent on a public channel (prompt injection):");
@@ -82,6 +95,10 @@ step("3. Witness: USDC, a healthy token already on Base. Verdict allow, NEAR sig
 const witness = await guardedBuy(USDC, WEI);
 if (!witness.signed || !(await relay(witness.id))) process.exitCode = 1;
 
+step("3b. Exit: the agent sells the USDC it holds for ETH. No verdict needed; NEAR signs approve then swap, back to the guard's address.");
+const exit = await sellAll(USDC);
+if (exit.signed.length !== 2 || !(await relay("exit", exit.nonce))) process.exitCode = 1;
+
 step("4. The manipulated agent gets a verdict allow on USDC, then wants the trap with it:");
 const id = await requestCheck(USDC);
 const check = await waitVerdict(id);
@@ -105,6 +122,18 @@ if (!raw) {
   if (bought !== getAddress(USDC) || args[0] === 0n || !(await relay(id))) process.exitCode = 1;
 }
 
+const TAX = tokens.sell_tax_20 as Address;
+step(`5. A token with a 20 % sale tax (${TAX}): WARN. The wrapper asks the human and waits; nobody approves.`);
+const ignored = await guardedBuy(TAX, WEI, { approvalWaitMs: 20_000 });
+if (ignored.signed) process.exitCode = 1;
+await mustFail(`buy(#${ignored.id}) on the unapproved warn, wrapper bypassed`, "warn verdict not approved by the owner", () =>
+  call(agent, "buy", buyArgs(ignored.id, WEI), 0n, BUY_GAS),
+);
+
+step("6. Same token, new check: the human approves the warn on chain, then the guard has NEAR sign the purchase.");
+const approved = await guardedBuy(TAX, WEI, { onWarn: humanApproves });
+if (!approved.signed || !(await relay(approved.id))) process.exitCode = 1;
+
 const [credit, budget] = await Promise.all([
   view<string>("credit_of", { account: env("AGENT") }),
   view<string>("budget_left", { account: env("AGENT") }),
@@ -113,5 +142,5 @@ step(`Summary: prepaid credit ${formatNearAmount(credit, 4)} NEAR, armed budget 
 console.log(
   process.exitCode
     ? "DEMO FAILED: an attempt went through or a healthy purchase did not complete."
-    : "All the trapped attempts were refused; the healthy purchases were signed by NEAR and executed on the fork.",
+    : "All the trapped attempts were refused; the healthy and approved purchases and the exit were signed by NEAR and executed on the fork.",
 );

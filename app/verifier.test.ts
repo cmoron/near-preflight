@@ -2,12 +2,15 @@
 import { describe, expect, test } from "bun:test";
 import { decodeAbiParameters, encodeFunctionData, keccak256, parseAbi, parseEther, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
-import { checkToken, ROUTER, rpc, WETH } from "./verifier";
+import { checkToken, ROUTER, rpc, specialOf, WETH } from "./verifier";
 
 const quoteAbi = parseAbi(["function getAmountsOut(uint256,address[]) view returns (uint256[])"]);
 
 const RPC = process.env.EVM_RPC ?? "http://127.0.0.1:8545";
-const check = (token: string) => checkToken(RPC, token as `0x${string}`);
+/** The guard's EVM address: the one the guard_frozen trap freezes (set by evm/fork.sh). */
+const GUARD_EVM = await specialOf(RPC, tokens.guard_frozen as Address);
+const rand = (): Address => `0x${Buffer.from(crypto.getRandomValues(new Uint8Array(20))).toString("hex")}`;
+const check = (token: string, guard: Address = GUARD_EVM) => checkToken(RPC, token as `0x${string}`, guard, () => ({ buyer: rand(), stranger: rand() }));
 
 describe("verdict de la sentinelle", () => {
   test("USDC, temoin sain deja sur Base : allow", async () => expect((await check(tokens.usdc)).verdict).toBe("allow"));
@@ -33,7 +36,7 @@ describe("verdict de la sentinelle", () => {
   test("vente fermee 1 h apres l'achat : block", async () => {
     const r = await check(tokens.sell_blocked_later);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toContain("1 h after");
+    expect(r.reasons).toContain("256 blocks (timestamp +1 h) after the buy");
     expect(r.reasons).not.toContain("next block");
   });
   test("taxe de 90 % a la vente : block", async () => {
@@ -44,7 +47,16 @@ describe("verdict de la sentinelle", () => {
   test("taxe de 90 % seulement sur la vente tardive : block", async () => {
     const r = await check(tokens.sell_tax_later);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toContain("1 h after");
+    expect(r.reasons).toContain("256 blocks (timestamp +1 h) after the buy");
+  });
+  test("a token that freezes only the guard's public EVM address: block", async () => {
+    const r = await check(tokens.guard_frozen);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toContain("guard address");
+    expect(r.reasons).toContain("guard address: sale refused"); // the router masks the token's reason
+  });
+  test("the same token with another guard address: allow (only the guard is targeted)", async () => {
+    expect((await check(tokens.guard_frozen, "0x000000000000000000000000000000000000bEEF")).verdict).toBe("allow");
   });
   test("vente permise seulement en simulation (prix du gaz ou base fee nuls) : block", async () => {
     const r = await check(tokens.sim_detector);

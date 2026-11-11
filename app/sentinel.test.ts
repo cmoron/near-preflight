@@ -13,6 +13,7 @@ const check = (verdict: Check["verdict"]): Check => ({
   evidence_sha256: "",
   quote: "0",
   settled: false,
+  approved: false,
   signed_tx: null,
 });
 
