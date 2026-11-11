@@ -1,9 +1,10 @@
 // Role de la sentinelle : lit les demandes de verdict de la garde, simule l'achat sur la chaine EVM,
 // poste verdict, raisons et resume de preuve avec sa cle function-call (post_verdict seulement).
-// La preuve complete (requete eth_simulateV1 et reponse) va dans proofs/<id>.json.
+// La preuve complete (requete eth_simulateV1, reponse et chaine evidence postee, octet pour octet)
+// va dans proofs/<id>.json ; le contrat stocke le sha256 de cette chaine avec le verdict.
 import { mkdir } from "node:fs/promises";
 import { account, call, env, view, type Check } from "./near";
-import { checkToken } from "./verifier";
+import { checkToken, toProof } from "./verifier";
 
 const sentinel = account(env("SENTINEL"), env("SENTINEL_KEY"));
 const EVM = env("EVM_RPC");
@@ -66,12 +67,8 @@ async function judge(id: number, check: Check) {
   log(`#${id} : ${check.agent} wants to buy ${check.target}, read-only simulation...`);
   const r = await checkToken(EVM, check.target as `0x${string}`);
   for (const c of r.evidence.calls) log(`#${id}   ${c}`);
-  await Bun.write(`proofs/${id}.json`, JSON.stringify({ id, target: check.target, ...r }, null, 2));
-  const { tx } = await call(sentinel, "post_verdict", {
-    id,
-    verdict: r.verdict,
-    reasons: r.reasons,
-    evidence: JSON.stringify(r.evidence),
-  });
+  const proof = toProof(id, check.target, r);
+  await Bun.write(`proofs/${id}.json`, JSON.stringify(proof, null, 2));
+  const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence });
   log(`#${id} : ${r.verdict.toUpperCase()} (${r.reasons}), block ${r.evidence.block}, proof proofs/${id}.json  ${tx}`);
 }

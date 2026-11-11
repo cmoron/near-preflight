@@ -1,143 +1,104 @@
 # goblin-near: a spending guard and a pre-buy sentinel for AI agents on NEAR
 
-NEAR Hackathon, track **AI Security & Defense** (`security`), also `open`.
+NEAR Hackathon, track **AI Security & Defense**.
 
-An AI agent that can pay can be talked into paying for a trap. This project puts two independent
-barriers between the agent and the money:
+- The agent pays only through a NEAR contract (the guard) that holds its prepaid credit and a budget an armer set within the human's bounds. The agent's key can call nothing else.
+- Before an EVM token purchase, a sentinel simulates buy and sales read-only on Base (`eth_simulateV1`) and posts `allow`, `warn` or `block` to the guard. The guard stores the sha256 of the posted evidence.
+- Anyone can replay a proof against a Base node and check it against the verdict stored on NEAR.
 
-1. **A spending guard on NEAR.** The agent signs only with a function-call key limited to one contract.
-   That contract holds the agent's prepaid credit, the budget a human armed for it, its expiry, and the
-   recipients the human allowed. It pays nothing without a sentinel verdict `allow` recorded on chain.
-2. **A pre-buy sentinel.** Before paying for an EVM token, the agent asks for a verdict. The sentinel
-   simulates the purchase read-only (`eth_simulateV1`) and answers `allow`, `warn` or `block` with the
-   reasons and a proof summary (chain, block, request hash, result of every simulated call), posted to
-   the NEAR contract by the sentinel's own account.
+Deployed on testnet: `guard.goblin-guard-72130.testnet` (source `src/lib.rs`, near-sdk 5).
 
-The demo: an agent manipulated by prompt injection tries to buy a trap token. The sentinel blocks it;
-the agent then bypasses its own wrapper and signs directly, and the contract and the protocol refuse.
+## Rules
 
-State: day 1 of the build (2026-11-11). Everything below runs today; what does not is listed under
-[Limits](#limits-what-does-not-work-yet).
+| Rule                                                                                                                                                      | Enforced by                           |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| Agent key: only `request_check`, `spend`, `refund_check` on the guard; no transfer, no deposit                                                            | NEAR protocol (function-call key)     |
+| Armer key: only `arm`, `disarm` on the guard                                                                                                              | NEAR protocol (function-call key)     |
+| Payment only on a sentinel `allow` for that request, once, at most 120 s after the verdict                                                                | `spend`                               |
+| Only the sentinel posts a verdict, once; the guard stores `sha256(evidence)` with it                                                                      | `post_verdict`, `get_check`           |
+| Payment only to a recipient the human allowed                                                                                                             | `allow_recipient`, `spend`            |
+| Fees and purchases stay within the armed budget, before its expiry                                                                                        | `arm`, `request_check`, `spend`       |
+| Only the armer arms, only agents the human registered, within the human's bounds: budget per arming, max duration, 7-day rolling cap of armed budgets     | `set_bounds`, `register_agent`, `arm` |
+| Emergency stop: the human's `disarm` freezes the agent; the armer cannot re-arm it until the human calls `unfreeze`. The armer's `disarm` does not freeze | `disarm`, `unfreeze`                  |
+| The human replaces a compromised armer                                                                                                                    | `set_armer`                           |
+| Verdict fee refunded if no verdict within 5 min                                                                                                           | `refund_check`                        |
 
-## What NEAR carries
-
-Deployed on testnet: `guard.goblin-guard-00044.testnet` (source `src/lib.rs`, near-sdk 5).
-
-| Rule                                                                                                      | Where it is enforced                                     |
-| --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| The agent cannot transfer NEAR or call anything but `request_check`, `spend`, `refund_check` on the guard | NEAR protocol: function-call access key                  |
-| A purchase is paid only on a verdict `allow` for that request, once                                       | contract `spend`                                         |
-| Only the sentinel account posts a verdict, once per request                                               | contract `post_verdict`                                  |
-| Payment only to a recipient the human allowed                                                             | contract `allow_recipient` / `spend`                     |
-| Total spending (verdict fees + purchases) within the budget the human armed, before its expiry            | contract `arm(agent, budget, duration_s)`                |
-| Emergency stop                                                                                            | contract `disarm` (owner only)                           |
-| A verdict fee comes back to the agent if no verdict arrives in 5 minutes                                  | contract `refund_check`                                  |
-| Prepaid credit, because a function-call key cannot attach a deposit                                       | contract `deposit_credit(account_id)`, paid by the human |
-
-Function-call key limits (from the [access keys docs](https://docs.near.org/protocol/accounts-contracts/access-keys)):
-it can only call the listed methods of one contract, cannot attach a deposit, cannot transfer, add keys
-or deploy. Its gas is paid from the account balance and capped by the key's allowance (0.25 NEAR here);
-when the allowance is spent, the key stops working. The agent account also has a full-access key, which stays in the human's near-cli keychain
-and is never given to the agent process.
-
-## The three checks of the sentinel
-
-`app/verifier.ts`, route Uniswap V2 WETH -> token on Base (chain 8453). Two `eth_simulateV1` calls at the
-same block, nothing signed, from buyer and stranger addresses drawn at random for every check:
-
-| Check                                                                   | How                                                                                           | Verdict                                                  |
-| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| Can someone take the tokens back with `transferFrom`, without approval? | after a simulated buy, `transferFrom(buyer, x, 1)` sent by `owner()` and by a random stranger | `block` if it moves tokens                               |
-| Does the sale go through right after the buy?                           | sell half the tokens in the same simulated block                                              | `block` if it reverts                                    |
-| Does it still go through later?                                         | sell the rest in a second simulated block, one hour later                                     | `block` if it reverts                                    |
-| Tax                                                                     | balance deltas against the pool quote (`getAmountsOut`), on the buy and on both sales         | `warn` from 10 %, `block` from 50 % or if not measurable |
+Sentinel checks (`app/verifier.ts`, Uniswap V2 WETH -> token on Base, fresh random buyer and stranger per check):
+`transferFrom` without approval by `owner()` and by a stranger -> `block`; sale in the next block and 1 h later -> `block` if it reverts;
+tax against the pool quote on the buy and both sales -> `warn` from 10 %, `block` from 50 %.
 
 ## Try it
 
-Requirements: Rust with `cargo-near` (0.23), `near` CLI (near-cli-rs 0.31), `bun` (1.4), Foundry
-(`anvil`, `forge`, `cast`, 1.8). No API key: Base public RPCs serve `eth_simulateV1` and past state.
+Requirements: Rust with `cargo-near` 0.23, `near` CLI 0.31, `bun` 1.4, Foundry 1.8. No API key.
 
-1. **Contract tests.** `cargo test` -> `43 passed`. Lint: `cargo clippy --all-targets -- -D warnings` -> no warning.
-2. **Build the contract.** `cargo near build non-reproducible-wasm` -> `target/near/goblin_near.wasm`.
-3. **Get a testnet account** (free, faucet):
-   `near account create-account sponsor-by-faucet-service <name>.testnet autogenerate-new-keypair save-to-legacy-keychain network-config testnet create`
-4. **Deploy.** `bun install && bun app/setup.ts <name>.testnet` -> creates `guard.`, `agent.`, `sentinel.`,
-   `shop.<name>.testnet`, deploys and initializes the guard in one transaction, adds the two function-call
-   keys, allows `shop.` as recipient, deposits 1 NEAR of credit for the agent. Writes `.env` (no key),
-   `.env.agent` (agent key only) and `.env.sentinel` (sentinel key only).
-5. **Start a copy of Base**, in a separate terminal: `evm/fork.sh` -> `fork de Base au bloc 55836672 pret`
-   and `evm/tokens.json`: USDC (healthy, already on Base), one healthy demo token and five trap tokens
-   (`evm/src/DemoToken.sol`) with their Uniswap V2 pairs. Same addresses on every run.
-6. **Off-chain tests.** `bun test` -> `8 pass`: USDC and the healthy token `allow`, the five traps
-   `block`, each for its own reason, and an RPC that never answers cannot hang a role (it fails within the
-   timeout).
-7. **Run the attack demo.** `./demo.sh` (optional argument: a trap name from `evm/tokens.json`, default
-   `sell_blocked_later`). The human arms the agent, the sentinel starts, the agent runs. You see (real
-   output, simulated-call lines trimmed):
-
+1. `cargo test` -> `83 passed`. `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` -> exit 0.
+2. `cargo near build non-reproducible-wasm` -> `target/near/goblin_near.wasm`.
+3. `near account create-account sponsor-by-faucet-service <name>.testnet autogenerate-new-keypair save-to-legacy-keychain network-config testnet create` -> `New account <name>.testnet created successfully.`
+4. `bun install && bun app/setup.ts <name>.testnet` -> creates `guard.`, `agent.`, `sentinel.`, `armer.`, `shop.<name>.testnet`, deploys the guard, adds one function-call key per role, sets the bounds, registers the agent, deposits 1 NEAR of credit:
    ```text
-   1. L'agent passe par son enveloppe : la sentinelle simule l'achat sur Base avant tout paiement.
-     [enveloppe] demande #3 : verdict sur 0xaabfF6E27fdc021573753978741a5F88e01000C8, 0,01 NEAR debite du credit  https://testnet.nearblocks.io/txns/AzpB25WrFKGrdBsQF1qHkFZsp5YGS6eozDN7DityZS5C
-       [sentinelle] #3 : BLOCK (vente 1 h apres l'achat refusee (TransferHelper: TRANSFER_FROM_FAILED)), bloc 55836696, preuve proofs/3.json  https://testnet.nearblocks.io/txns/CcW4MkwyHzX6rSPsT5ccaMwXQicMQLbYRUigJA7MwJsu
-     [enveloppe] #3 : BLOCK, JE REFUSE DE SIGNER l'achat (vente 1 h apres l'achat refusee (TransferHelper: TRANSFER_FROM_FAILED))
-
-   2. L'agent manipule contourne son enveloppe et signe lui-meme, avec sa cle function-call :
-     [contrat] spend(#3) de 0,5 NEAR vers attacker.goblin-guard-00044.testnet : REFUSE (Contract panicked: verdict refuse l'achat)
-     [contrat] spend(#3) de 0,02 NEAR vers la boutique permise : REFUSE (Contract panicked: verdict refuse l'achat)
-     [protocole] virement direct de 0,01 NEAR vers attacker.goblin-guard-00044.testnet : REFUSE (Access key requires full access)
-
-   3. Temoin : USDC, jeton sain deja sur Base. Meme chemin, verdict allow, l'achat est paye.
-     [enveloppe] #4 : ALLOW, achat signe, 0.02 NEAR payes a shop.goblin-guard-00044.testnet  https://testnet.nearblocks.io/txns/EtmtAvwyiSAsij6R4qbJGPXTtpgSbDjUtALFTyWBkcWF
-
-   4. L'agent manipule obtient un verdict allow, puis tente d'en tirer plus que son budget arme :
-     [contrat] spend(#5) de 1 NEAR vers la boutique permise : REFUSE (Contract panicked: budget depasse)
+   function-call key of armer.goblin-guard-72130.testnet: guard.goblin-guard-72130.testnet [arm, disarm], 0.25 NEAR gas allowance
+   bounds: 0.1 NEAR per arming, 3600 s max, 0.5 NEAR per 7 days; agent.goblin-guard-72130.testnet registered
    ```
+   Writes `.env` (no key) and `.env.agent`, `.env.sentinel`, `.env.armer` (one key each, mode 0600).
+5. In another terminal, `evm/fork.sh` -> anvil fork of Base on `127.0.0.1:8545` with USDC and seven demo tokens (`evm/tokens.json`).
+6. `bun test` -> `49 pass`, `0 fail`. `bunx tsc --noEmit` -> exit 0.
+7. `./demo.sh` -> exit 0. Each role runs in its own process with its own key file. Excerpt (simulated-call lines and links cut):
+   ```text
+     [armer] arm 0.2 NEAR for 900 s: REFUSED (Contract panicked: budget above the human's bound)
+     [armer] agent.goblin-guard-72130.testnet armed: 0.06 NEAR for 900 s (prepaid credit read: 0.94907 NEAR)
+       [sentinel] #4 : BLOCK (sale refused 1 h after the buy (TransferHelper: TRANSFER_FROM_FAILED)), block 55836700, proof proofs/4.json
+     [wrapper] #4 : BLOCK, I REFUSE TO SIGN the purchase (sale refused 1 h after the buy (TransferHelper: TRANSFER_FROM_FAILED))
+     [contract] spend(#4) of 0.5 NEAR to attacker.goblin-guard-72130.testnet : REFUSED (Contract panicked: verdict does not allow the purchase)
+     [protocol] direct transfer of 0.01 NEAR to attacker.goblin-guard-72130.testnet : REFUSED (Access key requires full access)
+     [wrapper] #5 : ALLOW, purchase signed, 0.02 NEAR paid to shop.goblin-guard-72130.testnet
+     [contract] spend(#6) of 1 NEAR to the allowed shop : REFUSED (Contract panicked: budget exceeded)
+     [human] emergency stop: agent.goblin-guard-72130.testnet disarmed and frozen
+     [armer] arm 0.06 NEAR for 900 s: REFUSED (Contract panicked: agent frozen by the owner)
+     [human] agent.goblin-guard-72130.testnet unfrozen: the armer may arm it again, within the bounds
+   ```
+   Exit code 1 if a trapped attempt goes through or a refusal has another reason.
+8. `bun --env-file=.env app/replay.ts proofs/4.json --check` -> exit 0:
+   ```text
+   OK       probe addresses are fresh (no code, not router/WETH/target/owner(), distinct)
+   OK       verdict block rejudged identically (same reasons)
+   OK       on-chain evidence_sha256 8a4033542eb4ecf627f94fc8ec981916381b6d2113a20d5912c8ca3684ac205d is the sha256 of the evidence replayed above
+   OK       on-chain verdict block for #4 matches (same target, same reasons)
+   SKIPPED  EVM block time vs NEAR request/verdict time: not verifiable on this node, its latest block is 12.8 h behind the local clock (a local fork keeps the forked block's time)
+   REPLAY OK: verdict block confirmed, same as on chain (1 check(s) not verified on this node, see SKIPPED)
+   ```
+   A copy with `verdict` and `reasons` changed to an allow -> `REPLAY FAILED: 2 check(s) not confirmed`, exit 1;
+   a copy with one label changed inside `evidence` -> `on-chain evidence_sha256 ... != sha256 of the file's evidence ...`, exit 1.
+9. Same check against Base mainnet: run the sentinel with `EVM_RPC=https://mainnet.base.org`, request a check on USDC, then
+   `bun --env-file=.env app/replay.ts proofs/7.json https://mainnet.base.org --check` -> exit 0:
+   ```text
+   OK       EVM block time 2026-11-11T13:28:46Z lies between the NEAR request 2026-11-11T13:28:45Z and verdict 2026-11-11T13:28:48Z (+/- 60 s)
+   REPLAY OK: verdict allow confirmed, same as on chain
+   ```
+10. `near contract call-function as-read-only guard.<name>.testnet get_check json-args '{"id":4}' network-config testnet now`
+    -> `"evidence_sha256": "8a4033542eb4ecf627f94fc8ec981916381b6d2113a20d5912c8ca3684ac205d"`, equal to `jq -j .evidence proofs/4.json | sha256sum`.
+11. `near account list-keys armer.<name>.testnet network-config testnet now` -> one full-access key (human's keychain) and
+    `only do ["arm", "disarm"] function calls on guard.<name>.testnet`.
 
-   The script exits with code 1 if any trapped attempt goes through.
+Roles by hand: `bun --env-file=.env --env-file=.env.armer app/arm.ts <NEAR> <seconds>` (armer),
+`bun --env-file=.env app/human.ts stop|unfreeze` (human, full-access key from the near-cli keychain).
 
-8. **Read the verdict on chain.**
-   `near contract call-function as-read-only guard.<name>.testnet get_check json-args '{"id":3}' network-config testnet now`
-   -> `"verdict": "block"` with its reasons. The full proof summary is in the `verdict_posted` event
-   (`EVENT_JSON:` log, NEP-297) of the sentinel's transaction; the full simulation request and response
-   are in `proofs/<id>.json`. Every transaction printed by the demo can be checked with
-   `near transaction view-status <hash> network-config testnet` (for example the hash after `[sentinelle] #3`
-   above -> `method_name: "post_verdict"`, `SuccessValue`). The printed links open the same transactions on
-   testnet.nearblocks.io.
-9. **Check the agent's keys.** `near account list-keys agent.<name>.testnet network-config testnet now`
-   -> one full-access key (human's keychain) and one key that can `only do ["request_check", "spend",
-"refund_check"] function calls on guard.<name>.testnet`.
+## Limits
 
-The same verifier also runs against Base mainnet without a fork, for example on USDC:
-`bun -e 'import { checkToken } from "./app/verifier"; console.log((await checkToken("https://mainnet.base.org", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")).verdict)'` -> `allow`.
-
-## Design choices
-
-- The verdict is bound to the token (the request's `target`), not to the recipient or the amount, on
-  purpose: the recipient has its own barrier (the human's allowlist) and the amount has its own (the armed
-  budget). The `spent` event carries the target, so the paid venue knows which token it was paid to buy.
-- A verdict fee stays in escrow until the verdict; the owner can only withdraw fees of delivered verdicts.
-  A refund returns the credit but never the budget, so a re-armed budget cannot be exceeded.
-- The contract refuses a price that does not cover the storage of a request.
-- Each role runs in its own process with its own key file. The agent process never reads the sentinel key.
-
-## Limits: what does not work yet
-
-- The agent is scripted: it obeys the injected message the way a manipulated LLM would. No LLM yet.
-- On testnet the purchase is a NEAR payment to an allowlisted account; the EVM purchase itself is not executed.
-- `warn` stops the purchase like `block`; asking a human to approve a `warn` is not built.
-- Uniswap V4 hook permissions (read from the low bits of the hook address) are not checked yet; the route is V2 only.
-- The "creator" of a token is not probed, only `owner()` and a random stranger.
-- No script yet to replay a proof from `proofs/<id>.json`; replay means re-sending that request to a node at the same block.
-- The sentinel is a single trusted key on a regular machine; running the checks in an enclave (TEE) is planned, not built.
-- In the demo all roles run under the same OS user; real separation needs separate users or machines.
-- The guard account keeps a full-access key so that it can be redeployed during the hackathon.
-- The 7-day spending cap and a dedicated "armer" role distinct from the human owner are not built.
+- The agent is scripted (it obeys the injection); no LLM.
+- On testnet the purchase is a NEAR payment to an allowlisted account; the EVM buy is not executed.
+- `warn` stops the purchase like `block`; no human approval of a `warn`.
+- Uniswap V2 route only; V4 hooks and the token creator are not checked.
+- The verdict covers the token only; amount and recipient rely on the budget and the allowlist.
+- The sentinel is one key on one machine (no TEE). A lying sentinel is caught only by a later replay.
+- The block-time check needs a node on real time: on the local fork it is reported `SKIPPED`.
+- Replay was tested on blocks minutes old; older blocks need a node that serves `eth_simulateV1` on archive state.
+- `proofs/<id>.json` stays on the sentinel's machine; NEAR keeps only the hash and the evidence summary. A post retried after a client timeout can overwrite the file; replay `--check` then reports the hash mismatch.
+- Each `./demo.sh` arms 0.06 NEAR: about 8 runs per agent per 7 days under the 0.5 NEAR cap.
+- All roles run under one OS user; the guard account keeps a full-access key; `spend` has no callback for a deleted recipient.
+- The previous deployment `guard.goblin-guard-00044.testnet` has an incompatible state and is not used.
 
 ## Disclosure
 
-Written from 2026-11-11 for this hackathon, in a new repository. Our team has run trading agents with real
-money on an EVM chain for two months; the method shown here comes from losses on these exact traps. No code
-from that work is reused, and nothing about its strategies, wallets or accounts is published.
-Libraries: near-sdk (Rust), near-api-js, viem, Foundry. Code written with AI assistance (Claude Code).
-
-License: MIT.
+Written from 2026-11-11 for this hackathon, in a new repository. Our team has run trading agents with real money on an EVM chain;
+the traps checked here come from those losses. No code, strategy, wallet or account from that work is reused or published.
+Libraries: near-sdk (Rust), near-api-js, viem, Foundry. Code written with AI assistance (Claude Code). License: MIT.

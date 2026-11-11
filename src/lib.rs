@@ -1,7 +1,8 @@
 //! Garde de depense : l'agent signe avec une cle function-call limitee a ce
 //! contrat ; le contrat tient son credit prepaye et son budget arme.
-//! Trois roles : l'humain (owner) fixe les bornes et garde l'arret d'urgence, l'armeur arme
-//! l'agent dans ces bornes, l'agent depense. Chaque armement est journalise.
+//! Trois roles : l'humain (owner) fixe les bornes, enregistre les agents et garde l'arret
+//! d'urgence, l'armeur arme un agent enregistre dans ces bornes, l'agent depense. Chaque
+//! armement, desarmement, gel et changement d'armeur est journalise.
 use near_sdk::json_types::{U128, U64};
 use near_sdk::store::{LookupMap, LookupSet};
 use near_sdk::{env, near, require, AccountId, NearToken, PanicOnDefault, Promise};
@@ -43,6 +44,9 @@ pub struct Check {
     /// Heure du bloc ou le verdict a ete poste (0 tant qu'il n'y en a pas).
     pub judged_ns: U64,
     pub reasons: String,
+    /// sha256 (hexadecimal minuscule) de la chaine `evidence` recue avec le verdict, calcule par
+    /// le contrat : lie la preuve journalisee au verdict stocke. Vide tant qu'il n'y a pas de verdict.
+    pub evidence_sha256: String,
     /// Vrai une fois l'achat paye : un verdict ne sert qu'une fois.
     pub settled: bool,
 }
@@ -51,8 +55,9 @@ pub struct Check {
 const MAX_REASONS: usize = 280;
 const MAX_EVIDENCE: usize = 8_000;
 /// Delai au-dela duquel l'agent recupere le prix d'une demande restee sans verdict.
-/// Majorant du stockage d'une demande (cle, agent <= 64 o, cible 42 o, raisons <= 280 o,
-/// surcout du trie) : le prix doit le couvrir, sinon chaque demande ronge le solde du contrat.
+/// Majorant du stockage d'une demande (cle 9 o, agent <= 64 o, cible 42 o, raisons <= 280 o,
+/// empreinte 64 o, prefixes de longueur, 40 o de surcout par entree) : 534 o au pire cas,
+/// mesure par un test. Le prix doit le couvrir, sinon chaque demande ronge le solde du contrat.
 const CHECK_STORAGE_BYTES: u128 = 600;
 /// Duree de validite d'un verdict : la cible peut changer (proprietaire, proxy, liquidite),
 /// un `allow` ancien ne paie donc plus ; l'agent redemande un controle.
@@ -82,6 +87,12 @@ pub struct Guard {
     /// sinon desarmer puis rearmer remettrait le plafond a zero.
     armings: LookupMap<AccountId, Vec<(u64, u128)>>,
     checks: LookupMap<u64, Check>,
+    /// Agents enregistres par le proprietaire : seuls ceux-ci s'arment, l'armeur ne fait donc pas
+    /// grossir le stockage du contrat (budget, journal) pour des comptes de son choix.
+    agents: LookupSet<AccountId>,
+    /// Agents geles par un desarmement du proprietaire : l'armeur ne peut plus les armer tant que
+    /// le proprietaire ne les a pas degeles.
+    frozen: LookupSet<AccountId>,
     /// Destinataires permis, fixes par le proprietaire.
     recipients: LookupSet<AccountId>,
     /// Frais percus (verdicts rendus), comptes a part du credit des agents.
@@ -99,6 +110,16 @@ fn is_evm_address(s: &str) -> bool {
 /// Vrai tant qu'un armement fait a `armed_ns` reste dans la fenetre de 7 jours (heure du bloc).
 fn in_window(armed_ns: u64) -> bool {
     env::block_timestamp().saturating_sub(armed_ns) < WEEK_NS
+}
+
+/// Hexadecimal minuscule, sans prefixe `0x`.
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|b| [DIGITS[usize::from(b >> 4)], DIGITS[usize::from(b & 15)]])
+        .map(char::from)
+        .collect()
 }
 
 /// Evenement NEP-297 : `EVENT_JSON:` suivi d'un objet serialise (donc echappe).
@@ -139,6 +160,8 @@ impl Guard {
             budgets: LookupMap::new(b"b"),
             armings: LookupMap::new(b"a"),
             checks: LookupMap::new(b"k"),
+            agents: LookupSet::new(b"g"),
+            frozen: LookupSet::new(b"f"),
             recipients: LookupSet::new(b"r"),
             fees: 0,
             escrow: 0,
@@ -184,12 +207,42 @@ impl Guard {
         &self.bounds
     }
 
+    /// Reserve au proprietaire : rend `agent` armable. Son stockage est paye par le contrat, au
+    /// choix du proprietaire seul.
+    pub fn register_agent(&mut self, agent: AccountId) {
+        self.assert_owner();
+        self.agents.insert(agent);
+    }
+
+    /// Reserve au proprietaire : remplace l'armeur (revocation d'un armeur compromis).
+    pub fn set_armer(&mut self, armer: AccountId) {
+        self.assert_owner();
+        let previous = std::mem::replace(&mut self.armer, armer);
+        emit(
+            "armer_changed",
+            &near_sdk::serde_json::json!({ "previous": previous, "armer": self.armer }),
+        );
+    }
+
+    /// Reserve au proprietaire : leve le gel pose par son desarmement ; l'armeur peut rearmer.
+    #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
+    pub fn unfreeze(&mut self, agent: AccountId) {
+        self.assert_owner();
+        require!(self.frozen.remove(&agent), "agent not frozen");
+        emit("unfrozen", &near_sdk::serde_json::json!({ "agent": agent }));
+    }
+
     /// Reserve a l'armeur : arme `budget` pour `agent` pendant `duration_s` secondes, dans les
     /// bornes de l'humain et si le credit de l'agent vaut exactement `expected_credit` (controle
     /// d'integrite : l'armeur arme l'etat qu'il a lu). Rearmer remplace le budget courant.
     pub fn arm(&mut self, agent: AccountId, budget: U128, duration_s: u64, expected_credit: U128) {
         require!(env::predecessor_account_id() == self.armer, "armer only");
         require!(agent != self.armer, "the armer cannot arm itself");
+        require!(
+            self.agents.contains(&agent),
+            "agent not registered by the owner"
+        );
+        require!(!self.frozen.contains(&agent), "agent frozen by the owner");
         require!(budget.0 > 0, "zero budget");
         require!(
             budget.0 <= self.bounds.max_budget.0,
@@ -207,8 +260,7 @@ impl Guard {
         );
         // Le budget arme compte en entier, meme non depense ; rearmer s'ajoute au cumul.
         let now = env::block_timestamp();
-        let mut log = self.armings.get(&agent).cloned().unwrap_or_default();
-        log.retain(|&(armed_ns, _)| in_window(armed_ns));
+        let mut log = self.armings_in_window(&agent);
         let armed: u128 = log.iter().map(|&(_, b)| b).sum();
         let Some(armed_7d) = armed
             .checked_add(budget.0)
@@ -236,17 +288,27 @@ impl Guard {
         );
     }
 
-    /// Retire le budget arme de `agent` : arret d'urgence du proprietaire, ou arret anormal
-    /// constate par l'armeur.
-    #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
+    /// Retire le budget arme de `agent` : arret d'urgence du proprietaire, qui gele aussi l'agent
+    /// (l'armeur ne peut plus le rearmer avant `unfreeze`), ou arret anormal constate par l'armeur,
+    /// sans gel. Purge le journal des armements sortis de la fenetre, et son entree s'il est vide.
     pub fn disarm(&mut self, agent: AccountId) {
         let by = env::predecessor_account_id();
         require!(by == self.owner || by == self.armer, "owner or armer only");
         self.budgets.remove(&agent);
+        let log = self.armings_in_window(&agent);
+        if log.is_empty() {
+            self.armings.remove(&agent);
+        } else {
+            self.armings.insert(agent.clone(), log);
+        }
         emit(
             "disarmed",
             &near_sdk::serde_json::json!({ "agent": agent, "by": by }),
         );
+        if by == self.owner {
+            emit("frozen", &near_sdk::serde_json::json!({ "agent": agent }));
+            self.frozen.insert(agent);
+        }
     }
 
     /// Debite le prix fixe du credit de l'appelant et du budget arme ; renvoie l'id de la demande.
@@ -270,6 +332,7 @@ impl Guard {
                 verdict: None,
                 judged_ns: U64(0),
                 reasons: String::new(),
+                evidence_sha256: String::new(),
                 settled: false,
             },
         );
@@ -297,6 +360,7 @@ impl Guard {
         check.verdict = Some(verdict);
         check.judged_ns = U64(env::block_timestamp());
         check.reasons.clone_from(&reasons);
+        check.evidence_sha256 = hex(&env::sha256(evidence.as_bytes()));
         self.escrow -= self.price;
         self.fees += self.price;
         emit(
@@ -418,12 +482,19 @@ impl Guard {
     /// Cumul des budgets armes pour `account` encore dans la fenetre de 7 jours, a l'heure du bloc.
     #[must_use]
     pub fn armed_7d(&self, account: &AccountId) -> U128 {
-        U128(self.armings.get(account).map_or(0, |log| {
-            log.iter()
-                .filter(|&&(armed_ns, _)| in_window(armed_ns))
+        U128(
+            self.armings_in_window(account)
+                .iter()
                 .map(|&(_, b)| b)
-                .sum()
-        }))
+                .sum(),
+        )
+    }
+
+    /// Armements de `agent` encore dans la fenetre de 7 jours, a l'heure du bloc.
+    fn armings_in_window(&self, agent: &AccountId) -> Vec<(u64, u128)> {
+        let mut log = self.armings.get(agent).cloned().unwrap_or_default();
+        log.retain(|&(armed_ns, _)| in_window(armed_ns));
+        log
     }
 
     #[must_use]
@@ -497,11 +568,23 @@ mod tests {
         near_sdk::serde_json::from_str(json).unwrap()
     }
 
-    /// L'humain fixe les bornes puis depose `credit` pour l'agent ; rien n'est arme.
+    /// Tous les evenements NEP-297 de l'appel courant, dans l'ordre.
+    fn events() -> Vec<near_sdk::serde_json::Value> {
+        get_logs()
+            .iter()
+            .map(|log| {
+                let json = log.strip_prefix("EVENT_JSON:").expect("prefixe NEP-297");
+                near_sdk::serde_json::from_str(json).unwrap()
+            })
+            .collect()
+    }
+
+    /// L'humain fixe les bornes, enregistre l'agent puis depose `credit` pour lui ; rien n'est arme.
     fn credited(credit: u128, max_budget: u128, max_duration_s: u64, max_7d: u128) -> Guard {
         let mut g = guard();
         ctx("owner.test", 0, 0);
         g.set_bounds(U128(max_budget), max_duration_s, U128(max_7d));
+        g.register_agent(id("agent.test"));
         ctx("owner.test", credit, 0);
         g.deposit_credit(Some(id("agent.test")));
         g
@@ -620,6 +703,8 @@ mod tests {
     #[should_panic(expected = "budget above the human's bound")]
     fn aucun_armement_sans_bornes() {
         let mut g = guard();
+        ctx("owner.test", 0, 0);
+        g.register_agent(id("agent.test"));
         ctx("owner.test", ONE_NEAR, 0);
         g.deposit_credit(Some(id("agent.test")));
         arm_at(&mut g, 1, 1, 0);
@@ -630,6 +715,8 @@ mod tests {
     #[should_panic(expected = "zero budget")]
     fn budget_nul_refuse() {
         let mut g = guard();
+        ctx("owner.test", 0, 0);
+        g.register_agent(id("agent.test"));
         ctx("owner.test", ONE_NEAR, 0);
         g.deposit_credit(Some(id("agent.test")));
         arm_at(&mut g, 0, 0, 0);
@@ -673,6 +760,7 @@ mod tests {
         let mut g = guard();
         ctx("owner.test", 0, 0);
         g.set_bounds(U128(50 * U), 60, U128(1000 * U));
+        g.register_agent(id("agent.test"));
         arm_at(&mut g, 50 * U, 60, 0);
     }
 
@@ -783,6 +871,7 @@ mod tests {
         );
         ctx("owner.test", 0, 0);
         g.set_bounds(U128(50 * U), 60, U128(100 * U));
+        g.register_agent(id("agent.test"));
         ctx("owner.test", ONE_NEAR, 0);
         g.deposit_credit(Some(id("agent.test")));
         ctx("owner.test", 0, 0);
@@ -1118,10 +1207,137 @@ mod tests {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("owner.test", 0, 0);
         g.disarm(id("agent.test"));
-        let v = last_event();
+        let v = &events()[0];
         assert_eq!(v["event"], "disarmed");
         assert_eq!(v["data"][0]["agent"], "agent.test");
         assert_eq!(v["data"][0]["by"], "owner.test");
+    }
+
+    // arret d'urgence de l'humain : l'agent est gele, l'armeur ne peut pas le rearmer aussitot
+    #[test]
+    #[should_panic(expected = "agent frozen by the owner")]
+    fn l_armeur_ne_rearme_pas_apres_l_arret_de_l_humain() {
+        let mut g = funded(ONE_NEAR, 10 * U, 1000);
+        ctx("owner.test", 0, 0);
+        g.disarm(id("agent.test"));
+        arm_at(&mut g, 10 * U, 1000, SEC);
+    }
+
+    #[test]
+    fn le_gel_est_journalise() {
+        let mut g = funded(ONE_NEAR, 10 * U, 1000);
+        ctx("owner.test", 0, 0);
+        g.disarm(id("agent.test"));
+        let v = last_event();
+        assert_eq!(v["event"], "frozen");
+        assert_eq!(v["data"][0]["agent"], "agent.test");
+    }
+
+    // arret anormal constate par l'armeur : pas de gel, il peut rearmer
+    #[test]
+    fn le_desarmement_par_l_armeur_ne_gele_pas() {
+        let mut g = funded(ONE_NEAR, 10 * U, 1000);
+        ctx("armer.test", 0, 0);
+        g.disarm(id("agent.test"));
+        assert!(events().iter().all(|v| v["event"] != "frozen"));
+        arm_at(&mut g, 10 * U, 1000, SEC);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 10 * U);
+    }
+
+    #[test]
+    fn seul_l_humain_degele_puis_l_armeur_rearme() {
+        let mut g = funded(ONE_NEAR, 10 * U, 1000);
+        ctx("owner.test", 0, 0);
+        g.disarm(id("agent.test"));
+        g.unfreeze(id("agent.test"));
+        let v = last_event();
+        assert_eq!(v["event"], "unfrozen");
+        assert_eq!(v["data"][0]["agent"], "agent.test");
+        arm_at(&mut g, 10 * U, 1000, SEC);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 10 * U);
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn l_armeur_ne_degele_pas() {
+        let mut g = funded(ONE_NEAR, 10 * U, 1000);
+        ctx("owner.test", 0, 0);
+        g.disarm(id("agent.test"));
+        ctx("armer.test", 0, 0);
+        g.unfreeze(id("agent.test"));
+    }
+
+    // revocation d'un armeur compromis par l'humain
+    #[test]
+    #[should_panic(expected = "armer only")]
+    fn un_armeur_revoque_n_arme_plus() {
+        let mut g = credited(ONE_NEAR, 50 * U, 60, 100 * U);
+        ctx("owner.test", 0, 0);
+        g.set_armer(id("armer2.test"));
+        arm_at(&mut g, 10 * U, 60, 0);
+    }
+
+    #[test]
+    fn le_nouvel_armeur_arme_et_le_changement_est_journalise() {
+        let mut g = credited(ONE_NEAR, 50 * U, 60, 100 * U);
+        ctx("owner.test", 0, 0);
+        g.set_armer(id("armer2.test"));
+        let v = last_event();
+        assert_eq!(v["event"], "armer_changed");
+        assert_eq!(v["data"][0]["previous"], "armer.test");
+        assert_eq!(v["data"][0]["armer"], "armer2.test");
+        ctx("armer2.test", 0, 0);
+        let credit = g.credit_of(&id("agent.test"));
+        g.arm(id("agent.test"), U128(10 * U), 60, credit);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 10 * U);
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn l_armeur_ne_se_remplace_pas() {
+        let mut g = guard();
+        ctx("armer.test", 0, 0);
+        g.set_armer(id("armer2.test"));
+    }
+
+    // stockage du journal paye par le contrat : seuls les agents enregistres par l'humain s'arment
+    #[test]
+    #[should_panic(expected = "agent not registered by the owner")]
+    fn l_armeur_n_arme_pas_un_compte_non_enregistre() {
+        let mut g = guard();
+        ctx("owner.test", 0, 0);
+        g.set_bounds(U128(50 * U), 60, U128(100 * U));
+        ctx("intrus.test", ONE_NEAR, 0); // credit depose par le compte lui-meme
+        g.deposit_credit(None);
+        ctx("armer.test", 0, 0);
+        let credit = g.credit_of(&id("intrus.test"));
+        g.arm(id("intrus.test"), U128(10 * U), 60, credit);
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn seul_l_humain_enregistre_un_agent() {
+        let mut g = guard();
+        ctx("armer.test", 0, 0);
+        g.register_agent(id("intrus.test"));
+    }
+
+    #[test]
+    fn le_journal_purge_les_armements_sortis_de_la_fenetre() {
+        const DAY: u64 = 24 * 3600 * SEC;
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 1000 * U);
+        arm_at(&mut g, 10 * U, 1000, 0);
+        arm_at(&mut g, 10 * U, 1000, 5 * DAY);
+        arm_at(&mut g, 10 * U, 1000, 8 * DAY);
+        assert_eq!(g.armings.get(&id("agent.test")).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn le_journal_vide_est_supprime_au_desarmement() {
+        let mut g = funded(ONE_NEAR, 10 * U, 1000);
+        ctx("armer.test", 0, WEEK_NS);
+        g.disarm(id("agent.test"));
+        assert!(g.armings.get(&id("agent.test")).is_none());
     }
 
     // 10. remboursement du prix si la sentinelle ne repond pas dans le delai
@@ -1196,6 +1412,57 @@ mod tests {
         let (mut g, _check) = pending();
         ctx("owner.test", 0, 0);
         let _ = g.withdraw_fees(U128(PRICE));
+    }
+
+    // la preuve postee est liee au verdict : empreinte sha256 de la chaine recue, en hexadecimal
+    #[test]
+    fn le_verdict_stocke_l_empreinte_de_la_preuve() {
+        let (mut g, check) = pending();
+        assert_eq!(g.get_check(check).unwrap().evidence_sha256, "");
+        ctx("sentinel.test", 0, 1);
+        g.post_verdict(check, Verdict::Block, String::new(), "abc".into());
+        let v = near_sdk::serde_json::to_value(g.get_check(check).unwrap()).unwrap();
+        assert_eq!(
+            v["evidence_sha256"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    // agent de 64 caracteres, raisons et preuve au maximum : le prix couvre toujours la demande
+    #[test]
+    fn le_majorant_couvre_une_demande_au_pire_cas() {
+        let big = id(&"a".repeat(64));
+        ctx("guard.test", 0, 0);
+        // l'agent est aussi la sentinelle : demande et verdict dans le meme contexte de mesure
+        let mut g = Guard::new(id("owner.test"), id("armer.test"), big.clone(), U128(PRICE));
+        ctx("owner.test", 0, 0);
+        g.set_bounds(U128(100 * U), 1000, U128(1000 * U));
+        g.register_agent(big.clone());
+        ctx("owner.test", ONE_NEAR, 0);
+        g.deposit_credit(Some(big.clone()));
+        ctx("armer.test", 0, 0);
+        let credit = g.credit_of(&big);
+        g.arm(big.clone(), U128(100 * U), 1000, credit);
+        ctx(big.as_str(), 0, 1);
+        g.credits.flush();
+        g.budgets.flush();
+        g.armings.flush();
+        let before = env::storage_usage();
+        let check = g.request_check(TARGET.into());
+        g.post_verdict(
+            check,
+            Verdict::Block,
+            "r".repeat(MAX_REASONS),
+            "e".repeat(MAX_EVIDENCE),
+        );
+        g.checks.flush();
+        g.credits.flush();
+        g.budgets.flush();
+        let used = u128::from(env::storage_usage() - before);
+        assert!(
+            used > 0 && used <= CHECK_STORAGE_BYTES,
+            "{used} o pour une demande"
+        );
     }
 
     #[test]

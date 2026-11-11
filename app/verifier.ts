@@ -16,10 +16,12 @@ import {
   type Hex,
 } from "viem";
 
-const ROUTER: Address = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"; // Uniswap V2 Router02 (Base)
-const WETH: Address = "0x4200000000000000000000000000000000000006";
+export const ROUTER: Address = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"; // Uniswap V2 Router02 (Base)
+export const WETH: Address = "0x4200000000000000000000000000000000000006";
 const BUY = parseEther("0.01");
-const NEXT_S = 2n; // la premiere vente est simulee au bloc suivant, 2 s apres l'achat
+/** Le premier bloc simule suit le bloc de la preuve, 2 s apres lui (rythme des blocs de Base) ;
+ *  la premiere vente est simulee au bloc d'apres, encore 2 s plus tard. */
+export const NEXT_S = 2n;
 const LATER_S = 3600n; // la seconde vente est simulee une heure apres l'achat
 // Emplacements de l'adresse d'implementation d'un proxy : EIP-1967, puis ZeppelinOS (USDC).
 const IMPL_SLOTS = [
@@ -61,7 +63,7 @@ export type Report = {
     calls: string[];
   };
   /** Requete et reponse completes, pour rejouer la simulation au meme bloc. */
-  request: unknown;
+  request: { method: string; params: unknown[] };
   response: Result[];
 };
 
@@ -104,11 +106,11 @@ async function simulate(url: string, block: bigint, buyer: Address, blocks: Bloc
   return { request, results: out.flatMap((b) => b.calls) };
 }
 
-/** Les blocs a simuler. Sans `st` : l'achat seul (1re simulation). Avec `st` (quantite achetee et
- *  proprietaire, lus dans la 1re simulation) : la preuve complete en trois blocs, achat + reprises
- *  sans approbation + approve, vente de la moitie au bloc suivant, vente du reste une heure plus tard.
- *  Partage avec app/replay.ts, qui reconstruit ainsi la requete attendue et donc les libelles. */
-export function plan(token: Address, buyer: Address, stranger: Address, now: bigint, st?: { amount: bigint; owner: Address | null }): Block[] {
+/** Les blocs a simuler. Sans `full` : l'achat seul (1re simulation). Avec `full` (inconnu, quantite
+ *  achetee et proprietaire, ces deux derniers lus dans la 1re simulation) : la preuve complete en trois
+ *  blocs, achat + reprises sans approbation + approve, vente de la moitie au bloc suivant, vente du
+ *  reste une heure plus tard. Partage avec app/replay.ts, qui reconstruit ainsi la requete attendue. */
+export function plan(token: Address, buyer: Address, now: bigint, full?: { stranger: Address; amount: bigint; owner: Address | null }): Block[] {
   const deadline = now + 10_000n;
   const buyPath = [WETH, token];
   const sellPath = [token, WETH];
@@ -120,8 +122,8 @@ export function plan(token: Address, buyer: Address, stranger: Address, now: big
     balance("tokens after buy", token),
     call("owner()", buyer, token, erc20, "owner", []),
   ];
-  if (!st) return [{ time: now, calls: buy }];
-  const { amount, owner } = st;
+  if (!full) return [{ time: now, calls: buy }];
+  const { stranger, amount, owner } = full;
   const half = amount / 2n;
   const rest = amount - half - 2n; // 2 unites peut-etre reprises par les sondes transferFrom
   const block1 = [
@@ -168,25 +170,29 @@ function moved(r: Result): boolean {
  *  a une adresse connue, ni fausser les mesures en lui envoyant des fonds d'avance. */
 const fresh = (): Address => toHex(crypto.getRandomValues(new Uint8Array(20)));
 
-export async function checkToken(url: string, token: Address): Promise<Report> {
-  const buyer = fresh();
-  const stranger = fresh();
-  const head = await rpc<{ number: Hex; timestamp: Hex }>(url, "eth_getBlockByNumber", ["latest", false]);
-  const block = BigInt(head.number);
-  const now = BigInt(head.timestamp) + 2n;
-  const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
-  const code = await rpc<Hex>(url, "eth_getCode", [token, toHex(block)]);
-  let implementation: Address | null = null;
+/** Adresses de sonde et heure du premier bloc simule. Seuls les tests les imposent (preuves
+ *  falsifiees mais coherentes) ; la sentinelle tire des adresses neuves et part du bloc + 2 s. */
+export type Probe = { buyer: Address; stranger: Address; time?: bigint };
+
+/** Implementation derriere un proxy (EIP-1967, puis ZeppelinOS) au bloc, sinon null. */
+export async function implementationAt(url: string, token: Address, block: bigint): Promise<Address | null> {
   for (const slot of IMPL_SLOTS) {
     const word = await rpc<Hex>(url, "eth_getStorageAt", [token, slot, toHex(block)]);
-    const addr = `0x${word.slice(-40)}`.toLowerCase() as Address;
-    if (BigInt(word) !== 0n) {
-      implementation = addr;
-      break;
-    }
+    if (BigInt(word) !== 0n) return `0x${word.slice(-40)}`.toLowerCase() as Address;
   }
+  return null;
+}
+
+export async function checkToken(url: string, token: Address, probe: Probe = { buyer: fresh(), stranger: fresh() }): Promise<Report> {
+  const { buyer, stranger } = probe;
+  const head = await rpc<{ number: Hex; timestamp: Hex }>(url, "eth_getBlockByNumber", ["latest", false]);
+  const block = BigInt(head.number);
+  const now = probe.time ?? BigInt(head.timestamp) + NEXT_S;
+  const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
+  const code = await rpc<Hex>(url, "eth_getCode", [token, toHex(block)]);
+  const implementation = await implementationAt(url, token, block);
   const proof = { chain_id: chainId, block, code_hash: keccak256(code), implementation };
-  const [first1] = plan(token, buyer, stranger, now);
+  const [first1] = plan(token, buyer, now);
 
   // 1re simulation : quantite achetee et proprietaire, pour construire la seconde.
   const first = await simulate(url, block, buyer, [first1]);
@@ -194,7 +200,7 @@ export async function checkToken(url: string, token: Address): Promise<Report> {
   const st = buyStage(byLabel(buyLabels, first.results));
   if (st.findings.length) return report(proof, first, buyLabels);
 
-  const blocks = plan(token, buyer, stranger, now, st);
+  const blocks = plan(token, buyer, now, { stranger, amount: st.amount, owner: st.owner });
   const sim = await simulate(url, block, buyer, blocks);
   return report(proof, sim, blocks.flatMap((b) => b.calls.map((c) => c.label)));
 }
@@ -255,7 +261,7 @@ export const byLabel = (labels: string[], results: Result[]) => Object.fromEntri
 
 function report(
   proof: { chain_id: number; block: bigint; code_hash: Hex; implementation: Address | null },
-  sim: { request: unknown; results: Result[] },
+  sim: { request: Report["request"]; results: Result[] },
   labels: string[],
 ): Report {
   const { verdict, reasons } = judge(labels, sim.results);
@@ -270,4 +276,12 @@ function report(
   };
   if (JSON.stringify(evidence).length > 8000) throw new Error("evidence above 8000 characters");
   return { verdict, reasons, evidence, request: sim.request, response: sim.results };
+}
+
+/** Fichier proofs/<id>.json : `evidence` y est la chaine exacte postee a post_verdict, dont le
+ *  contrat stocke le sha256 ; app/replay.ts la relit telle quelle. */
+export type ProofFile = Omit<Report, "evidence"> & { id: number; target: string; evidence: string };
+
+export function toProof(id: number, target: string, r: Report): ProofFile {
+  return { id, target, verdict: r.verdict, reasons: r.reasons, evidence: JSON.stringify(r.evidence), request: r.request, response: r.response };
 }

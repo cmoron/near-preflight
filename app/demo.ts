@@ -12,7 +12,7 @@ const trap = (process.argv[2] ?? "sell_blocked_later") as Exclude<keyof typeof t
 const TRAP = tokens[trap];
 const SHOP = env("SHOP");
 const ATTACKER = `attacker.${env("OWNER")}`;
-const near = (n: string) => nearToYocto(n).toString();
+const near = (n: `${number}`) => nearToYocto(n).toString();
 const step = (s: string) => console.log(`\n${s}`);
 
 /** Une tentative qui doit echouer ; si elle passe, la demo echoue (code de sortie 1). */

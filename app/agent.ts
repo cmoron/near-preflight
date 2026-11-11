@@ -40,7 +40,7 @@ export async function guardedBuy(target: string, amount: bigint): Promise<{ id: 
   }
   if (check.verdict !== "allow") {
     // ponytail: warn s'arrete ici comme block ; l'approbation humaine d'un warn n'est pas construite.
-    log(`#${id} : ${check.verdict.toUpperCase()}, I REFUSE TO SIGN the purchase (${check.reasons})`);
+    log(`#${id} : ${String(check.verdict).toUpperCase()}, I REFUSE TO SIGN the purchase (${check.reasons})`);
     return { id, paid: false };
   }
   const age = Date.now() - Number(BigInt(check.judged_ns) / 1_000_000n);

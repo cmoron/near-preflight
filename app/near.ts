@@ -1,5 +1,6 @@
 // Acces NEAR partage : configuration lue dans .env (bun la charge seul), cles hors depot.
 import { Account, getTransactionLastResult, JsonRpcProvider } from "near-api-js";
+import { chmod, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 
 // near-api-js appelle fetch sans delai : une reponse qui n'arrive jamais suspendait un role pour
@@ -14,8 +15,15 @@ export const provider = new JsonRpcProvider({ url: RPC });
 
 export function env(name: string): string {
   const v = process.env[name];
-  if (!v) throw new Error(`${name} absent de .env : lance d'abord bun app/setup.ts <parent>.testnet`);
+  if (!v) throw new Error(`${name} is not set (.env or the role's key file): run bun app/setup.ts <parent>.testnet first`);
   return v;
+}
+
+/** Ecrit un fichier de cle lisible par son seul proprietaire (0600), meme s'il existait deja :
+ *  Bun.write ignore son option `mode` et laissait les cles en 0664. */
+export async function writeSecret(path: string, data: string): Promise<void> {
+  await writeFile(path, data, { mode: 0o600 });
+  await chmod(path, 0o600);
 }
 
 /** Compte signe par une cle donnee (ex. la cle function-call de l'agent). */
@@ -56,5 +64,7 @@ export type Check = {
   reasons: string;
   /** Heure du verdict, en nanosecondes (chaine). */
   judged_ns: string;
+  /** sha256 (hexadecimal) de la chaine evidence postee avec le verdict ; vide sans verdict. */
+  evidence_sha256: string;
   settled: boolean;
 };

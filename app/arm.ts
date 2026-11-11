@@ -1,17 +1,21 @@
-// Role de l'humain : arme l'agent pour un budget et une duree, ou le desarme (arret d'urgence).
-// Signe avec la cle complete du proprietaire, rangee dans le trousseau near-cli, jamais dans .env.
-// Usage : bun app/arm.ts <budget NEAR> <duree s> | bun app/arm.ts stop
+// Role de l'armeur : arme l'agent dans les bornes fixees par l'humain. Signe avec sa seule cle
+// function-call (arm, disarm sur la garde), lue dans .env.armer ; il ne fixe pas les bornes.
+// Usage : bun --env-file=.env --env-file=.env.armer app/arm.ts <budget NEAR> <duree s>
+// Sort avec le code 1 si le contrat refuse, en affichant sa raison.
 import { nearToYocto, yoctoToNear } from "near-api-js";
-import { call, env, humanAccount, view } from "./near";
+import { account, call, env, reason, view } from "./near";
 
-const human = await humanAccount(env("OWNER"));
+const armer = account(env("ARMER"), env("ARMER_KEY"));
 const agent = env("AGENT");
-if (process.argv[2] === "stop") {
-  const { tx } = await call(human, "disarm", { agent });
-  console.log(`[human] emergency stop: budget of ${agent} removed  ${tx}`);
-} else {
-  const [budget = "0.06", duration = "900"] = process.argv.slice(2);
-  const { tx } = await call(human, "arm", { agent, budget: nearToYocto(budget).toString(), duration_s: Number(duration) });
-  const credit = await view<string>("credit_of", { account: agent });
-  console.log(`[human] ${agent} armed: ${budget} NEAR for ${duration} s (prepaid credit ${yoctoToNear(credit)} NEAR)  ${tx}`);
+const [budget = "0.06", duration = "900"] = process.argv.slice(2);
+// Controle d'integrite : l'armeur arme l'etat qu'il a lu ; si le credit change d'ici la transaction,
+// le contrat refuse l'armement.
+const credit = await view<`${bigint}`>("credit_of", { account: agent });
+try {
+  const args = { agent, budget: nearToYocto(budget as `${number}`).toString(), duration_s: Number(duration), expected_credit: credit };
+  const { tx } = await call(armer, "arm", args);
+  console.log(`  [armer] ${agent} armed: ${budget} NEAR for ${duration} s (prepaid credit read: ${yoctoToNear(credit)} NEAR)  ${tx}`);
+} catch (e) {
+  console.log(`  [armer] arm ${budget} NEAR for ${duration} s: REFUSED (${reason(e)})`);
+  process.exit(1);
 }

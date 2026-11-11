@@ -20,3 +20,20 @@ test("une vue NEAR sur un RPC muet echoue dans le delai", async () => {
     silent.stop(true);
   }
 }, 10_000);
+
+// Place apres le test precedent : celui-ci fixe NEAR_RPC avant le premier import de near.ts.
+test("un fichier de cle est ecrit en 0600, neuf ou deja present en 0664", async () => {
+  const { mkdtemp, rm, stat, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { writeSecret } = await import("./near");
+  const dir = await mkdtemp(`${tmpdir()}/goblin-`);
+  try {
+    await writeSecret(`${dir}/new`, "k");
+    expect((await stat(`${dir}/new`)).mode & 0o777).toBe(0o600);
+    await writeFile(`${dir}/old`, "x", { mode: 0o664 });
+    await writeSecret(`${dir}/old`, "k");
+    expect((await stat(`${dir}/old`)).mode & 0o777).toBe(0o600);
+  } finally {
+    await rm(dir, { recursive: true });
+  }
+});

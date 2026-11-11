@@ -5,5 +5,10 @@
   "dependencies": {
     "near-api-js": "^7.5.2",
     "viem": "^2.57.18"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
   }
 }
