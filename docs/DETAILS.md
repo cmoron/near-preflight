@@ -40,9 +40,10 @@ half the LP removable (an EOA, a contract, or several summed; only 0x0 and 0xdea
 `warn`, and so are holders that cannot all be read.
 
 **Template reputation.** Template = keccak256 of the runtime code with the CBOR metadata removed and every
-`PUSH32` operand zeroed (solc writes immutables there). The index is rebuilt from `PairCreated`, `Mint` and
-LP `Transfer` logs. A pool is dated by its funding: the block where the WETH its providers added reaches
-0.5 ETH, not the pair's creation (a pair created empty long before says nothing). It is drained when 90 % of
+`PUSH32` operand zeroed (solc writes immutables there). The index is rebuilt from `PairCreated`, `Mint`,
+`Burn` and LP `Transfer` logs. A pool is dated by its funding: the block where the net WETH its providers
+added (`Mint` minus `Burn` amounts, floored at 0) reaches 0.5 ETH, not the pair's creation (a pair created
+empty long before says nothing); liquidity added and removed again does not add up. It is drained when 90 % of
 the LP ever minted is burned after that. Only pools funded before the target's own pool count; when the
 target's pool is not in the index (or never reached 0.5 ETH in it), every pool of the index counts. At least
 3 such pools with at least 80 % drained within 1 day of funding is a `block`, which never lists anything. No
@@ -58,6 +59,7 @@ index for the chain is a `warn`: an unknown reputation is never a pass.
 | The guard builds the swap: chain 8453, router, path, recipient = its address, gas, fees, floor | `buy`                         |
 | Value plus gas at the cap is debited from the armed budget and the prepaid credit              | `buy`, `sell_quoted`          |
 | A token at the guard's EVM address is held for one agent at a time                             | `buy`, `holding`              |
+| Only the owner clears or reassigns a token's holding, never during a signature                 | `set_holding`                 |
 | An agent sells at most its holding, on a sentinel exit quote at most 120 s old, used once      | `request_exit`, `sell_quoted` |
 | The owner sells any token, amount and floor, frozen agent or not, no quote, no budget          | `sell`                        |
 | The owner sets gas limit and fees within bounds, never during a signature                      | `set_evm_gas`                 |
@@ -77,7 +79,10 @@ Details:
 - **Holdings.** Each signed buy credits its signed minimum to the agent. The guard's EVM address holds every
   agent's tokens together, so `buy` refuses a token another agent still holds: a credit whose buy reverted on
   Base can then sell only tokens no other agent has a claim on. The exit's simulated sale, from the guard's
-  address, also needs the tokens to be there.
+  address, also needs the tokens to be there. Such a credit, or an agent that never sells, would lock the
+  token for every other agent: the owner clears or reassigns the holding (`set_holding`, event
+  `holding_set`; `bun --env-file=.env app/human.ts holding <token> <agent> [amount]`, 0 frees it). A new
+  holder sells through `request_exit` on a buy of that token signed for it; otherwise the owner sells.
 - **Owner's exit.** `sell` signs approve and swap from the guard's address for any amount and floor. If a sale
   needs more gas than the guard signs with, the owner raises it (`bun --env-file=.env app/human.ts gas <limit>`,
   21,000 to 2,000,000, fees up to 10 gwei) and sells again. Measured on the fork with `gas_hungry` (a sale
@@ -89,9 +94,10 @@ Details:
 ## Roles
 
 - **Owner (human)**, full-access key in the near-cli keychain: sets bounds, registers agents and reporters,
-  approves `warn`s, unlists, sets gas, sells, withdraws ETH to the address fixed at init, emergency stop.
-  CLI: `bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> |
-sell <token> <amount> [min wei] | unlist <token> | gas <limit>`.
+  approves `warn`s, unlists, sets gas, sells, withdraws ETH to the address fixed at init, clears or
+  reassigns holdings, emergency stop. CLI: `bun --env-file=.env app/human.ts stop | unfreeze | approve <id> |
+reset | withdraw <wei> | sell <token> <amount> [min wei] | unlist <token> | holding <token> <agent> [amount] |
+gas <limit>`.
 - **Armer**, function-call key `arm`, `disarm`: arms a registered agent within the owner's bounds.
 - **Agent**, function-call key `request_check`, `buy`, `refund_check`, `request_exit`, `sell_quoted`; no EVM key.
 - **Sentinel**, function-call key `post_verdict`: simulates, posts verdicts and quotes.
@@ -143,6 +149,22 @@ replays the proof. With no template index for mainnet, the verdict is `warn` (re
 `bun app/index.ts <rpc> <from> <to> <out.json> --pace-ms 1000` builds an index from a node that serves
 `eth_getLogs` (`mainnet.base.org` does not).
 
+**One-off measurement, 2026-11-11** (on this repository's final code, read-only, one run, at most one
+request per second; it would have stopped on the first error or 429, none came):
+
+```sh
+bun app/index.ts https://base-rpc.publicnode.com 56133114 56176314 base-index.json --pace-ms 1000
+```
+
+Blocks 56,133,114 to 56,176,314 (43,201 blocks, 24 h, ending at the chain head at 19:33 UTC), 283 requests in
+298.5 s, index sha256 `0x16f519b6…96ea`. Result: 29 Uniswap V2 WETH pools with code, all of one code
+template, all 29 funded (at least 0.5 ETH net, each in its creation block), 24 drained within a day of
+funding (from 3,907 to 14,467 blocks, median 4,027, about 2.2 h). Applied to a copy of that template whose
+pool is not in the window, the farm rule gives `block` (24 of 29 is above 80 %). The index lists the pools'
+token and pair addresses; none of them is published here. Re-running the command on the same window gives
+the same sha256 as long as the node still serves the logs and the state at block 56,176,314 (code is read
+there); a pruned node refuses old state, an archive node does not.
+
 ## Limits
 
 - **Base mainnet.** A transaction signed for chain id 8453 is valid on Base mainnet: never send funds to the
@@ -157,7 +179,8 @@ replays the proof. With no template index for mainnet, the verdict is `warn` (re
   the metadata makes a new template. Copies funded after a token's pool cannot get it blocked when the index
   covers that funding; a token whose pool was funded before the index window is judged on every pool of the
   window, so copies drained there can block it (never list it). An operator who funds its target's pool with
-  0.5 ETH before running its farm escapes the farm's history. A widely used template has a mixed history, and
+  0.5 ETH at once (even for one block) before running its farm escapes the farm's history; adding and
+  removing smaller amounts does not reach the threshold. A widely used template has a mixed history, and
   the 80 % share is what keeps it from blocking. The sentinel chooses the index window; replay does not judge
   it. A drain counts only as LP burned.
 - **Removable liquidity.** Liquidity older than 1,800 blocks passes without its holders being read, and so
@@ -165,7 +188,7 @@ replays the proof. With no template index for mainnet, the verdict is `warn` (re
   counts as removable (false `warn`s). Only the Uniswap V2 WETH pair is checked.
 - **Holdings.** Credited at the signed minimum, not the amount received. A credit whose buy reverted on Base
   stays: the agent's exit fails in simulation for lack of tokens, and no other agent can buy that token until
-  the credit is sold. Two agents cannot hold the same token at once.
+  the owner clears it (`set_holding`). Two agents cannot hold the same token at once.
 - **Blocklist.** A registered reporter can list honest tokens until the owner unlists them, paying 0.005 NEAR
   of its own credit per entry.
 - **Code changed.** Compared with the reference only; a change between the verdict and the buy (at most

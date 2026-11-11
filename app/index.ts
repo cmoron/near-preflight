@@ -2,7 +2,8 @@
 // of the Uniswap V2 WETH pools created in a block window, keyed by the template of the token's code:
 // pools launched, pools drained, delay between creation and drain. Anyone gets the same file (same
 // sha256) from the same chain state; the sentinel consults it, replay rebuilds it.
-// Definitions: a pool is funded at the block where the WETH its providers added first reaches 0.5 ETH;
+// Definitions: a pool is funded at the block where the net WETH its providers added (Mint amounts minus
+// Burn amounts) first reaches 0.5 ETH;
 // it is drained once at least 90 % of the LP ever minted has been burned after that (its liquidity
 // removed); a template is the token code with immutables and metadata masked (templateOf); a farm is
 // a template whose earlier pools were almost all drained shortly after their funding.
@@ -19,6 +20,7 @@ const MIN_POOLS = 3;
 const FARM_SHARE = 0.8;
 /** A pool counts only once its liquidity providers added at least this much WETH: a dust pool costs a
  *  decoy maker nothing, while a farm seeds real liquidity to look tradable (the demo farm: 1 ETH).
+ *  Net of removals: adding and removing the same 0.1 ETH five times never reaches it.
  *  Pools are dated by that funding, not by the pair's creation: a pair created empty long before
  *  says nothing about when its token became tradable. */
 const MIN_POOL_WETH = parseEther("0.5");
@@ -32,9 +34,10 @@ const PAIRS_PER_QUERY = 10;
 const PAIR_CREATED = keccak256(stringToHex("PairCreated(address,address,address,uint256)"));
 const TRANSFER = keccak256(stringToHex("Transfer(address,address,uint256)"));
 const MINT = keccak256(stringToHex("Mint(address,uint256,uint256)"));
+const BURN = keccak256(stringToHex("Burn(address,uint256,uint256,address)"));
 const ZERO = "0x0000000000000000000000000000000000000000";
 
-/** `funded`: block where the WETH added by the pair's `Mint`s first reached MIN_POOL_WETH, null if it
+/** `funded`: block where the WETH of the pair's `Mint`s minus its `Burn`s first reached MIN_POOL_WETH, null if it
  *  never did within the window; `drained`: first block after that where 90 % of the LP was burned. */
 export type Pool = { pair: Address; token: Address; created: number; funded: number | null; drained: number | null };
 /** Pools by template, templates and pools in a fixed order: the JSON (and its sha256) depends only
@@ -94,7 +97,7 @@ export async function buildIndex(url: string, from: number, to: number, pace: ()
   const chain_id = Number(await call<Hex>("eth_chainId", []));
   const weth = WETH.toLowerCase() as Address;
   const pools: Pool[] = [];
-  const wethIs0 = new Set<Address>(); // pairs whose token0 is WETH: its Mint amount is amount0
+  const wethIs0 = new Set<Address>(); // pairs whose token0 is WETH: its Mint and Burn amount is amount0
   for (const l of await logs({ address: FACTORY, topics: [PAIR_CREATED] })) {
     const [t0, t1] = [word(l.topics[1]), word(l.topics[2])];
     const token = t0 === weth ? t1 : t1 === weth ? t0 : null;
@@ -105,12 +108,14 @@ export async function buildIndex(url: string, from: number, to: number, pace: ()
   const byPair = new Map(pools.map((p) => [p.pair, { pool: p, minted: 0n, burned: 0n, weth: 0n }]));
   for (let i = 0; i < pools.length; i += PAIRS_PER_QUERY) {
     const group = pools.slice(i, i + PAIRS_PER_QUERY); // in creation order: no LP log before the first one
-    for (const l of await logs({ address: group.map((p) => p.pair), topics: [[TRANSFER, MINT]] }, group[0].created)) {
+    for (const l of await logs({ address: group.map((p) => p.pair), topics: [[TRANSFER, MINT, BURN]] }, group[0].created)) {
       const s = byPair.get(l.address.toLowerCase() as Address);
       if (!s) continue;
       const block = Number(BigInt(l.blockNumber));
-      if (l.topics[0] === MINT) {
-        s.weth += BigInt(`0x${wethIs0.has(s.pool.pair) ? l.data.slice(2, 66) : l.data.slice(66, 130)}`);
+      if (l.topics[0] === MINT || l.topics[0] === BURN) {
+        const weth = BigInt(`0x${wethIs0.has(s.pool.pair) ? l.data.slice(2, 66) : l.data.slice(66, 130)}`);
+        // Net of removals, floored at 0: a burn also pays out the WETH buyers swapped in.
+        s.weth = l.topics[0] === MINT ? s.weth + weth : s.weth > weth ? s.weth - weth : 0n;
         if (s.pool.funded === null && s.weth >= MIN_POOL_WETH) s.pool.funded = block;
         continue;
       }

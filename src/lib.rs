@@ -299,7 +299,8 @@ pub struct Guard {
     /// Per token (lowercase), the one agent it is held for and the amount it may still sell: credited
     /// from the signed buy's `min_out`, reserved by `sell_quoted`, removed at 0. The guard's EVM address
     /// holds every agent's tokens together, so a token is held for one agent at a time: a credit whose
-    /// buy reverted on Base can never sell another agent's tokens.
+    /// buy reverted on Base can never sell another agent's tokens. Only the owner clears or reassigns
+    /// a holding (`set_holding`).
     holdings: LookupMap<String, (AccountId, u128)>,
 }
 
@@ -1496,6 +1497,25 @@ impl Guard {
         U128(self.held(&agent, &token))
     }
 
+    /// Owner only: `token` is now held for `agent`, `amount` to sell (0 frees it for any agent).
+    /// Undoes a lock no agent can lift: a credit whose buy reverted on Base, or an agent that never
+    /// sells. Refused during a signature, whose callback may restore the seller's holding.
+    #[allow(clippy::needless_pass_by_value)] // near-sdk's JSON ABI requires an owned type
+    pub fn set_holding(&mut self, token: String, agent: AccountId, amount: U128) {
+        self.assert_owner();
+        require!(self.signing.is_none(), "a signature is already in progress");
+        let key = token_key(&token);
+        let previous = self.holdings.get(&key).cloned();
+        self.set_held(&agent, &key, amount.0);
+        emit(
+            "holding_set",
+            &near_sdk::serde_json::json!({
+                "token": key, "agent": agent, "amount": amount,
+                "previous": previous.map(|(a, n)| near_sdk::serde_json::json!({ "agent": a, "amount": U128(n) })),
+            }),
+        );
+    }
+
     /// Stores a blocklist entry under `token` (lowercase) and emits `listed`.
     fn list(&mut self, token: String, entry: Entry) {
         emit(
@@ -1602,7 +1622,7 @@ mod tests {
 
     fn last_event() -> near_sdk::serde_json::Value {
         let log = get_logs().pop().unwrap();
-        let json = log.strip_prefix("EVENT_JSON:").expect("prefixe NEP-297");
+        let json = log.strip_prefix("EVENT_JSON:").expect("NEP-297 prefix");
         near_sdk::serde_json::from_str(json).unwrap()
     }
 
@@ -1611,7 +1631,7 @@ mod tests {
         get_logs()
             .iter()
             .map(|log| {
-                let json = log.strip_prefix("EVENT_JSON:").expect("prefixe NEP-297");
+                let json = log.strip_prefix("EVENT_JSON:").expect("NEP-297 prefix");
                 near_sdk::serde_json::from_str(json).unwrap()
             })
             .collect()
@@ -1946,7 +1966,7 @@ mod tests {
         ctx("agent.test", 0, 500);
         g.request_check(TARGET.into(), None);
         let log = get_logs().pop().unwrap();
-        let json = log.strip_prefix("EVENT_JSON:").expect("prefixe NEP-297");
+        let json = log.strip_prefix("EVENT_JSON:").expect("NEP-297 prefix");
         let v: near_sdk::serde_json::Value = near_sdk::serde_json::from_str(json).unwrap();
         assert_eq!(v["event"], "check_requested");
         assert_eq!(v["data"][0]["target"], TARGET);
@@ -4034,6 +4054,62 @@ mod tests {
         let _ = g.withdraw_eth(U128(1));
         exit_signed(&mut g, vec![ok_sig(SIG_A)]);
         assert_eq!(holding_of(&g, "agent.test"), MIN_OUT);
+    }
+
+    // An agent can lock a token for the others (a credit whose buy reverted on Base, or an agent that
+    // never sells): the owner clears or reassigns the holding, logged.
+    #[test]
+    fn the_owner_clears_a_holding_then_another_agent_may_buy_the_token() {
+        let (mut g, _) = judged(Verdict::Allow);
+        bought_for(&mut g, "agent.test", 2000);
+        ctx("owner.test", 0, 3000);
+        g.set_holding(TARGET.into(), id("agent.test"), U128(0));
+        let v = last_event();
+        assert_eq!(v["event"], "holding_set");
+        assert_eq!(
+            v["data"][0],
+            near_sdk::serde_json::json!({
+                "token": TARGET.to_ascii_lowercase(), "agent": "agent.test", "amount": "0",
+                "previous": { "agent": "agent.test", "amount": MIN_OUT.to_string() },
+            })
+        );
+        assert_eq!(holding_of(&g, "agent.test"), 0);
+        bought_for(&mut g, "agentb.test", 4000);
+        assert_eq!(holding_of(&g, "agentb.test"), MIN_OUT);
+    }
+
+    #[test]
+    fn the_owner_reassigns_a_holding_to_another_agent() {
+        let (mut g, _) = judged(Verdict::Allow);
+        bought_for(&mut g, "agent.test", 2000);
+        ctx("owner.test", 0, 3000);
+        g.set_holding(TARGET.into(), id("agentb.test"), U128(7));
+        assert_eq!(last_event()["data"][0]["agent"], "agentb.test");
+        assert_eq!(holding_of(&g, "agent.test"), 0);
+        assert_eq!(holding_of(&g, "agentb.test"), 7);
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn only_the_owner_sets_a_holding() {
+        let (mut g, _) = judged(Verdict::Allow);
+        bought_for(&mut g, "agentb.test", 2000);
+        ctx("agentb.test", 0, 3000);
+        g.set_holding(TARGET.into(), id("agentb.test"), U128(0));
+    }
+
+    // The exit's callback restores the seller's holding when the swap is not signed: no change while
+    // a signature is pending, or it would overwrite the owner's choice.
+    #[test]
+    #[should_panic(expected = "a signature is already in progress")]
+    fn no_holding_change_while_a_signature_is_pending() {
+        let (mut g, bought) = judged(Verdict::Allow);
+        buy(&mut g, bought);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        let exit = exit_quote(&mut g, "agent.test", bought, MIN_OUT, 1000);
+        sell_quoted_at(&mut g, exit, 1100);
+        ctx("owner.test", 0, 1200);
+        g.set_holding(TARGET.into(), id("agent.test"), U128(0));
     }
 
     // 19. the reference code moves only to the same code, or when the owner approves a warn

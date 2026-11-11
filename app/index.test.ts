@@ -1,10 +1,10 @@
 // Template reputation: template hash, index rebuilt from chain logs, farm rule. Fork tests need
 // evm/fork.sh running (it launches the demo farm: five drained pools and a fresh one).
-import { describe, expect, test } from "bun:test";
-import { getContractAddress, keccak256, type Address, type Hex } from "viem";
+import { afterAll, describe, expect, test } from "bun:test";
+import { getContractAddress, keccak256, pad, parseEther, stringToHex, toHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
 import { beforeBlock, buildIndex, indexSha256, reputationFindings, reputationOf, templateOf, type Index } from "./index";
-import { rpc } from "./verifier";
+import { FACTORY, rpc, WETH } from "./verifier";
 
 const RPC = process.env.EVM_RPC ?? "http://127.0.0.1:8545";
 const head = Number(BigInt(await rpc<Hex>(RPC, "eth_blockNumber", [])));
@@ -131,5 +131,71 @@ describe("farm rule", () => {
     const t = "0xaa" as Hex;
     expect(beforeBlock(index, null)).toBe(ALL);
     expect(reputationOf({ ...index, templates: { [t]: pools([12, 12, 12], 100) } }, t, ALL)).toMatchObject({ before_block: ALL, pools: 3, drained: 3 });
+  });
+});
+
+describe("pool funding: net WETH, from a fixture of logs served by a fake node", async () => {
+  const topic = (sig: string) => keccak256(stringToHex(sig));
+  const [PAIR_CREATED, MINT, BURN] = ["PairCreated(address,address,address,uint256)", "Mint(address,uint256,uint256)", "Burn(address,uint256,uint256,address)"].map(topic);
+  const data = (...words: bigint[]) => `0x${words.map((w) => pad(toHex(w)).slice(2)).join("")}` as Hex;
+  const eth = (x: string) => parseEther(x);
+  const at = (block: number) => toHex(block);
+  // [token, pair]: a token below WETH's address is token0 (its pair's WETH amount is amount1), above it token1.
+  const CHURN = ["0x1111111111111111111111111111111111111111", "0x00000000000000000000000000000000000000a1"] as const;
+  const PARTIAL = ["0x9999999999999999999999999999999999999999", "0x00000000000000000000000000000000000000a2"] as const;
+  const RICH_BURN = ["0x2222222222222222222222222222222222222222", "0x00000000000000000000000000000000000000a3"] as const;
+  const created = ([token, pair]: readonly [string, string], block: number) => {
+    const [t0, t1] = token < WETH.toLowerCase() ? [token, WETH] : [WETH, token];
+    return { address: FACTORY, topics: [PAIR_CREATED, pad(t0 as Hex), pad(t1 as Hex)], data: data(BigInt(pair), 1n), blockNumber: at(block) };
+  };
+  /** A Mint or Burn of `weth` WETH and 1,000 times as many tokens on the pair, in the pair's token order. */
+  const lp = (event: Hex, [token, pair]: readonly [string, string], weth: bigint, block: number) => ({
+    address: pair,
+    topics: event === MINT ? [MINT, pad(pair as Hex)] : [BURN, pad(pair as Hex), pad(pair as Hex)],
+    data: token < WETH.toLowerCase() ? data(1000n * weth, weth) : data(weth, 1000n * weth),
+    blockNumber: at(block),
+  });
+  const logs = [
+    created(CHURN, 10),
+    created(PARTIAL, 11),
+    created(RICH_BURN, 12),
+    // 0.1 ETH added and removed 5 times: 0.5 ETH of cumulative Mints, never more than 0.1 ETH in the pool.
+    ...[0, 1, 2, 3, 4].flatMap((k) => [lp(MINT, CHURN, eth("0.1"), 20 + 2 * k), lp(BURN, CHURN, eth("0.1"), 21 + 2 * k)]),
+    // 0.4 in, 0.2 out, 0.2 in (cumulative Mints 0.6, net 0.4), 0.1 in: net 0.5 at block 23.
+    lp(MINT, PARTIAL, eth("0.4"), 20),
+    lp(BURN, PARTIAL, eth("0.2"), 21),
+    lp(MINT, PARTIAL, eth("0.2"), 22),
+    lp(MINT, PARTIAL, eth("0.1"), 23),
+    // 0.2 in, 0.6 out (the burn also returns WETH buyers swapped in): net floored at 0, then 0.5 in.
+    lp(MINT, RICH_BURN, eth("0.2"), 20),
+    lp(BURN, RICH_BURN, eth("0.6"), 21),
+    lp(MINT, RICH_BURN, eth("0.5"), 22),
+  ];
+  const node = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const { method, params } = (await req.json()) as { method: string; params: [Record<string, unknown>] };
+      const filter = params[0] ?? {};
+      const addresses = [filter.address].flat().map((a) => String(a).toLowerCase());
+      const first = [(filter.topics as unknown[] | undefined)?.[0]].flat();
+      const inRange = (b: Hex) => Number(b) >= Number(filter.fromBlock) && Number(b) <= Number(filter.toBlock);
+      const result =
+        method === "eth_chainId" ? "0x2105"
+        : method === "eth_getCode" ? "0x6001"
+        : logs.filter((l) => addresses.includes(l.address.toLowerCase()) && first.includes(l.topics[0]) && inRange(l.blockNumber));
+      return Response.json({ jsonrpc: "2.0", id: 1, result });
+    },
+  });
+  afterAll(() => node.stop());
+  const index = await buildIndex(`http://127.0.0.1:${node.port}`, 1, 100);
+  const funded = (pair: string) => Object.values(index.templates).flat().find((p) => p.pair === pair)?.funded;
+  test("liquidity added and removed 5 times (0.5 ETH of Mints, 0.1 ETH at most in the pool) never funds the pool", () => {
+    expect(funded(CHURN[1])).toBeNull();
+  });
+  test("a pool is funded when Mints minus Burns reach 0.5 ETH (WETH as token0), not when Mints alone do", () => {
+    expect(funded(PARTIAL[1])).toBe(23);
+  });
+  test("a burn returning more WETH than was added floors the net at 0: 0.5 ETH added afterwards funds the pool", () => {
+    expect(funded(RICH_BURN[1])).toBe(22);
   });
 });
