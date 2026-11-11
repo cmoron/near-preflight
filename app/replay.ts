@@ -12,6 +12,7 @@ import {
   NEXT_S,
   ok as succeeded,
   plan,
+  quoteOf,
   ROUTER,
   rpc,
   WETH,
@@ -29,6 +30,7 @@ type Evidence = {
   code_hash: string;
   implementation: string | null;
   calls: string[];
+  quote: string;
 };
 /** `skipped` : controle non verifiable sur ce noeud, dit comme tel (ni reussi ni echoue). */
 export type Line = { ok: boolean; line: string; skipped?: boolean };
@@ -38,12 +40,13 @@ export type OnChain = {
   verdict: string | null;
   reasons: string;
   evidence_sha256: string;
+  quote: string;
   requested_ns: string;
   judged_ns: string;
 } | null;
 type BlockStateCall = { blockOverrides: { time: Hex }; calls: { from: Address }[] };
 
-const EVIDENCE_KEYS = "block,calls,chain_id,code_hash,implementation,method,request_sha256";
+const EVIDENCE_KEYS = "block,calls,chain_id,code_hash,implementation,method,quote,request_sha256";
 /** Ecart tolere entre l'heure du bloc EVM et celles de la demande et du verdict NEAR : horloges de
  *  deux chaines, retard du RPC EVM lu par la sentinelle, intervalle de bloc. */
 const CLOCK_SLACK_S = 60;
@@ -74,7 +77,9 @@ function parseEvidence(p: Proof): Evidence | string {
     typeof e.code_hash === "string" &&
     (e.implementation === null || typeof e.implementation === "string") &&
     Array.isArray(e.calls) &&
-    e.calls.every((c) => typeof c === "string");
+    e.calls.every((c) => typeof c === "string") &&
+    typeof e.quote === "string" &&
+    /^\d+$/.test(e.quote);
   return typed ? (e as unknown as Evidence) : "evidence fields have unexpected types";
 }
 
@@ -235,6 +240,8 @@ export async function replay(
       const j = judge(r.labels, fresh);
       const ok = j.verdict === proof.verdict && j.reasons === proof.reasons;
       add(ok, ok ? `verdict ${j.verdict} rejudged identically (same reasons)` : `verdict/reasons differ: file "${proof.verdict}: ${proof.reasons}" vs rejudged "${j.verdict}: ${j.reasons}"`);
+      const q = quoteOf(r.labels, fresh).toString();
+      add(q === e.quote, q === e.quote ? `quote ${q} tokens for 0.01 ETH recomputed identically` : `quote in evidence ${e.quote} != recomputed ${q}`);
     }
   }
 
@@ -263,6 +270,7 @@ export async function replay(
             ? `on-chain evidence_sha256 ${h} is the sha256 of the evidence replayed above`
             : `on-chain evidence_sha256 ${c.evidence_sha256} != sha256 of the file's evidence ${h}`,
         );
+        add(c.quote === e.quote, c.quote === e.quote ? `on-chain quote ${c.quote} matches evidence` : `on-chain quote ${c.quote} != evidence quote ${e.quote}`);
         if (c.target.toLowerCase() !== proof.target.toLowerCase()) add(false, `on-chain target ${c.target} is not the proof target ${proof.target}`);
         else {
           const same = c.verdict === proof.verdict && c.reasons === proof.reasons;

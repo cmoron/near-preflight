@@ -1,11 +1,36 @@
 //! Garde de depense : l'agent signe avec une cle function-call limitee a ce
 //! contrat ; le contrat tient son credit prepaye et son budget arme.
 //! Trois roles : l'humain (owner) fixe les bornes, enregistre les agents et garde l'arret
-//! d'urgence, l'armeur arme un agent enregistre dans ces bornes, l'agent depense. Chaque
+//! d'urgence, l'armeur arme un agent enregistre dans ces bornes, l'agent achete. Chaque
 //! armement, desarmement, gel et changement d'armeur est journalise.
-use near_sdk::json_types::{U128, U64};
+//! L'achat sur Base est signe par NEAR (Chain Signatures) : la garde construit elle-meme la
+//! transaction du swap pour la cible jugee `allow` et la fait signer par le contrat MPC.
+use near_sdk::json_types::{Base64VecU8, U128, U64};
 use near_sdk::store::{LookupMap, LookupSet};
-use near_sdk::{env, near, require, AccountId, NearToken, PanicOnDefault, Promise};
+use near_sdk::{env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise};
+use omni_transaction::evm::types::Signature;
+use omni_transaction::evm::utils::parse_eth_address;
+use omni_transaction::evm::EVMTransaction;
+
+/// Achat sur Base : chain id, routeur Uniswap V2 et WETH fixes. Une transaction signee pour 8453
+/// est valable sur Base reel.
+pub const CHAIN_ID: u64 = 8453;
+const ROUTER: &str = "4752ba5DBc23f44D87826276BF6Fd6b1C372aD24";
+const WETH: &str = "4200000000000000000000000000000000000006";
+/// `swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256)`
+const SWAP_SELECTOR: [u8; 4] = [0xb6, 0xf9, 0xde, 0x95];
+/// Chemin de derivation Chain Signatures, fixe : l'adresse EVM ne depend que du compte de la garde.
+pub const DERIVATION_PATH: &str = "evm-1";
+/// Echeance courte du swap, comptee depuis la demande de signature (~10 s de signature, puis diffusion).
+const SWAP_DEADLINE_S: u64 = 300;
+/// Montant de l'achat simule par la sentinelle (0,01 ETH) : son devis est en jetons pour ce montant.
+pub const QUOTE_WEI: u128 = 10_000_000_000_000_000;
+/// Gaz reserve a `sign` (le MPC en exige 15 `TGas`) et au callback ; le reste du gaz attache par
+/// l'agent leur est reparti.
+const SIGN_GAS: Gas = Gas::from_tgas(15);
+const CALLBACK_GAS: Gas = Gas::from_tgas(10);
+/// Reponse de `sign` lue au plus (environ 200 o attendus).
+const MAX_SIGN_RESPONSE: usize = 1024;
 
 #[near(serializers = [borsh])]
 #[derive(Clone, Copy)]
@@ -47,8 +72,63 @@ pub struct Check {
     /// sha256 (hexadecimal minuscule) de la chaine `evidence` recue avec le verdict, calcule par
     /// le contrat : lie la preuve journalisee au verdict stocke. Vide tant qu'il n'y a pas de verdict.
     pub evidence_sha256: String,
-    /// Vrai une fois l'achat paye : un verdict ne sert qu'une fois.
+    /// Devis de la sentinelle : jetons recus par son achat simule de `QUOTE_WEI` (0 sans devis), lie
+    /// a la preuve. La garde en tire le minimum de jetons du swap.
+    pub quote: U128,
+    /// Vrai une fois la transaction d'achat signee : un verdict ne sert qu'une fois.
     pub settled: bool,
+    /// Transaction EIP-1559 signee par le MPC pour cet achat (base64 en JSON), a diffuser sur Base.
+    pub signed_tx: Option<Base64VecU8>,
+}
+
+/// Parametres de l'achat EVM fixes par le proprietaire a l'init ; l'agent n'en choisit aucun.
+#[near(serializers = [borsh, json])]
+pub struct EvmConfig {
+    /// Contrat Chain Signatures qui signe pour la garde (testnet : v1.signer-prod.testnet).
+    pub mpc: AccountId,
+    /// Adresse derivee de la garde et de `DERIVATION_PATH`, calculee hors chaine : signataire de
+    /// la transaction et destinataire des jetons achetes.
+    pub address: String,
+    pub gas_limit: u64,
+    pub max_fee_per_gas: U128,
+    pub max_priority_fee_per_gas: U128,
+    /// Taux fixe, sans oracle : yoctoNEAR debites du budget par wei signe (valeur et gaz au plafond).
+    pub yocto_per_wei: U128,
+    /// Glissement tolere sous le devis de la sentinelle, en points de base (300 = 3 %).
+    pub max_slippage_bps: u16,
+}
+
+/// Achat en attente de la signature du MPC.
+#[near(serializers = [borsh])]
+struct Pending {
+    id: u64,
+    agent: AccountId,
+    target: String,
+    value: u128,
+    min_out: u128,
+    deadline_s: u64,
+    /// yoctoNEAR debites du credit et du budget, sous sequestre jusqu'au callback.
+    cost: u128,
+    /// Echeance de l'armement debite : un echec ne rend le budget qu'a ce meme armement.
+    armed_until_ns: u64,
+}
+
+/// Reponse de `sign` du contrat MPC (domaine secp256k1).
+#[near(serializers = [json])]
+struct SignResponse {
+    big_r: AffinePoint,
+    s: Scalar,
+    recovery_id: u8,
+}
+
+#[near(serializers = [json])]
+struct AffinePoint {
+    affine_point: String,
+}
+
+#[near(serializers = [json])]
+struct Scalar {
+    scalar: String,
 }
 
 /// Plafonds de taille : raisons stockees, preuve seulement journalisee (journal NEAR <= 16 Kio).
@@ -56,9 +136,10 @@ const MAX_REASONS: usize = 280;
 const MAX_EVIDENCE: usize = 8_000;
 /// Delai au-dela duquel l'agent recupere le prix d'une demande restee sans verdict.
 /// Majorant du stockage d'une demande (cle 9 o, agent <= 64 o, cible 42 o, raisons <= 280 o,
-/// empreinte 64 o, prefixes de longueur, 40 o de surcout par entree) : 534 o au pire cas,
-/// mesure par un test. Le prix doit le couvrir, sinon chaque demande ronge le solde du contrat.
-const CHECK_STORAGE_BYTES: u128 = 600;
+/// empreinte 64 o, transaction signee <= 396 o, prefixes de longueur, 40 o de surcout par
+/// entree), mesure au pire cas par un test. Le prix doit le couvrir, sinon chaque demande ronge
+/// le solde du contrat.
+const CHECK_STORAGE_BYTES: u128 = 1000;
 /// Duree de validite d'un verdict : la cible peut changer (proprietaire, proxy, liquidite),
 /// un `allow` ancien ne paie donc plus ; l'agent redemande un controle.
 pub const VERDICT_TTL_NS: u64 = 120 * 1_000_000_000;
@@ -93,18 +174,58 @@ pub struct Guard {
     /// Agents geles par un desarmement du proprietaire : l'armeur ne peut plus les armer tant que
     /// le proprietaire ne les a pas degeles.
     frozen: LookupSet<AccountId>,
-    /// Destinataires permis, fixes par le proprietaire.
-    recipients: LookupSet<AccountId>,
-    /// Frais percus (verdicts rendus), comptes a part du credit des agents.
+    /// Frais percus (verdicts rendus) et achats signes, payes au proprietaire qui finance l'adresse
+    /// derivee en ETH ; comptes a part du credit des agents.
     fees: u128,
-    /// Prix des demandes en attente de verdict : ni a l'agent ni au proprietaire.
+    /// Prix des demandes en attente de verdict et cout de l'achat en signature : ni a l'agent ni
+    /// au proprietaire.
     escrow: u128,
     next_id: u64,
+    evm: EvmConfig,
+    /// Nonce EVM de l'adresse derivee : avance seulement quand une signature revient.
+    evm_nonce: u64,
+    /// Achat en cours de signature. Un seul a la fois : une adresse, une suite de nonces ; un echec
+    /// ne laisse donc pas de trou.
+    signing: Option<Pending>,
 }
 
 /// Adresse EVM stricte : `0x` + 40 hexadecimaux (42 caracteres, pas un de plus).
 fn is_evm_address(s: &str) -> bool {
     s.len() == 42 && s.starts_with("0x") && s.bytes().skip(2).all(|b| b.is_ascii_hexdigit())
+}
+
+/// Signature EVM tiree de la reponse du MPC : r = `big_r` sans son octet de prefixe, v = `recovery_id`,
+/// zeros de tete de r et s retires (entiers RLP canoniques). `None` si le format differe.
+fn parse_signature(bytes: &[u8]) -> Option<Signature> {
+    let response: SignResponse = near_sdk::serde_json::from_slice(bytes).ok()?;
+    let big_r = hex::decode(response.big_r.affine_point).ok()?;
+    let s = hex::decode(response.s.scalar).ok()?;
+    if big_r.len() != 33 || s.len() != 32 || response.recovery_id > 1 {
+        return None;
+    }
+    let trim = |b: &[u8]| b.iter().copied().skip_while(|&x| x == 0).collect();
+    Some(Signature {
+        v: response.recovery_id.into(),
+        r: trim(&big_r[1..]),
+        s: trim(&s),
+    })
+}
+
+/// Minimum de jetons du swap : `quote` (pour `QUOTE_WEI`) ramene a `amount` wei, moins
+/// `slippage_bps`, arrondi bas et sans debordement intermediaire. `None` si le resultat deborde.
+fn min_out(quote: u128, amount: u128, slippage_bps: u16) -> Option<u128> {
+    let expected = (quote / QUOTE_WEI)
+        .checked_mul(amount)?
+        .checked_add((quote % QUOTE_WEI).checked_mul(amount)? / QUOTE_WEI)?;
+    let keep = u128::from(10_000 - slippage_bps);
+    Some(expected / 10_000 * keep + expected % 10_000 * keep / 10_000)
+}
+
+/// Mot ABI de 32 octets, `bytes` cale a droite.
+fn word(bytes: &[u8]) -> [u8; 32] {
+    let mut w = [0; 32];
+    w[32 - bytes.len()..].copy_from_slice(bytes);
+    w
 }
 
 /// Vrai tant qu'un armement fait a `armed_ns` reste dans la fenetre de 7 jours (heure du bloc).
@@ -141,7 +262,13 @@ impl Guard {
     /// separation (celui qui fixe les bornes arme aussi), mais les bornes s'appliquent toujours.
     #[init]
     #[must_use]
-    pub fn new(owner: AccountId, armer: AccountId, sentinel: AccountId, price: U128) -> Self {
+    pub fn new(
+        owner: AccountId,
+        armer: AccountId,
+        sentinel: AccountId,
+        price: U128,
+        evm: EvmConfig,
+    ) -> Self {
         require!(
             env::predecessor_account_id() == env::current_account_id(),
             "init reserved to the contract account"
@@ -150,6 +277,16 @@ impl Guard {
             price.0 >= CHECK_STORAGE_BYTES * env::storage_byte_cost().as_yoctonear(),
             "price below the storage cost of a check"
         );
+        require!(is_evm_address(&evm.address), "invalid derived address");
+        require!(
+            evm.gas_limit > 0 && evm.yocto_per_wei.0 > 0,
+            "zero gas limit or rate"
+        );
+        require!(
+            evm.max_priority_fee_per_gas.0 <= evm.max_fee_per_gas.0,
+            "priority fee above max fee"
+        );
+        require!(evm.max_slippage_bps < 10_000, "slippage of 100 % or more");
         Self {
             owner,
             armer,
@@ -162,10 +299,12 @@ impl Guard {
             checks: LookupMap::new(b"k"),
             agents: LookupSet::new(b"g"),
             frozen: LookupSet::new(b"f"),
-            recipients: LookupSet::new(b"r"),
             fees: 0,
             escrow: 0,
             next_id: 0,
+            evm,
+            evm_nonce: 0,
+            signing: None,
         }
     }
 
@@ -333,7 +472,9 @@ impl Guard {
                 judged_ns: U64(0),
                 reasons: String::new(),
                 evidence_sha256: String::new(),
+                quote: U128(0),
                 settled: false,
+                signed_tx: None,
             },
         );
         emit(
@@ -343,15 +484,27 @@ impl Guard {
         self.next_id
     }
 
-    /// Reserve a la sentinelle : un verdict par demande, raisons stockees, preuve journalisee.
+    /// Reserve a la sentinelle : un verdict par demande, raisons stockees, preuve journalisee, devis
+    /// (jetons recus par l'achat simule de `QUOTE_WEI`, aussi dans la preuve) exige sur un `allow`.
     #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
-    pub fn post_verdict(&mut self, id: u64, verdict: Verdict, reasons: String, evidence: String) {
+    pub fn post_verdict(
+        &mut self,
+        id: u64,
+        verdict: Verdict,
+        reasons: String,
+        evidence: String,
+        quote: U128,
+    ) {
         require!(
             env::predecessor_account_id() == self.sentinel,
             "sentinel only"
         );
         require!(reasons.len() <= MAX_REASONS, "reasons too long");
         require!(evidence.len() <= MAX_EVIDENCE, "evidence too long");
+        require!(
+            verdict != Verdict::Allow || quote.0 > 0,
+            "allow without a quote"
+        );
         let Some(check) = self.checks.get_mut(&id) else {
             env::panic_str("unknown check")
         };
@@ -361,33 +514,25 @@ impl Guard {
         check.judged_ns = U64(env::block_timestamp());
         check.reasons.clone_from(&reasons);
         check.evidence_sha256 = hex(&env::sha256(evidence.as_bytes()));
+        check.quote = quote;
         self.escrow -= self.price;
         self.fees += self.price;
         emit(
             "verdict_posted",
             &near_sdk::serde_json::json!({
-                "id": id, "verdict": verdict, "reasons": reasons, "evidence": evidence,
+                "id": id, "verdict": verdict, "reasons": reasons, "evidence": evidence, "quote": quote,
             }),
         );
     }
 
-    /// Reserve au proprietaire : permet un destinataire d'achat.
-    pub fn allow_recipient(&mut self, account: AccountId) {
-        self.assert_owner();
-        self.recipients.insert(account);
-    }
-
-    /// Paie `amount` a un destinataire permis, sur un verdict `allow` de la sentinelle
-    /// pour cette demande, dans le budget arme. Un verdict ne paie qu'un achat, et seulement
-    /// celui du jeton controle : `target` doit etre la cible de la demande (casse ignoree).
-    #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
-    pub fn spend(
-        &mut self,
-        id: u64,
-        target: String,
-        recipient: AccountId,
-        amount: U128,
-    ) -> Promise {
+    /// Achat sur Base signe par NEAR, sur un verdict `allow` non perime de cette demande : la garde
+    /// construit le swap WETH -> cible de la demande sur le routeur Uniswap V2, jetons vers son
+    /// adresse derivee, et en demande la signature au MPC (1 yoctoNEAR pris sur son solde). L'agent
+    /// ne choisit que la valeur en wei ; le minimum de jetons vient du devis de la sentinelle, moins
+    /// le glissement tolere. Le budget arme et le credit sont debites de la valeur plus le gaz au
+    /// plafond, au taux fixe du proprietaire.
+    pub fn buy(&mut self, id: u64, amount_wei: U128) -> Promise {
+        require!(self.signing.is_none(), "a signature is already in progress");
         let who = env::predecessor_account_id();
         let Some(check) = self.checks.get(&id) else {
             env::panic_str("unknown check")
@@ -400,31 +545,134 @@ impl Guard {
             Some(_) => env::panic_str("verdict does not allow the purchase"),
         }
         require!(
-            check.target.eq_ignore_ascii_case(&target),
-            "target differs from the checked token"
-        );
-        require!(
             env::block_timestamp() < check.judged_ns.0.saturating_add(VERDICT_TTL_NS),
             "verdict expired"
         );
-        require!(
-            self.recipients.contains(&recipient),
-            "recipient not allowed"
-        );
+        require!(amount_wei.0 > 0, "zero amount");
         let target = check.target.clone();
-        self.debit(&who, amount.0);
-        if let Some(check) = self.checks.get_mut(&id) {
-            check.settled = true;
-        }
+        let Some(min_out) = min_out(check.quote.0, amount_wei.0, self.evm.max_slippage_bps) else {
+            env::panic_str("amount too large")
+        };
+        require!(min_out > 0, "minimum output rounds to zero");
+        let Some(cost) = u128::from(self.evm.gas_limit)
+            .checked_mul(self.evm.max_fee_per_gas.0)
+            .and_then(|gas| gas.checked_add(amount_wei.0))
+            .and_then(|wei| wei.checked_mul(self.evm.yocto_per_wei.0))
+        else {
+            env::panic_str("amount too large")
+        };
+        self.debit(&who, cost);
+        self.escrow += cost;
+        let pending = Pending {
+            id,
+            agent: who.clone(),
+            target,
+            value: amount_wei.0,
+            min_out,
+            deadline_s: env::block_timestamp() / 1_000_000_000 + SWAP_DEADLINE_S,
+            cost,
+            armed_until_ns: self.budgets.get(&who).map_or(0, |b| b.expires_ns),
+        };
+        let hash = hex(&env::keccak256_array(
+            self.swap_tx(&pending).build_for_signing(),
+        ));
         emit(
-            "spent",
+            "sign_requested",
             &near_sdk::serde_json::json!({
-                "id": id, "agent": who, "target": target, "recipient": recipient, "amount": amount,
+                "id": id, "agent": who, "target": pending.target, "amount_wei": amount_wei,
+                "min_out": U128(min_out), "nonce": self.evm_nonce, "hash": hash,
             }),
         );
-        // ponytail: virement sans rappel ; un destinataire supprime renvoie les fonds au contrat
-        // sans recrediter l'agent. Ajouter un callback si des destinataires peuvent disparaitre.
-        Promise::new(recipient).transfer(NearToken::from_yoctonear(amount.0))
+        self.signing = Some(pending);
+        let args = near_sdk::serde_json::json!({
+            "request": { "path": DERIVATION_PATH, "payload_v2": { "Ecdsa": hash }, "domain_id": 0 },
+        });
+        Promise::new(self.evm.mpc.clone())
+            .function_call(
+                "sign".to_owned(),
+                args.to_string().into_bytes(),
+                NearToken::from_yoctonear(1),
+                SIGN_GAS,
+            )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(CALLBACK_GAS)
+                    .on_signed(),
+            )
+    }
+
+    /// Callback de `sign` : assemble la transaction signee, la stocke avec la demande et renvoie
+    /// son hexadecimal. Sans signature lisible, rien n'est diffusable : le credit revient, le budget
+    /// aussi s'il s'agit du meme armement, le nonce reste libre. Ne panique pas apres avoir repris
+    /// l'achat en attente : un echec ici garderait le verrou pour toujours.
+    #[private]
+    pub fn on_signed(&mut self) -> Option<String> {
+        let Some(p) = self.signing.take() else {
+            env::panic_str("no signature in progress")
+        };
+        self.escrow -= p.cost;
+        let signature = env::promise_result_checked(0, MAX_SIGN_RESPONSE)
+            .ok()
+            .and_then(|bytes| parse_signature(&bytes));
+        let Some(signature) = signature else {
+            let credit = self.credit_of(&p.agent).0;
+            self.credits.insert(p.agent.clone(), credit + p.cost);
+            if let Some(budget) = self
+                .budgets
+                .get_mut(&p.agent)
+                .filter(|b| b.expires_ns == p.armed_until_ns)
+            {
+                budget.remaining += p.cost;
+            }
+            emit(
+                "sign_failed",
+                &near_sdk::serde_json::json!({ "id": p.id, "agent": p.agent }),
+            );
+            return None;
+        };
+        let raw = self.swap_tx(&p).build_with_signature(&signature);
+        let tx = format!("0x{}", hex(&raw));
+        emit(
+            "signed",
+            &near_sdk::serde_json::json!({
+                "id": p.id, "agent": p.agent, "target": p.target, "nonce": self.evm_nonce, "tx": tx,
+            }),
+        );
+        self.evm_nonce += 1;
+        self.fees += p.cost;
+        if let Some(check) = self.checks.get_mut(&p.id) {
+            check.settled = true;
+            check.signed_tx = Some(raw.into());
+        }
+        Some(tx)
+    }
+
+    /// Transaction EIP-1559 du swap WETH -> `p.target` sur le routeur, jetons vers l'adresse
+    /// derivee, au nonce courant ; tous les champs viennent de la garde.
+    fn swap_tx(&self, p: &Pending) -> EVMTransaction {
+        let mut input = SWAP_SELECTOR.to_vec();
+        for w in [
+            word(&p.min_out.to_be_bytes()),
+            word(&[0x80]), // position du tableau `path` apres les 4 mots de tete
+            word(&parse_eth_address(&self.evm.address[2..])),
+            word(&p.deadline_s.to_be_bytes()),
+            word(&[2]),
+            word(&parse_eth_address(WETH)),
+            word(&parse_eth_address(&p.target[2..])),
+        ] {
+            input.extend_from_slice(&w);
+        }
+        EVMTransaction {
+            chain_id: CHAIN_ID,
+            nonce: self.evm_nonce,
+            to: Some(parse_eth_address(ROUTER)),
+            value: p.value,
+            input,
+            gas_limit: self.evm.gas_limit.into(),
+            max_fee_per_gas: self.evm.max_fee_per_gas.0,
+            max_priority_fee_per_gas: self.evm.max_priority_fee_per_gas.0,
+            access_list: vec![],
+        }
     }
 
     /// Rend a l'agent le prix d'une demande restee sans verdict apres `VERDICT_TIMEOUT_NS`,
@@ -541,8 +789,9 @@ impl Guard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use near_sdk::test_utils::{get_logs, VMContextBuilder};
-    use near_sdk::{testing_env, NearToken};
+    use near_sdk::mock::MockAction;
+    use near_sdk::test_utils::{get_created_receipts, get_logs, VMContextBuilder};
+    use near_sdk::{testing_env, NearToken, PromiseResult};
 
     /// Unite des montants de test : PRICE = 0,01 NEAR, assez pour le stockage d'une demande.
     const U: u128 = 1_000_000_000_000_000_000_000;
@@ -550,9 +799,27 @@ mod tests {
     const ONE_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
     const SEC: u64 = 1_000_000_000;
     const TARGET: &str = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
+    /// Adresse de la cle privee 0x00..01 : tient lieu d'adresse derivee dans les vecteurs viem.
+    const ADDR: &str = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf";
+    const RATE: u128 = 1_000_000_000; // yoctoNEAR par wei : 1 ETH = 1000 NEAR
+    /// Devis de la sentinelle : jetons recus par l'achat simule de 0,01 ETH (USDC sur le fork).
+    const QUOTE: u128 = 20_435_000;
 
     fn id(s: &str) -> AccountId {
         s.parse().unwrap()
+    }
+
+    /// Gaz 250 000 a 0,05 gwei au plus, pourboire 0,001 gwei.
+    fn evm() -> EvmConfig {
+        EvmConfig {
+            mpc: id("mpc.test"),
+            address: ADDR.into(),
+            gas_limit: 250_000,
+            max_fee_per_gas: U128(50_000_000),
+            max_priority_fee_per_gas: U128(1_000_000),
+            yocto_per_wei: U128(RATE),
+            max_slippage_bps: 300,
+        }
     }
 
     fn ctx(who: &str, deposit: u128, now_ns: u64) {
@@ -571,6 +838,7 @@ mod tests {
             id("armer.test"),
             id("sentinel.test"),
             U128(PRICE),
+            evm(),
         )
     }
 
@@ -880,6 +1148,7 @@ mod tests {
             id("owner.test"),
             id("sentinel.test"),
             U128(PRICE),
+            evm(),
         );
         ctx("owner.test", 0, 0);
         g.set_bounds(U128(50 * U), 60, U128(100 * U));
@@ -959,6 +1228,7 @@ mod tests {
             id("intrus.test"),
             id("intrus.test"),
             U128(PRICE),
+            evm(),
         );
     }
 
@@ -970,8 +1240,8 @@ mod tests {
         let a = g.request_check(TARGET.into());
         let b = g.request_check(TARGET.into());
         ctx("sentinel.test", 0, 500);
-        g.post_verdict(a, Verdict::Allow, String::new(), String::new());
-        g.post_verdict(b, Verdict::Block, String::new(), String::new());
+        g.post_verdict(a, Verdict::Allow, String::new(), String::new(), U128(QUOTE));
+        g.post_verdict(b, Verdict::Block, String::new(), String::new(), U128(QUOTE));
         assert_eq!(g.fees(), U128(2 * PRICE));
         ctx("owner.test", 0, 500);
         let _ = g.withdraw_fees(U128(15 * U));
@@ -985,7 +1255,7 @@ mod tests {
         ctx("agent.test", 0, 500);
         let a = g.request_check(TARGET.into());
         ctx("sentinel.test", 0, 500);
-        g.post_verdict(a, Verdict::Allow, String::new(), String::new());
+        g.post_verdict(a, Verdict::Allow, String::new(), String::new(), U128(QUOTE));
         ctx("owner.test", 0, 500);
         let _ = g.withdraw_fees(U128(PRICE + 1));
     }
@@ -1032,6 +1302,7 @@ mod tests {
             Verdict::Block,
             "reprise par transferFrom".into(),
             "{\"block\":1}".into(),
+            U128(QUOTE),
         );
         let c = g.get_check(check).unwrap();
         assert_eq!(c.verdict, Some(Verdict::Block));
@@ -1049,7 +1320,13 @@ mod tests {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("agent.test", 0, 500);
         let check = g.request_check(TARGET.into());
-        g.post_verdict(check, Verdict::Allow, String::new(), String::new());
+        g.post_verdict(
+            check,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+        );
     }
 
     #[test]
@@ -1059,79 +1336,266 @@ mod tests {
         ctx("agent.test", 0, 500);
         let check = g.request_check(TARGET.into());
         ctx("sentinel.test", 0, 600);
-        g.post_verdict(check, Verdict::Block, String::new(), String::new());
-        g.post_verdict(check, Verdict::Allow, String::new(), String::new());
+        g.post_verdict(
+            check,
+            Verdict::Block,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+        );
+        g.post_verdict(
+            check,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+        );
     }
 
-    // 6. achat : verdict allow, destinataire permis, budget, un achat par verdict
+    // 6. achat signe par NEAR : la garde construit le swap pour la cible de la demande et le fait
+    // signer par le MPC ; l'agent ne choisit que le montant et le minimum de jetons recus.
+    const VALUE: u128 = 10_000_000_000_000; // 0,00001 ETH
+    /// Calcule par la garde : QUOTE ramene a VALUE (20 435), moins 3 % de glissement, arrondi bas.
+    const MIN_OUT: u128 = 19_821;
+    /// Valeur plus gaz au plafond (250 000 x 0,05 gwei), au taux fixe : 22,5 U.
+    const COST: u128 = (VALUE + 250_000 * 50_000_000) * RATE;
+    // Vecteurs viem 2.57 (serializeTransaction, keccak256, signTransaction avec la cle 0x00..01) :
+    // swap de VALUE wei, minimum MIN_OUT, chemin [WETH, TARGET], destinataire ADDR, echeance 300 s,
+    // gaz 250 000, frais 0,05 / 0,001 gwei, chain id 8453, nonce 0.
+    const HASH0: &str = "314bf89cb90d7232250c56241836f4ab662a81de9030d250712eedbcdd5fd5e0";
+    const R0: &str = "edd513dba0e03506152548756199a93ca6e97d19067f21b928c1d3d093b85058";
+    const S0: &str = "554415cb6774e8a2fa43e6b66b4326492d07b9a4dba38722e3e973885f70733d"; // y = 1
+    const RAW0: &str = "0x02f9015782210580830f42408402faf0808303d090944752ba5dbc23f44d87826276bf6fd6b1c372ad248609184e72a000b8e4b6f9de950000000000000000000000000000000000000000000000000000000000004d6d00000000000000000000000000000000000000000000000000000000000000800000000000000000000000007e5f4552091a69125d5dfcb7b8c2659029395bdf000000000000000000000000000000000000000000000000000000000000012c00000000000000000000000000000000000000000000000000000000000000020000000000000000000000004200000000000000000000000000000000000006000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7c001a0edd513dba0e03506152548756199a93ca6e97d19067f21b928c1d3d093b85058a0554415cb6774e8a2fa43e6b66b4326492d07b9a4dba38722e3e973885f70733d";
+    /// Meme swap au nonce 7, signature fictive r = 00aa..aa, s = 0000bb..bb, y = 1 : viem retire
+    /// les zeros de tete (entiers RLP canoniques).
+    const HASH7: &str = "09c441fe3699e56cd3c6d7646c8e3242427e00fd8816adc1b8c2b5771675fea0";
+    const RAW7: &str = "0x02f9015482210507830f42408402faf0808303d090944752ba5dbc23f44d87826276bf6fd6b1c372ad248609184e72a000b8e4b6f9de950000000000000000000000000000000000000000000000000000000000004d6d00000000000000000000000000000000000000000000000000000000000000800000000000000000000000007e5f4552091a69125d5dfcb7b8c2659029395bdf000000000000000000000000000000000000000000000000000000000000012c00000000000000000000000000000000000000000000000000000000000000020000000000000000000000004200000000000000000000000000000000000006000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7c0019faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa9ebbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
     fn judged(verdict: Verdict) -> (Guard, u64) {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
-        ctx("owner.test", 0, 0);
-        g.allow_recipient(id("shop.test"));
         ctx("agent.test", 0, 500);
         let check = g.request_check(TARGET.into());
         ctx("sentinel.test", 0, 600);
-        g.post_verdict(check, verdict, String::new(), String::new());
+        g.post_verdict(check, verdict, String::new(), String::new(), U128(QUOTE));
         ctx("agent.test", 0, 700);
         (g, check)
     }
 
+    fn buy(g: &mut Guard, check: u64) {
+        let _ = g.buy(check, U128(VALUE));
+    }
+
+    /// Reponse de `sign` au format de `v1.signer-prod.testnet` ; `big_r` = prefixe 02 + r.
+    fn mpc_response(r: &str, s: &str, recovery_id: u8) -> Vec<u8> {
+        format!(
+            r#"{{"big_r":{{"affine_point":"02{r}"}},"recovery_id":{recovery_id},"s":{{"scalar":"{s}"}},"scheme":"Secp256k1"}}"#
+        )
+        .into_bytes()
+    }
+
+    /// Le callback de la garde recoit `result`, le resultat de `sign`.
+    fn signed(g: &mut Guard, result: PromiseResult) -> Option<String> {
+        testing_env!(
+            VMContextBuilder::new()
+                .current_account_id(id("guard.test"))
+                .predecessor_account_id(id("guard.test"))
+                .block_timestamp(800)
+                .build(),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            std::collections::HashMap::default(),
+            vec![result],
+        );
+        g.on_signed()
+    }
+
+    /// Arguments de l'appel `sign` cree par `buy` (1 yoctoNEAR au MPC), suivi du callback.
+    fn sign_args() -> near_sdk::serde_json::Value {
+        let receipts = get_created_receipts();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].receiver_id, id("mpc.test"));
+        let MockAction::FunctionCallWeight {
+            method_name,
+            args,
+            attached_deposit,
+            ..
+        } = &receipts[0].actions[0]
+        else {
+            panic!("appel de sign attendu")
+        };
+        assert_eq!(method_name, b"sign");
+        assert_eq!(*attached_deposit, NearToken::from_yoctonear(1));
+        assert_eq!(receipts[1].receiver_id, id("guard.test"));
+        let MockAction::FunctionCallWeight { method_name, .. } = &receipts[1].actions[0] else {
+            panic!("callback attendu")
+        };
+        assert_eq!(method_name, b"on_signed");
+        near_sdk::serde_json::from_slice(args).unwrap()
+    }
+
     #[test]
-    fn achat_autorise_debite_et_journalise_la_cible() {
+    fn l_achat_fait_signer_au_mpc_le_hash_de_la_transaction_viem() {
+        let (mut g, check) = judged(Verdict::Allow);
+        buy(&mut g, check);
+        let args = sign_args();
+        assert_eq!(args["request"]["path"], DERIVATION_PATH);
+        assert_eq!(args["request"]["payload_v2"]["Ecdsa"], HASH0);
+        assert_eq!(args["request"]["domain_id"], 0);
+    }
+
+    #[test]
+    fn l_achat_debite_valeur_et_gaz_au_taux_fixe() {
         let (mut g, check) = judged(Verdict::Allow);
         let credit = g.credit_of(&id("agent.test")).0;
-        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
-        assert_eq!(g.credit_of(&id("agent.test")).0, credit - 30 * U);
-        assert_eq!(g.budget_left(&id("agent.test")).0, 100 * U - PRICE - 30 * U);
+        buy(&mut g, check);
+        assert_eq!(g.credit_of(&id("agent.test")).0, credit - COST);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 100 * U - PRICE - COST);
+        assert_eq!(g.fees(), U128(PRICE)); // le cout reste sous sequestre jusqu'a la signature
         let v = last_event();
-        assert_eq!(v["event"], "spent");
+        assert_eq!(v["event"], "sign_requested");
         assert_eq!(v["data"][0]["target"], TARGET);
-        assert_eq!(v["data"][0]["recipient"], "shop.test");
-        assert_eq!(v["data"][0]["amount"], (30 * U).to_string());
+        assert_eq!(v["data"][0]["nonce"], 0);
+        assert_eq!(v["data"][0]["hash"], HASH0);
+        assert_eq!(v["data"][0]["min_out"], MIN_OUT.to_string());
+    }
+
+    // la cible, le routeur, le destinataire et le chemin viennent de la garde : le vecteur viem
+    // achete TARGET (la cible de la demande) pour ADDR via le routeur Uniswap V2 de Base
+    #[test]
+    fn la_signature_du_mpc_donne_la_transaction_viem() {
+        let (mut g, check) = judged(Verdict::Allow);
+        buy(&mut g, check);
+        let raw = signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        assert_eq!(raw.as_deref(), Some(RAW0));
+        let c = g.get_check(check).unwrap();
+        assert!(c.settled);
+        assert_eq!(format!("0x{}", hex(&c.signed_tx.as_ref().unwrap().0)), RAW0);
+        assert_eq!(g.fees(), U128(PRICE + COST));
+        assert_eq!(g.evm_nonce, 1);
+        let v = last_event();
+        assert_eq!(v["event"], "signed");
+        assert_eq!(v["data"][0]["tx"], RAW0);
+    }
+
+    #[test]
+    fn r_et_s_sont_encodes_sans_zero_de_tete() {
+        let (mut g, check) = judged(Verdict::Allow);
+        g.evm_nonce = 7;
+        buy(&mut g, check);
+        assert_eq!(sign_args()["request"]["payload_v2"]["Ecdsa"], HASH7);
+        let r = format!("00{}", "aa".repeat(31));
+        let s = format!("0000{}", "bb".repeat(30));
+        let raw = signed(&mut g, PromiseResult::Successful(mpc_response(&r, &s, 1)));
+        assert_eq!(raw.as_deref(), Some(RAW7));
+        assert_eq!(g.evm_nonce, 8);
+    }
+
+    // sans signature rien n'est diffusable : credit et budget reviennent, le nonce reste libre
+    #[test]
+    fn un_echec_de_signature_rend_credit_budget_et_nonce() {
+        let (mut g, check) = judged(Verdict::Allow);
+        let credit = g.credit_of(&id("agent.test")).0;
+        buy(&mut g, check);
+        assert_eq!(signed(&mut g, PromiseResult::Failed), None);
+        assert_eq!(g.credit_of(&id("agent.test")).0, credit);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 100 * U - PRICE);
+        assert_eq!(g.fees(), U128(PRICE));
+        assert_eq!(g.evm_nonce, 0);
+        assert!(!g.get_check(check).unwrap().settled);
+        assert_eq!(last_event()["event"], "sign_failed");
+        ctx("agent.test", 0, 900); // verrou libere : l'agent reessaie, au meme nonce
+        buy(&mut g, check);
+        assert_eq!(sign_args()["request"]["payload_v2"]["Ecdsa"], HASH0);
+    }
+
+    #[test]
+    fn une_reponse_illisible_vaut_un_echec() {
+        let bad = [
+            b"not json".to_vec(),
+            b"{\"oops\":1}".to_vec(),
+            mpc_response(R0, &S0[2..], 0), // s sur 31 octets
+            mpc_response(&R0[2..], S0, 0), // big_r sur 32 octets
+            mpc_response("zz", S0, 0),
+            mpc_response(R0, S0, 2),
+        ];
+        for response in bad {
+            let (mut g, check) = judged(Verdict::Allow);
+            buy(&mut g, check);
+            assert_eq!(signed(&mut g, PromiseResult::Successful(response)), None);
+            assert_eq!(g.budget_left(&id("agent.test")).0, 100 * U - PRICE);
+            assert_eq!(g.evm_nonce, 0);
+        }
+    }
+
+    // le budget n'est rendu qu'a l'armement debite : ni a un rearmement, ni apres l'arret d'urgence
+    #[test]
+    fn un_echec_apres_rearmement_ne_regonfle_pas_le_nouveau_budget() {
+        let (mut g, check) = judged(Verdict::Allow);
+        let credit = g.credit_of(&id("agent.test")).0;
+        buy(&mut g, check);
+        arm_at(&mut g, 30 * U, 1000, 750);
+        signed(&mut g, PromiseResult::Failed);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 30 * U);
+        assert_eq!(g.credit_of(&id("agent.test")).0, credit);
+    }
+
+    #[test]
+    fn un_echec_apres_l_arret_d_urgence_ne_rend_pas_le_budget() {
+        let (mut g, check) = judged(Verdict::Allow);
+        buy(&mut g, check);
+        ctx("owner.test", 0, 750);
+        g.disarm(id("agent.test"));
+        signed(&mut g, PromiseResult::Failed);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 0);
+    }
+
+    // reentrance : une demande en cours de signature ne s'achete pas deux fois
+    #[test]
+    #[should_panic(expected = "a signature is already in progress")]
+    fn pas_de_second_achat_pendant_la_signature() {
+        let (mut g, check) = judged(Verdict::Allow);
+        buy(&mut g, check);
+        buy(&mut g, check);
+    }
+
+    #[test]
+    #[should_panic(expected = "check already settled")]
+    fn un_seul_achat_par_verdict() {
+        let (mut g, check) = judged(Verdict::Allow);
+        buy(&mut g, check);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        ctx("agent.test", 0, 900);
+        buy(&mut g, check);
     }
 
     #[test]
     #[should_panic(expected = "verdict does not allow the purchase")]
     fn achat_refuse_sur_block() {
         let (mut g, check) = judged(Verdict::Block);
-        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
+        buy(&mut g, check);
     }
 
     #[test]
     #[should_panic(expected = "verdict does not allow the purchase")]
     fn achat_refuse_sur_warn_sans_humain() {
         let (mut g, check) = judged(Verdict::Warn);
-        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
+        buy(&mut g, check);
     }
 
     #[test]
     #[should_panic(expected = "no verdict yet")]
     fn achat_refuse_sans_verdict() {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
-        ctx("owner.test", 0, 0);
-        g.allow_recipient(id("shop.test"));
         ctx("agent.test", 0, 500);
         let check = g.request_check(TARGET.into());
-        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
-    }
-
-    #[test]
-    #[should_panic(expected = "recipient not allowed")]
-    fn achat_refuse_vers_un_destinataire_non_permis() {
-        let (mut g, check) = judged(Verdict::Allow);
-        let _ = g.spend(check, TARGET.into(), id("attacker.test"), U128(30 * U));
+        buy(&mut g, check);
     }
 
     #[test]
     #[should_panic(expected = "budget exceeded")]
     fn achat_refuse_au_dela_du_budget_arme() {
         let (mut g, check) = judged(Verdict::Allow);
-        let _ = g.spend(
-            check,
-            TARGET.into(),
-            id("shop.test"),
-            U128(100 * U - PRICE + 1),
-        );
+        let _ = g.buy(check, U128(10 * VALUE));
     }
 
     #[test]
@@ -1139,7 +1603,7 @@ mod tests {
     fn achat_refuse_apres_l_echeance() {
         let (mut g, check) = judged(Verdict::Allow);
         ctx("agent.test", 0, SEC);
-        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
+        buy(&mut g, check);
     }
 
     #[test]
@@ -1147,39 +1611,114 @@ mod tests {
     fn achat_refuse_a_un_autre_agent() {
         let (mut g, check) = judged(Verdict::Allow);
         ctx("intrus.test", 0, 700);
-        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
+        buy(&mut g, check);
     }
 
-    // un verdict ne paie que l'achat du jeton controle : un allow sur USDC ne paie pas un piege
     #[test]
-    #[should_panic(expected = "target differs from the checked token")]
-    fn achat_refuse_pour_un_autre_jeton_que_celui_controle() {
+    #[should_panic(expected = "zero amount")]
+    fn achat_de_zero_wei_refuse() {
         let (mut g, check) = judged(Verdict::Allow);
-        let piege = "0xaabfF6E27fdc021573753978741a5F88e01000C8";
-        let _ = g.spend(check, piege.into(), id("shop.test"), U128(30 * U));
+        let _ = g.buy(check, U128(0));
     }
 
     #[test]
-    fn la_cible_de_l_achat_se_compare_sans_la_casse() {
+    #[should_panic(expected = "amount too large")]
+    fn montant_qui_deborde_au_taux_refuse() {
         let (mut g, check) = judged(Verdict::Allow);
-        let _ = g.spend(check, TARGET.to_lowercase(), id("shop.test"), U128(30 * U));
-        assert!(g.get_check(check).unwrap().settled);
+        let _ = g.buy(check, U128(u128::MAX));
+    }
+
+    // devis : poste par la sentinelle avec son verdict, base du minimum de jetons calcule par la garde
+    #[test]
+    fn le_devis_est_stocke_et_journalise_avec_le_verdict() {
+        let (mut g, check) = pending();
+        ctx("sentinel.test", 0, 1);
+        g.post_verdict(
+            check,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+        );
+        assert_eq!(g.get_check(check).unwrap().quote, U128(QUOTE));
+        let v = last_event();
+        assert_eq!(v["event"], "verdict_posted");
+        assert_eq!(v["data"][0]["quote"], QUOTE.to_string());
     }
 
     #[test]
-    #[should_panic(expected = "check already settled")]
-    fn un_seul_achat_par_verdict() {
+    #[should_panic(expected = "allow without a quote")]
+    fn un_allow_sans_devis_est_refuse() {
+        let (mut g, check) = pending();
+        ctx("sentinel.test", 0, 1);
+        g.post_verdict(check, Verdict::Allow, String::new(), String::new(), U128(0));
+    }
+
+    #[test]
+    fn un_block_sans_devis_est_accepte() {
+        let (mut g, check) = pending();
+        ctx("sentinel.test", 0, 1);
+        g.post_verdict(check, Verdict::Block, String::new(), String::new(), U128(0));
+        assert_eq!(g.get_check(check).unwrap().verdict, Some(Verdict::Block));
+    }
+
+    #[test]
+    fn le_minimum_recu_suit_le_devis_sans_debordement() {
+        assert_eq!(min_out(QUOTE, VALUE, 300), Some(MIN_OUT));
+        assert_eq!(min_out(QUOTE, VALUE, 0), Some(20_435));
+        // jeton a 18 decimales tres bon marche : quote * amount depasserait u128
+        let quote = 10u128.pow(30);
+        assert_eq!(
+            min_out(quote, 10u128.pow(14), 300),
+            Some(97 * 10u128.pow(26))
+        );
+        assert_eq!(min_out(u128::MAX, u128::MAX, 300), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "minimum output rounds to zero")]
+    fn un_achat_dont_le_minimum_est_nul_est_refuse() {
         let (mut g, check) = judged(Verdict::Allow);
-        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
-        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
+        let _ = g.buy(check, U128(1));
     }
 
     #[test]
-    #[should_panic(expected = "owner only")]
-    fn seul_le_proprietaire_permet_un_destinataire() {
-        let mut g = guard();
-        ctx("agent.test", 0, 0);
-        g.allow_recipient(id("attacker.test"));
+    fn une_configuration_evm_invalide_est_refusee() {
+        let bad = [
+            EvmConfig {
+                address: "0x1234".into(),
+                ..evm()
+            },
+            EvmConfig {
+                max_priority_fee_per_gas: U128(50_000_001),
+                ..evm()
+            },
+            EvmConfig {
+                yocto_per_wei: U128(0),
+                ..evm()
+            },
+            EvmConfig {
+                gas_limit: 0,
+                ..evm()
+            },
+            EvmConfig {
+                max_slippage_bps: 10_000,
+                ..evm()
+            },
+        ];
+        for config in bad {
+            ctx("guard.test", 0, 0);
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Guard::new(
+                    id("owner.test"),
+                    id("armer.test"),
+                    id("sentinel.test"),
+                    U128(PRICE),
+                    config,
+                )
+            }));
+            assert!(r.is_err(), "configuration acceptee a tort");
+        }
     }
 
     // 7. credit depose par l'humain pour l'agent (sa cle function-call ne peut rien attacher)
@@ -1406,7 +1945,13 @@ mod tests {
     fn pas_de_remboursement_apres_un_verdict() {
         let (mut g, check) = pending();
         ctx("sentinel.test", 0, 1);
-        g.post_verdict(check, Verdict::Allow, String::new(), String::new());
+        g.post_verdict(
+            check,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+        );
         ctx("agent.test", 0, VERDICT_TIMEOUT_NS);
         g.refund_check(check);
     }
@@ -1427,7 +1972,13 @@ mod tests {
         ctx("agent.test", 0, VERDICT_TIMEOUT_NS);
         g.refund_check(check);
         ctx("sentinel.test", 0, VERDICT_TIMEOUT_NS);
-        g.post_verdict(check, Verdict::Allow, String::new(), String::new());
+        g.post_verdict(
+            check,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+        );
     }
 
     #[test]
@@ -1453,7 +2004,13 @@ mod tests {
         let (mut g, check) = pending();
         assert_eq!(g.get_check(check).unwrap().evidence_sha256, "");
         ctx("sentinel.test", 0, 1);
-        g.post_verdict(check, Verdict::Block, String::new(), "abc".into());
+        g.post_verdict(
+            check,
+            Verdict::Block,
+            String::new(),
+            "abc".into(),
+            U128(QUOTE),
+        );
         let v = near_sdk::serde_json::to_value(g.get_check(check).unwrap()).unwrap();
         assert_eq!(
             v["evidence_sha256"],
@@ -1467,7 +2024,13 @@ mod tests {
         let big = id(&"a".repeat(64));
         ctx("guard.test", 0, 0);
         // l'agent est aussi la sentinelle : demande et verdict dans le meme contexte de mesure
-        let mut g = Guard::new(id("owner.test"), id("armer.test"), big.clone(), U128(PRICE));
+        let mut g = Guard::new(
+            id("owner.test"),
+            id("armer.test"),
+            big.clone(),
+            U128(PRICE),
+            evm(),
+        );
         ctx("owner.test", 0, 0);
         g.set_bounds(U128(100 * U), 1000, U128(1000 * U));
         g.register_agent(big.clone());
@@ -1487,7 +2050,13 @@ mod tests {
             Verdict::Block,
             "r".repeat(MAX_REASONS),
             "e".repeat(MAX_EVIDENCE),
+            U128(QUOTE),
         );
+        // Transaction signee la plus longue : type 1, en-tete de liste 3, chain id 3, nonce 9,
+        // frais 17 + 17, gaz 9, routeur 21, valeur 17, donnees 3 + 228, acces 1, v 1, r 33, s 33.
+        let check = g.checks.get_mut(&check).unwrap();
+        check.signed_tx = Some(vec![0xff; 396].into());
+        check.settled = true;
         g.checks.flush();
         g.credits.flush();
         g.budgets.flush();
@@ -1502,7 +2071,13 @@ mod tests {
     fn le_verdict_rend_le_prix_retirable() {
         let (mut g, check) = pending();
         ctx("sentinel.test", 0, 1);
-        g.post_verdict(check, Verdict::Allow, String::new(), String::new());
+        g.post_verdict(
+            check,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+        );
         assert_eq!(g.fees(), U128(PRICE));
     }
 
@@ -1516,6 +2091,7 @@ mod tests {
             id("armer.test"),
             id("sentinel.test"),
             U128(U),
+            evm(),
         );
     }
 
@@ -1539,15 +2115,19 @@ mod tests {
         assert_eq!(g.last_check_id(), 2);
     }
 
-    // 14. un verdict perime ne paie plus : la cible a pu changer depuis le controle
+    // 14. un verdict perime n'achete plus : la cible a pu changer depuis le controle
     fn judged_at_1s() -> (Guard, u64) {
         let mut g = funded(ONE_NEAR, 100 * U, 1000);
-        ctx("owner.test", 0, 0);
-        g.allow_recipient(id("shop.test"));
         ctx("agent.test", 0, 0);
         let check = g.request_check(TARGET.into());
         ctx("sentinel.test", 0, SEC);
-        g.post_verdict(check, Verdict::Allow, String::new(), String::new());
+        g.post_verdict(
+            check,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+        );
         (g, check)
     }
 
@@ -1558,11 +2138,11 @@ mod tests {
     }
 
     #[test]
-    fn achat_paye_juste_avant_l_echeance_du_verdict() {
+    fn achat_signe_juste_avant_l_echeance_du_verdict() {
         let (mut g, check) = judged_at_1s();
         ctx("agent.test", 0, SEC + VERDICT_TTL_NS - 1);
-        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
-        assert!(g.get_check(check).unwrap().settled);
+        buy(&mut g, check);
+        assert_eq!(sign_args()["request"]["path"], DERIVATION_PATH);
     }
 
     #[test]
@@ -1570,6 +2150,6 @@ mod tests {
     fn achat_refuse_sur_verdict_perime() {
         let (mut g, check) = judged_at_1s();
         ctx("agent.test", 0, SEC + VERDICT_TTL_NS);
-        let _ = g.spend(check, TARGET.into(), id("shop.test"), U128(30 * U));
+        buy(&mut g, check);
     }
 }

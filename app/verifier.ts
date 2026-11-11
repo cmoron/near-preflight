@@ -18,6 +18,7 @@ import {
 
 export const ROUTER: Address = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"; // Uniswap V2 Router02 (Base)
 export const WETH: Address = "0x4200000000000000000000000000000000000006";
+/** Achat simule ; le devis poste est en jetons pour ce montant (QUOTE_WEI dans src/lib.rs). */
 const BUY = parseEther("0.01");
 /** Le premier bloc simule suit le bloc de la preuve, 2 s apres lui (rythme des blocs de Base) ;
  *  la premiere vente est simulee au bloc d'apres, encore 2 s plus tard. */
@@ -69,6 +70,9 @@ export type Report = {
     /** Implementation derriere un proxy (EIP-1967 ou ZeppelinOS), sinon null. */
     implementation: Address | null;
     calls: string[];
+    /** Devis : jetons recus par l'achat simule de 0,01 ETH (decimal, "0" sans achat) ; la garde en
+     *  tire le minimum de jetons du swap qu'elle fait signer. */
+    quote: string;
   };
   /** Requete et reponse completes, pour rejouer la simulation au meme bloc. */
   request: { method: string; params: unknown[] };
@@ -284,6 +288,13 @@ export function judge(labels: string[], results: Result[]): { verdict: Verdict; 
   return { verdict, reasons: reasons.slice(0, 280) };
 }
 
+/** Devis poste avec le verdict : jetons recus par l'achat simule de 0,01 ETH (0 sans achat), tire de
+ *  la reponse seule, donc rejouable (voir app/replay.ts). */
+export function quoteOf(labels: string[], results: Result[]): bigint {
+  const { amount } = buyStage(byLabel(labels, results));
+  return amount > 0n ? amount : 0n;
+}
+
 export const byLabel = (labels: string[], results: Result[]) => Object.fromEntries(labels.map((l, i) => [l, results[i]]));
 
 function report(
@@ -300,6 +311,7 @@ function report(
     code_hash: proof.code_hash,
     implementation: proof.implementation,
     calls: sim.results.map((res, i) => `${labels[i]}: ${ok(res) ? "ok" : "revert"}`),
+    quote: quoteOf(labels, sim.results).toString(),
   };
   if (JSON.stringify(evidence).length > 8000) throw new Error("evidence above 8000 characters");
   return { verdict, reasons, evidence, request: sim.request, response: sim.results };

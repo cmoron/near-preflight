@@ -4,6 +4,7 @@
 import { actions, KeyPair, nearToYocto, teraToGas } from "near-api-js";
 import { homedir } from "node:os";
 import { mkdir } from "node:fs/promises";
+import { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH, MPC_CONTRACT } from "./derive";
 import { account, humanAccount, provider, RPC, writeSecret } from "./near";
 
 const parent = process.argv[2];
@@ -13,6 +14,16 @@ const id = (name: string) => `${name}.${parent}`;
 const PRICE = nearToYocto("0.01"); // prix d'un verdict, couvre le stockage d'une demande
 // Bornes de demo fixees par l'humain : 0,1 NEAR par armement, 1 h au plus, 0,5 NEAR sur 7 jours.
 const BOUNDS = { max_budget: nearToYocto("0.1").toString(), max_duration_s: 3600, max_7d: nearToYocto("0.5").toString() };
+// Achat EVM fixe par l'humain : gaz 250 000 (un swap V2 en use ~140 000 sur le fork), frais au plus
+// 0,05 gwei (base fee de Base ~0,005 gwei), pourboire 0,001 gwei ; budget debite a 1 ETH = 1000 NEAR ;
+// minimum de jetons = devis de la sentinelle moins 3 %.
+const EVM = {
+  gas_limit: 250_000,
+  max_fee_per_gas: "50000000",
+  max_priority_fee_per_gas: "1000000",
+  yocto_per_wei: "1000000000",
+  max_slippage_bps: 300,
+};
 
 /** Cree un sous-compte, range sa cle complete dans le trousseau de l'humain, pas dans le depot. */
 async function subAccount(name: string, near: `${number}`): Promise<string> {
@@ -27,16 +38,16 @@ async function subAccount(name: string, near: `${number}`): Promise<string> {
 }
 
 /** Ajoute une cle function-call limitee a la garde et a `methods` ; seule cle remise au logiciel. */
-async function scopedKey(name: string, methods: string[]): Promise<string> {
+async function scopedKey(name: string, methods: string[], allowance: `${number}` = "0.25"): Promise<string> {
   const owner = await humanAccount(id(name));
   const key = KeyPair.fromRandom("ed25519");
   await owner.addFunctionCallAccessKey({
     publicKey: key.getPublicKey(),
     contractId: id("guard"),
     methodNames: methods,
-    allowance: nearToYocto("0.25"), // plafond de gaz de la cle
+    allowance: nearToYocto(allowance), // plafond de gaz de la cle
   });
-  console.log(`function-call key of ${id(name)}: ${id("guard")} [${methods.join(", ")}], 0.25 NEAR gas allowance`);
+  console.log(`function-call key of ${id(name)}: ${id("guard")} [${methods.join(", ")}], ${allowance} NEAR gas allowance`);
   return key.toString();
 }
 
@@ -44,7 +55,8 @@ const guardKey = await subAccount("guard", "3");
 await subAccount("agent", "0.5");
 await subAccount("sentinel", "0.5");
 await subAccount("armer", "0.3");
-await subAccount("shop", "0.1");
+// Adresse EVM que NEAR signe pour la garde : derivee de la cle maitresse du MPC, du compte et du chemin fixe.
+const evmAddress = deriveEvmAddress(await fetchMasterPublicKey(), id("guard"), GUARD_PATH);
 
 const wasm = await Bun.file("target/near/goblin_near.wasm").bytes();
 const guard = account(id("guard"), guardKey);
@@ -54,22 +66,31 @@ await guard.signAndSendTransaction({
     actions.deployContract(wasm),
     actions.functionCall(
       "new",
-      { owner: parent, armer: id("armer"), sentinel: id("sentinel"), price: PRICE.toString() },
+      {
+        owner: parent,
+        armer: id("armer"),
+        sentinel: id("sentinel"),
+        price: PRICE.toString(),
+        evm: { mpc: MPC_CONTRACT, address: evmAddress, ...EVM },
+      },
       teraToGas("100"),
       0n,
     ),
   ],
 });
 console.log(`guard deployed and initialized on ${id("guard")} (owner ${parent}, armer ${id("armer")}, price 0.01 NEAR)`);
+console.log(`derived EVM address of ${id("guard")} (path ${GUARD_PATH}, signer ${MPC_CONTRACT}): ${evmAddress}`);
 
-const agentKey = await scopedKey("agent", ["request_check", "spend", "refund_check"]);
+// buy attache 100 TGas : le protocole exige 0,101 NEAR d'allocation libre pour l'envoyer (gaz au prix
+// pessimiste), puis ne retire que le gaz brule (mesure : 0,0014 NEAR par achat signe, 0,004 NEAR pour
+// toute la demo). 0,5 NEAR, le solde du compte de l'agent qui paie ce gaz : une centaine de demos.
+const agentKey = await scopedKey("agent", ["request_check", "buy", "refund_check"], "0.5");
 const sentinelKey = await scopedKey("sentinel", ["post_verdict"]);
 const armerKey = await scopedKey("armer", ["arm", "disarm"]);
 
 const owner = (methodName: string, args: Record<string, unknown>) => human.callFunction({ contractId: id("guard"), methodName, args });
 await owner("set_bounds", BOUNDS);
 await owner("register_agent", { agent: id("agent") });
-await owner("allow_recipient", { account: id("shop") });
 console.log(`bounds: 0.1 NEAR per arming, 3600 s max, 0.5 NEAR per 7 days; ${id("agent")} registered`);
 await human.callFunction({
   contractId: id("guard"),
@@ -77,7 +98,7 @@ await human.callFunction({
   args: { account_id: id("agent") },
   deposit: nearToYocto("1"),
 });
-console.log(`${id("shop")} allowed as recipient; 1 NEAR of credit deposited for ${id("agent")}`);
+console.log(`1 NEAR of credit deposited for ${id("agent")}`);
 
 // Config partagee sans cle ; chaque cle function-call dans son fichier, charge par son seul processus
 // (bun --env-file=.env --env-file=.env.agent ...) : l'agent ne lit jamais la cle de la sentinelle
@@ -90,7 +111,6 @@ await write(".env", [
   `AGENT=${id("agent")}`,
   `SENTINEL=${id("sentinel")}`,
   `ARMER=${id("armer")}`,
-  `SHOP=${id("shop")}`,
   `EVM_RPC=http://127.0.0.1:8545`,
 ]);
 await write(".env.agent", [`AGENT_KEY=${agentKey}`]);

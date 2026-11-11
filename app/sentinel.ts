@@ -35,8 +35,8 @@ if (import.meta.main) {
     for (const c of r.evidence.calls) log(`#${id}   ${c}`);
     const proof = toProof(id, check.target, r);
     await Bun.write(`proofs/${id}.json`, JSON.stringify(proof, null, 2));
-    const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence });
-    log(`#${id} : ${r.verdict.toUpperCase()} (${r.reasons}), block ${r.evidence.block}, proof proofs/${id}.json  ${tx}`);
+    const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote });
+    log(`#${id} : ${r.verdict.toUpperCase()} (${r.reasons}), quote ${r.evidence.quote} for 0.01 ETH, block ${r.evidence.block}, proof proofs/${id}.json  ${tx}`);
   };
 
   const scan = async () => {
@@ -69,6 +69,7 @@ if (import.meta.main) {
               verdict: "block",
               reasons: `simulation impossible after ${MAX_TRIES} tries : ${msg}`.slice(0, 280),
               evidence: JSON.stringify({ error: msg.slice(0, 1000) }),
+              quote: "0",
             });
             log(`#${next} : BLOCK, simulation impossible (${msg})  ${tx}`);
           } catch (e2) {

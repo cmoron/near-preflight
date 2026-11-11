@@ -11,7 +11,9 @@ const check = (verdict: Check["verdict"]): Check => ({
   reasons: "",
   judged_ns: "0",
   evidence_sha256: "",
+  quote: "0",
   settled: false,
+  signed_tx: null,
 });
 
 test("absente sur un noeud en retard sur last_check_id : relue au tour suivant, pas sautee", () => {

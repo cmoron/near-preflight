@@ -32,6 +32,7 @@ const onChain = (p: Proof, over: Partial<NonNullable<OnChain>> = {}) => async ()
   verdict: p.verdict,
   reasons: p.reasons,
   evidence_sha256: hashOf(p.evidence),
+  quote: evidenceOf(p).quote,
   requested_ns: "0",
   judged_ns: "0",
   ...over,
@@ -125,6 +126,12 @@ describe("replay : la chaine evidence est celle postee en chaine", () => {
     expect(bad.length).toBe(1);
     expect(bad[0]).toContain("chain id");
   });
+  test("un devis altere dans evidence est detecte (rejoue depuis la reponse)", async () => {
+    const proof = withEvidence(await proofOf(), (e) => (e.quote = "1"));
+    const bad = failed(await replay(proof, RPC));
+    expect(bad.length).toBe(1);
+    expect(bad[0]).toContain("quote");
+  });
   test("une implementation de proxy alteree dans evidence est detectee (USDC)", async () => {
     const proof = withEvidence(await proofOf(tokens.usdc as Address), (e) => (e.implementation = DEPLOYER.toLowerCase()));
     const bad = failed(await replay(proof, RPC));
@@ -170,6 +177,12 @@ describe("replay --check : verdict en chaine", () => {
     const bad = failed(await replay(proof, RPC, { check: true, chain: onChain(proof, { reasons: "nothing" }) }));
     expect(bad.length).toBe(1);
     expect(bad[0]).toContain("on-chain");
+  });
+  test("devis en chaine different de celui de la preuve : refus", async () => {
+    const proof = await proofOf();
+    const bad = failed(await replay(proof, RPC, { check: true, chain: onChain(proof, { quote: "1" }) }));
+    expect(bad.length).toBe(1);
+    expect(bad[0]).toContain("quote");
   });
   test("demande absente ou sans verdict en chaine : refus", async () => {
     const proof = await proofOf();

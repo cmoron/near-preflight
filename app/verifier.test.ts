@@ -1,8 +1,10 @@
 // Les controles de la sentinelle contre la copie locale de Base (lancer evm/fork.sh d'abord).
 import { describe, expect, test } from "bun:test";
-import { keccak256 } from "viem";
+import { decodeAbiParameters, encodeFunctionData, keccak256, parseAbi, parseEther, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
-import { checkToken } from "./verifier";
+import { checkToken, ROUTER, rpc, WETH } from "./verifier";
+
+const quoteAbi = parseAbi(["function getAmountsOut(uint256,address[]) view returns (uint256[])"]);
 
 const RPC = process.env.EVM_RPC ?? "http://127.0.0.1:8545";
 const check = (token: string) => checkToken(RPC, token as `0x${string}`);
@@ -48,6 +50,19 @@ describe("verdict de la sentinelle", () => {
     const r = await check(tokens.sim_detector);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("sale refused in the next block"); // le routeur masque la raison du jeton
+  });
+});
+
+describe("devis poste avec le verdict", () => {
+  test("USDC, sans taxe : jetons recus par l'achat simule de 0,01 ETH = sortie du pool au bloc", async () => {
+    const r = await check(tokens.usdc);
+    const out = await rpc<Hex>(RPC, "eth_call", [
+      { to: ROUTER, data: encodeFunctionData({ abi: quoteAbi, args: [parseEther("0.01"), [WETH, tokens.usdc as Address]] }) },
+      `0x${r.evidence.block.toString(16)}`,
+    ]);
+    const [amounts] = decodeAbiParameters([{ type: "uint256[]" }], out);
+    expect(r.evidence.quote).toBe(amounts[1].toString());
+    expect(BigInt(r.evidence.quote)).toBeGreaterThan(0n);
   });
 });
 

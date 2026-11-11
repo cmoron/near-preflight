@@ -7,6 +7,8 @@ import bs58 from "bs58";
 import { keccak256, toHex, getAddress, type Hex } from "viem";
 
 export const MPC_CONTRACT = "v1.signer-prod.testnet";
+/** Chemin de derivation de la garde, fixe par le contrat (DERIVATION_PATH dans src/lib.rs). */
+export const GUARD_PATH = "evm-1";
 const RPC = "https://rpc.testnet.near.org";
 
 // Cle maitresse "secp256k1:<base58 de x||y>" -> 64 octets

@@ -1,5 +1,5 @@
 // Acces NEAR partage : configuration lue dans .env (bun la charge seul), cles hors depot.
-import { Account, getTransactionLastResult, JsonRpcProvider } from "near-api-js";
+import { Account, getTransactionLastResult, JsonRpcProvider, yoctoToNear } from "near-api-js";
 import { chmod, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 
@@ -56,10 +56,14 @@ export function reason(e: unknown): string {
 
 export const explorer = (tx: string) => `https://testnet.nearblocks.io/txns/${tx}`;
 
-/** Appel de la garde signe par `who` ; renvoie la valeur et le lien de la transaction. */
-export async function call<T>(who: Account, methodName: string, args: Record<string, unknown>, deposit = 0n) {
-  const raw = await who.callFunctionRaw({ contractId: env("GUARD"), methodName, args, deposit });
-  return { value: getTransactionLastResult(raw) as T, tx: explorer(raw.transaction.hash) };
+/** Appel de la garde signe par `who` ; renvoie la valeur, le lien de la transaction et ce qu'elle a
+ *  brule (gaz et NEAR, toutes ses receipts comprises : appel MPC et callback pour un achat). */
+export async function call<T>(who: Account, methodName: string, args: Record<string, unknown>, deposit = 0n, gas?: bigint) {
+  const raw = await who.callFunctionRaw({ contractId: env("GUARD"), methodName, args, deposit, ...(gas ? { gas } : {}) });
+  const outcomes = [raw.transaction_outcome, ...raw.receipts_outcome].map((o) => o.outcome);
+  const tgas = outcomes.reduce((n, o) => n + Number(o.gas_burnt), 0) / 1e12;
+  const near = outcomes.reduce((n, o) => n + BigInt(o.tokens_burnt), 0n);
+  return { value: getTransactionLastResult(raw) as T, tx: explorer(raw.transaction.hash), burnt: `${tgas.toFixed(1)} TGas, ${yoctoToNear(near)} NEAR burnt` };
 }
 
 export type Check = {
@@ -72,5 +76,9 @@ export type Check = {
   judged_ns: string;
   /** sha256 (hexadecimal) de la chaine evidence postee avec le verdict ; vide sans verdict. */
   evidence_sha256: string;
+  /** Jetons recus par l'achat simule de 0,01 ETH (decimal) ; la garde en tire le minimum du swap. */
+  quote: string;
   settled: boolean;
+  /** Transaction EIP-1559 signee par le MPC pour l'achat (base64), null tant qu'il n'y en a pas. */
+  signed_tx: string | null;
 };
