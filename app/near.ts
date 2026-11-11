@@ -54,5 +54,7 @@ export type Check = {
   requested_ns: string;
   verdict: "allow" | "warn" | "block" | null;
   reasons: string;
+  /** Heure du verdict, en nanosecondes (chaine). */
+  judged_ns: string;
   settled: boolean;
 };

@@ -3,6 +3,7 @@
 import {
   decodeAbiParameters,
   decodeFunctionResult,
+  keccak256,
   encodeFunctionData,
   maxUint256,
   parseAbi,
@@ -18,7 +19,13 @@ import {
 const ROUTER: Address = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"; // Uniswap V2 Router02 (Base)
 const WETH: Address = "0x4200000000000000000000000000000000000006";
 const BUY = parseEther("0.01");
-const LATER_S = 3600; // la seconde vente est simulee une heure apres l'achat
+const NEXT_S = 2n; // la premiere vente est simulee au bloc suivant, 2 s apres l'achat
+const LATER_S = 3600n; // la seconde vente est simulee une heure apres l'achat
+// Emplacements de l'adresse d'implementation d'un proxy : EIP-1967, puis ZeppelinOS (USDC).
+const IMPL_SLOTS = [
+  "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc",
+  "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3",
+];
 const TAX_WARN = 0.1; // perte au-dela du devis du pool : avertir a 10 %, bloquer a 50 %
 const TAX_BLOCK = 0.5;
 
@@ -42,7 +49,17 @@ export type Report = {
   verdict: Verdict;
   reasons: string;
   /** Resume poste en chaine (<= 8000 caracteres). */
-  evidence: { chain_id: number; block: number; method: "eth_simulateV1"; request_sha256: Hex; calls: string[] };
+  evidence: {
+    chain_id: number;
+    block: number;
+    method: "eth_simulateV1";
+    request_sha256: Hex;
+    /** keccak256 du code de la cible au bloc du controle. */
+    code_hash: Hex;
+    /** Implementation derriere un proxy (EIP-1967 ou ZeppelinOS), sinon null. */
+    implementation: Address | null;
+    calls: string[];
+  };
   /** Requete et reponse completes, pour rejouer la simulation au meme bloc. */
   request: unknown;
   response: Result[];
@@ -86,7 +103,7 @@ const uint = (abi: Abi, fn: string, r: Result) => decodeFunctionResult({ abi, fu
 function revertReason(r: Result): string {
   const data = r.error?.data ?? r.returnData;
   if (data.startsWith("0x08c379a0")) return decodeAbiParameters([{ type: "string" }], `0x${data.slice(10)}`)[0];
-  return data === "0x" ? "revert sans raison" : data.slice(0, 18);
+  return data === "0x" ? "revert without reason" : data.slice(0, 18);
 }
 
 /** Vrai si un transferFrom sans approbation a deplace des jetons (succes et pas de `false` renvoye). */
@@ -106,15 +123,26 @@ export async function checkToken(url: string, token: Address): Promise<Report> {
   const block = BigInt(head.number);
   const now = BigInt(head.timestamp) + 2n;
   const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
+  const code = await rpc<Hex>(url, "eth_getCode", [token, toHex(block)]);
+  let implementation: Address | null = null;
+  for (const slot of IMPL_SLOTS) {
+    const word = await rpc<Hex>(url, "eth_getStorageAt", [token, slot, toHex(block)]);
+    const addr = `0x${word.slice(-40)}`.toLowerCase() as Address;
+    if (BigInt(word) !== 0n) {
+      implementation = addr;
+      break;
+    }
+  }
+  const proof = { chain_id: chainId, block, code_hash: keccak256(code), implementation };
   const deadline = now + 10_000n;
   const buyPath = [WETH, token];
   const sellPath = [token, WETH];
   const balance = (label: string, of: Address) => call(label, buyer, of, erc20, "balanceOf", [buyer]);
   const buy = [
-    balance("jetons avant achat", token),
-    call("devis d'achat", buyer, ROUTER, router, "getAmountsOut", [BUY, buyPath]),
-    call("achat 0.01 ETH", buyer, ROUTER, router, "swapExactETHForTokensSupportingFeeOnTransferTokens", [0n, buyPath, buyer, deadline], BUY),
-    balance("jetons apres achat", token),
+    balance("tokens before buy", token),
+    call("buy quote", buyer, ROUTER, router, "getAmountsOut", [BUY, buyPath]),
+    call("buy 0.01 ETH", buyer, ROUTER, router, "swapExactETHForTokensSupportingFeeOnTransferTokens", [0n, buyPath, buyer, deadline], BUY),
+    balance("tokens after buy", token),
     call("owner()", buyer, token, erc20, "owner", []),
   ];
 
@@ -122,74 +150,78 @@ export async function checkToken(url: string, token: Address): Promise<Report> {
   const first = await simulate(url, block, buyer, [{ time: now, calls: buy }]);
   const f = byLabel(buy, first.results);
   const findings: Finding[] = [];
-  if (!ok(f["devis d'achat"])) findings.push({ level: "warn", text: "pas de pool V2 WETH : vente non verifiable" });
-  else if (!ok(f["achat 0.01 ETH"])) findings.push({ level: "block", text: `achat simule en echec : ${revertReason(f["achat 0.01 ETH"])}` });
-  const delta = (after: Result, before: Result) =>
-    ok(after) && ok(before) ? (uint(erc20, "balanceOf", after) as bigint) - (uint(erc20, "balanceOf", before) as bigint) : 0n;
-  const amount = delta(f["jetons apres achat"], f["jetons avant achat"]);
-  const owner = ok(f["owner()"]) ? (uint(erc20, "owner", f["owner()"]) as Address) : null;
+  if (!ok(f["buy quote"])) findings.push({ level: "warn", text: "no liquidity: no Uniswap V2 WETH pair, sale not verifiable" });
+  else if (!ok(f["buy 0.01 ETH"])) findings.push({ level: "block", text: `simulated buy failed: ${revertReason(f["buy 0.01 ETH"])}` });
+  // Une adresse sans code repond "0x" a balanceOf : solde nul, pas une erreur de decodage.
+  const bal = (r: Result) => (ok(r) && r.returnData !== "0x" ? (uint(erc20, "balanceOf", r) as bigint) : 0n);
+  const delta = (after: Result, before: Result) => (ok(after) && ok(before) ? bal(after) - bal(before) : 0n);
+  const amount = delta(f["tokens after buy"], f["tokens before buy"]);
+  const owner = ok(f["owner()"]) && f["owner()"].returnData !== "0x" ? (uint(erc20, "owner", f["owner()"]) as Address) : null;
   if (findings.length || amount < 10n) {
-    if (!findings.length) findings.push({ level: "block", text: "achat simule sans jeton recu" });
-    return report(chainId, block, first, findings, buy.map((c) => c.label));
+    if (!findings.length) findings.push({ level: "block", text: "simulated buy received no tokens" });
+    return report(proof, first, findings, buy.map((c) => c.label));
   }
 
-  // 2e simulation, la preuve : reprises sans approbation, vente immediate, vente 1 h plus tard.
+  // 2e simulation, la preuve, en trois blocs : achat + reprises sans approbation + approve,
+  // vente de la moitie au bloc suivant, vente du reste une heure plus tard.
   const half = amount / 2n;
   const rest = amount - half - 2n; // 2 unites peut-etre reprises par les sondes transferFrom
-  const now1 = [
+  const block1 = [
     ...buy,
-    ...(owner ? [call("transferFrom par owner()", owner, token, erc20, "transferFrom", [buyer, owner, 1n])] : []),
-    call("transferFrom par un inconnu", stranger, token, erc20, "transferFrom", [buyer, stranger, 1n]),
-    call("approve routeur", buyer, token, erc20, "approve", [ROUTER, maxUint256]),
-    balance("WETH avant vente", WETH),
-    call("devis de vente", buyer, ROUTER, router, "getAmountsOut", [half, sellPath]),
-    call("vente immediate", buyer, ROUTER, router, "swapExactTokensForTokensSupportingFeeOnTransferTokens", [half, 0n, sellPath, buyer, deadline]),
-    balance("WETH apres vente", WETH),
+    ...(owner ? [call("transferFrom by owner()", owner, token, erc20, "transferFrom", [buyer, owner, 1n])] : []),
+    call("transferFrom by a stranger", stranger, token, erc20, "transferFrom", [buyer, stranger, 1n]),
+    call("approve router", buyer, token, erc20, "approve", [ROUTER, maxUint256]),
   ];
-  const later = [
-    call("devis de vente +1 h", buyer, ROUTER, router, "getAmountsOut", [rest, sellPath]),
-    call("vente +1 h", buyer, ROUTER, router, "swapExactTokensForTokensSupportingFeeOnTransferTokens", [rest, 0n, sellPath, buyer, deadline + BigInt(LATER_S)]),
-    balance("WETH apres vente +1 h", WETH),
+  const block2 = [
+    balance("WETH before sale", WETH),
+    call("sale quote", buyer, ROUTER, router, "getAmountsOut", [half, sellPath]),
+    call("sale in next block", buyer, ROUTER, router, "swapExactTokensForTokensSupportingFeeOnTransferTokens", [half, 0n, sellPath, buyer, deadline]),
+    balance("WETH after sale", WETH),
+  ];
+  const block3 = [
+    call("sale quote +1 h", buyer, ROUTER, router, "getAmountsOut", [rest, sellPath]),
+    call("sale +1 h", buyer, ROUTER, router, "swapExactTokensForTokensSupportingFeeOnTransferTokens", [rest, 0n, sellPath, buyer, deadline + LATER_S]),
+    balance("WETH after sale +1 h", WETH),
   ];
   const sim = await simulate(url, block, buyer, [
-    { time: now, calls: now1 },
-    { time: now + BigInt(LATER_S), calls: later },
+    { time: now, calls: block1 },
+    { time: now + NEXT_S, calls: block2 },
+    { time: now + LATER_S, calls: block3 },
   ]);
-  const r = byLabel([...now1, ...later], sim.results);
+  const r = byLabel([...block1, ...block2, ...block3], sim.results);
 
-  if (owner && moved(r["transferFrom par owner()"])) {
-    findings.push({ level: "block", text: `owner() ${owner} reprend les jetons par transferFrom sans approbation` });
+  if (owner && moved(r["transferFrom by owner()"])) {
+    findings.push({ level: "block", text: `owner() ${owner} takes tokens back by transferFrom without approval` });
   }
-  if (moved(r["transferFrom par un inconnu"])) {
-    findings.push({ level: "block", text: "n'importe qui reprend les jetons par transferFrom sans approbation" });
+  if (moved(r["transferFrom by a stranger"])) {
+    findings.push({ level: "block", text: "anyone can take tokens back by transferFrom without approval" });
   }
   const quoted = (res: Result) => (ok(res) ? (uint(router, "getAmountsOut", res) as bigint[])[1] : 0n);
   // Sans devis, la taxe n'est pas mesurable : perte totale supposee, donc block (echec ferme).
   const loss = (got: bigint, expected: bigint) => (expected > 0n ? 1 - Number(got) / Number(expected) : 1);
   const taxed = (tax: number, when: string) => {
-    const text = tax >= 1 ? `taxe non mesurable ${when} (devis du pool en echec)` : `taxe de ${Math.round(tax * 100)} % ${when}`;
+    const text = tax >= 1 ? `tax not measurable ${when} (pool quote failed)` : `${Math.round(tax * 100)} % tax ${when}`;
     if (tax >= TAX_BLOCK) findings.push({ level: "block", text });
     else if (tax >= TAX_WARN) findings.push({ level: "warn", text });
   };
-  taxed(loss(amount, quoted(r["devis d'achat"])), "a l'achat");
-  if (!ok(r["vente immediate"])) {
-    findings.push({ level: "block", text: `vente juste apres l'achat refusee (${revertReason(r["vente immediate"])})` });
+  taxed(loss(amount, quoted(r["buy quote"])), "on the buy");
+  if (!ok(r["sale in next block"])) {
+    findings.push({ level: "block", text: `sale refused in the next block after the buy (${revertReason(r["sale in next block"])})` });
   } else {
-    taxed(loss(delta(r["WETH apres vente"], r["WETH avant vente"]), quoted(r["devis de vente"])), "sur la vente immediate");
+    taxed(loss(delta(r["WETH after sale"], r["WETH before sale"]), quoted(r["sale quote"])), "on the sale in the next block");
   }
-  if (!ok(r["vente +1 h"])) {
-    findings.push({ level: "block", text: `vente 1 h apres l'achat refusee (${revertReason(r["vente +1 h"])})` });
+  if (!ok(r["sale +1 h"])) {
+    findings.push({ level: "block", text: `sale refused 1 h after the buy (${revertReason(r["sale +1 h"])})` });
   } else {
-    taxed(loss(delta(r["WETH apres vente +1 h"], r["WETH apres vente"]), quoted(r["devis de vente +1 h"])), "sur la vente +1 h");
+    taxed(loss(delta(r["WETH after sale +1 h"], r["WETH after sale"]), quoted(r["sale quote +1 h"])), "on the sale 1 h after the buy");
   }
-  return report(chainId, block, sim, findings, [...now1, ...later].map((c) => c.label));
+  return report(proof, sim, findings, [...block1, ...block2, ...block3].map((c) => c.label));
 }
 
 const byLabel = (calls: Call[], results: Result[]) => Object.fromEntries(calls.map((c, i) => [c.label, results[i]]));
 
 function report(
-  chainId: number,
-  block: bigint,
+  proof: { chain_id: number; block: bigint; code_hash: Hex; implementation: Address | null },
   sim: { request: unknown; results: Result[] },
   findings: Finding[],
   labels: string[],
@@ -199,18 +231,16 @@ function report(
     : findings.some((f) => f.level === "warn")
       ? "warn"
       : "allow";
-  const reasons = findings.length ? findings.map((f) => f.text).join(" ; ") : "achat, reprise et ventes simulees sans anomalie";
-  return {
-    verdict,
-    reasons: reasons.slice(0, 280),
-    evidence: {
-      chain_id: chainId,
-      block: Number(block),
-      method: "eth_simulateV1",
-      request_sha256: sha256(stringToHex(JSON.stringify(sim.request))),
-      calls: sim.results.map((res, i) => `${labels[i]}: ${ok(res) ? "ok" : "revert"}`),
-    },
-    request: sim.request,
-    response: sim.results,
+  const reasons = findings.length ? findings.map((f) => f.text).join(" ; ") : "buy, takeback probes and sales simulated without anomaly";
+  const evidence = {
+    chain_id: proof.chain_id,
+    block: Number(proof.block),
+    method: "eth_simulateV1" as const,
+    request_sha256: sha256(stringToHex(JSON.stringify(sim.request))),
+    code_hash: proof.code_hash,
+    implementation: proof.implementation,
+    calls: sim.results.map((res, i) => `${labels[i]}: ${ok(res) ? "ok" : "revert"}`),
   };
+  if (JSON.stringify(evidence).length > 8000) throw new Error("evidence above 8000 characters");
+  return { verdict, reasons: reasons.slice(0, 280), evidence, request: sim.request, response: sim.results };
 }

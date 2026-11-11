@@ -10,7 +10,8 @@ contract DemoToken {
         SellBlocked, // toute vente vers la paire revert
         SellBlockedLater, // la vente passe juste apres l'achat, plus apres 10 minutes
         SellTax, // 90 % de chaque vente part au proprietaire
-        SellTaxLater // vente sans taxe juste apres l'achat, taxee a 90 % apres 10 minutes
+        SellTaxLater, // vente sans taxe juste apres l'achat, taxee a 90 % apres 10 minutes
+        HoldOneBlock // honnete : pas de vente dans le bloc de l'achat (anti-sandwich), libre ensuite
     }
 
     string public name;
@@ -23,6 +24,7 @@ contract DemoToken {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
     mapping(address => uint256) public boughtAt;
+    mapping(address => uint256) public boughtBlock;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
@@ -71,12 +73,16 @@ contract DemoToken {
             if (trap == Trap.SellBlockedLater && block.timestamp > boughtAt[from] + 10 minutes) {
                 revert("vente fermee apres 10 minutes");
             }
+            if (trap == Trap.HoldOneBlock && block.number <= boughtBlock[from]) revert("hold one block");
             if (trap == Trap.SellTax) fee = (value * 90) / 100;
             if (trap == Trap.SellTaxLater && block.timestamp > boughtAt[from] + 10 minutes) {
                 fee = (value * 90) / 100;
             }
         }
-        if (from == pair) boughtAt[to] = block.timestamp;
+        if (from == pair) {
+            boughtAt[to] = block.timestamp;
+            boughtBlock[to] = block.number;
+        }
         balanceOf[from] -= value;
         balanceOf[to] += value - fee;
         emit Transfer(from, to, value - fee);

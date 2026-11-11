@@ -8,10 +8,10 @@ const human = await humanAccount(env("OWNER"));
 const agent = env("AGENT");
 if (process.argv[2] === "stop") {
   const { tx } = await call(human, "disarm", { agent });
-  console.log(`[humain] arret d'urgence : budget de ${agent} retire  ${tx}`);
+  console.log(`[human] emergency stop: budget of ${agent} removed  ${tx}`);
 } else {
   const [budget = "0.06", duration = "900"] = process.argv.slice(2);
   const { tx } = await call(human, "arm", { agent, budget: nearToYocto(budget).toString(), duration_s: Number(duration) });
   const credit = await view<string>("credit_of", { account: agent });
-  console.log(`[humain] ${agent} arme : ${budget} NEAR pendant ${duration} s (credit prepaye ${yoctoToNear(credit)} NEAR)  ${tx}`);
+  console.log(`[human] ${agent} armed: ${budget} NEAR for ${duration} s (prepaid credit ${yoctoToNear(credit)} NEAR)  ${tx}`);
 }
