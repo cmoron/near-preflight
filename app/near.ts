@@ -91,6 +91,8 @@ export type Check = {
   code: { code_hash: string; implementation: string | null } | null;
   /** An exit quote (request_exit): tokens to sell; its quote is then the ETH out, in wei. */
   exit_amount: string | null;
+  /** Gas limit the sentinel simulated with; a buy or an exit on this verdict needs the guard's to match. */
+  gas_limit: number;
 };
 /** A shared blocklist entry (get_entry). */
 export type Entry = { reporter: string; at_ns: string; evidence_sha256: string; note: string };

@@ -14,8 +14,10 @@ const rand = (): Address => `0x${Buffer.from(crypto.getRandomValues(new Uint8Arr
 /** Index of every pool the fork setup launched (evm/fork.sh), as the sentinel would load it. */
 const INDEX = await buildIndex(RPC, tokens.fork_block + 1, Number(BigInt(await rpc<Hex>(RPC, "eth_blockNumber", []))));
 const NO_NEAR: NearFacts = { listed: [], previous: null };
-const check = (token: string, guard: Address = GUARD_EVM, index: Index | null = INDEX, near: NearFacts = NO_NEAR) =>
-  checkToken(RPC, token as `0x${string}`, guard, () => ({ buyer: rand(), stranger: rand() }), { index, near: async () => near });
+/** The gas limit the guard signs with at setup (app/setup.ts): every simulated call gets it. */
+const GAS = 250_000n;
+const check = (token: string, guard: Address = GUARD_EVM, index: Index | null = INDEX, near: NearFacts = NO_NEAR, gas = GAS) =>
+  checkToken(RPC, token as `0x${string}`, guard, () => ({ buyer: rand(), stranger: rand() }), { index, near: async () => near, gas });
 
 describe("verdict de la sentinelle", () => {
   test("USDC, temoin sain deja sur Base : allow", async () => expect((await check(tokens.usdc)).verdict).toBe("allow"));
@@ -54,11 +56,23 @@ describe("verdict de la sentinelle", () => {
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("256 blocks (timestamp +1 h) after the buy");
   });
-  test("a token that freezes only the guard's public EVM address: block", async () => {
+  test("a token that freezes only the guard's public EVM address: block, but not listed (it rests on the guard's own state)", async () => {
     const r = await check(tokens.guard_frozen);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toContain("guard address");
-    expect(r.reasons).toContain("guard address: sale refused"); // the router masks the token's reason
+    expect(r.list_target).toBe(false);
+    expect(r.reasons).toContain("guard address only, not listed: sale refused"); // the router masks the token's reason
+  });
+  test("a sale that needs more gas than the guard signs with (250,000): block, the simulation uses the guard's gas limit", async () => {
+    const r = await check(tokens.gas_hungry);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toContain("sale refused in the next block");
+    expect(r.list_target).toBe(true); // the probe's sale fails too: the token's own behaviour
+    expect(r.evidence.gas_limit).toBe(250_000);
+  });
+  test("the same token simulated with 1,000,000 gas sells: only the guard's own gas limit says what a sale will meet", async () => {
+    const r = await check(tokens.gas_hungry, GUARD_EVM, INDEX, NO_NEAR, 1_000_000n);
+    expect(r.verdict).not.toBe("block"); // its young pool's LP sits with an EOA: a warn
+    expect(r.reasons).not.toContain("sale refused");
   });
   test("the same token with another guard address: allow (only the guard is targeted)", async () => {
     expect((await check(tokens.guard_frozen, "0x000000000000000000000000000000000000bEEF")).verdict).toBe("allow");
@@ -135,7 +149,7 @@ describe("template reputation", () => {
     expect(r.verdict).toBe("block");
     // only the reputation and the removable LP: no simulation finding (tax, sale refused, takeback)
     expect(r.reasons.split(" ; ").map((f) => f.split(" ")[0])).toEqual(["template", "pool"]);
-    expect(r.reasons).toMatch(/^template 0x[0-9a-f]{4}\.\.[0-9a-f]{4}: 5 of 5 earlier pools drained, median 2 blocks after creation/);
+    expect(r.reasons).toMatch(/^template 0x[0-9a-f]{4}\.\.[0-9a-f]{4}: 5 of 5 earlier pools drained, median 2 blocks after funding/);
     expect(r.evidence.reputation).toMatchObject({ pools: 5, drained: 5, median_drain_blocks: 2 });
     expect(r.list_target).toBe(false); // a block on the template's reputation alone: the guard does not list the token
   });
@@ -152,11 +166,11 @@ describe("template reputation", () => {
 });
 
 describe("shared blocklist and code changes read from NEAR", () => {
-  const listed = (kind: "token" | "code", key: string): NearFacts => ({ listed: [{ kind, key, reporter: "agent-b.testnet", evidence_sha256: "ab".repeat(32) }], previous: null });
+  const listed = (key: string): NearFacts => ({ listed: [{ key, reporter: "agent-b.testnet", evidence_sha256: "ab".repeat(32) }], previous: null });
   test("a token listed by another reporter: block, even with a clean simulation", async () => {
-    const r = await check(tokens.usdc, GUARD_EVM, INDEX, listed("token", tokens.usdc.toLowerCase()));
+    const r = await check(tokens.usdc, GUARD_EVM, INDEX, listed(tokens.usdc.toLowerCase()));
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toStartWith("listed on NEAR by agent-b.testnet (token)");
+    expect(r.reasons).toStartWith("listed on NEAR by agent-b.testnet");
     expect(r.evidence.near.listed.length).toBe(1);
     expect(r.list_target).toBe(false); // already listed: nothing of its own to list it for
   });
@@ -171,27 +185,27 @@ describe("shared blocklist and code changes read from NEAR", () => {
     const previous = { id: 7, code_hash: first.evidence.code_hash, implementation: first.evidence.implementation };
     expect((await check(tokens.lp_burned, GUARD_EVM, INDEX, { listed: [], previous })).verdict).toBe("allow");
   });
-  test("the sentinel asks NEAR about the target and its template", async () => {
+  test("the sentinel asks NEAR about the target only (the guard lists tokens, never templates)", async () => {
     const asked: string[] = [];
     await checkToken(RPC, tokens.farm_fresh as Address, GUARD_EVM, () => ({ buyer: rand(), stranger: rand() }), {
       index: INDEX,
-      near: async (target, template) => (asked.push(target, template), NO_NEAR),
+      near: async (target) => (asked.push(target), NO_NEAR),
+      gas: GAS,
     });
-    expect(asked[0]).toBe(tokens.farm_fresh as Address);
-    expect(asked[1]).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(asked).toEqual([tokens.farm_fresh as Address]);
   });
 });
 
 describe("exit quote (the agent's floor comes from it)", () => {
   const HOLDER = "0x60B1100000000000000000000000000000000001" as Address; // holds the demo tokens (evm/fork.sh)
   test("sale of tokens the address holds: allow, quote = WETH out of the simulated sale", async () => {
-    const r = await checkExit(RPC, tokens.lp_burned as Address, HOLDER, parseEther("1000"));
+    const r = await checkExit(RPC, tokens.lp_burned as Address, HOLDER, parseEther("1000"), GAS);
     expect(r.verdict).toBe("allow");
     expect(BigInt(r.evidence.quote)).toBeGreaterThan(0n);
     expect(r.evidence.kind).toBe("exit");
   });
   test("sale of more than the address holds: no quote, block (the owner's own exit stays open)", async () => {
-    const r = await checkExit(RPC, tokens.lp_burned as Address, rand(), parseEther("1000"));
+    const r = await checkExit(RPC, tokens.lp_burned as Address, rand(), parseEther("1000"), GAS);
     expect(r.verdict).toBe("block");
     expect(r.evidence.quote).toBe("0");
   });
@@ -235,7 +249,7 @@ describe("preuve", () => {
       for (const c of b.calls) {
         expect(BigInt(c.maxPriorityFeePerGas)).toBeGreaterThan(0n);
         expect(BigInt(c.maxFeePerGas)).toBeGreaterThan(BigInt(h.baseFeePerGas));
-        expect(c.gas).toBe("0xf4240"); // 1 M, pas la limite du bloc
+        expect(c.gas).toBe("0x3d090"); // the guard's 250,000, not the block's limit
       }
     }
     expect(BigInt(blocks[2].blockOverrides.number)).toBe(BigInt(r.evidence.block) + 256n); // vente +1 h : dernier bloc permis

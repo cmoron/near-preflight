@@ -19,6 +19,8 @@ const GUARD_INFO = { account: "guard.test", evm: GUARD_EVM };
 /** The template index the sentinel would load: every pool of the fork setup. */
 const INDEX = await buildIndex(RPC, tokens.fork_block + 1, Number(BigInt(await rpc<Hex>(RPC, "eth_blockNumber", []))));
 const NO_NEAR: NearFacts = { listed: [], previous: null };
+/** The guard's gas limit at setup (app/setup.ts): the sentinel simulates every call with it. */
+const GAS = 250_000n;
 const proofOf = async (token: Address = TRAP, probe?: Partial<Probe>, guard: Address = GUARD_EVM, requested_ns = "0", near = NO_NEAR): Promise<Proof> =>
   toProof(
     1,
@@ -26,6 +28,7 @@ const proofOf = async (token: Address = TRAP, probe?: Partial<Probe>, guard: Add
     await checkToken(RPC, token, guard, (head) => ({ ...deriveProbes({ guard: GUARD_INFO.account, id: 1, requested_ns }, head.hash), ...probe }), {
       index: INDEX,
       near: async () => near,
+      gas: GAS,
     }),
   );
 const failed = (lines: { ok: boolean; line: string }[]) => lines.filter((l) => !l.ok).map((l) => l.line);
@@ -52,6 +55,7 @@ const onChain = (p: Proof, over: Partial<NonNullable<OnChain>> = {}) => async ()
   judged_ns: "0",
   code: "code_hash" in evidenceOf(p) ? { code_hash: evidenceOf(p).code_hash, implementation: evidenceOf(p).implementation } : null,
   exit_amount: evidenceOf(p).amount ?? null,
+  gas_limit: evidenceOf(p).gas_limit,
   ...over,
 });
 
@@ -130,6 +134,10 @@ describe("replay : la chaine evidence est celle postee en chaine", () => {
   test("une cle en trop dans evidence est refusee (contenu non reverifie)", async () => {
     const proof = withEvidence(await proofOf(), (e) => (e.note = "audited"));
     expect(failed(await replay(proof, RPC)).some((l) => l.includes("evidence"))).toBe(true);
+  });
+  test("evidence.gas_limit other than the gas the request was simulated with is detected", async () => {
+    const forged = withEvidence(await proofOf(), (e) => (e.gas_limit = 1_000_000));
+    expect(failed(await replay(forged, RPC)).some((l) => l.includes("request is not the one checkToken builds"))).toBe(true);
   });
   test("un code_hash altere dans evidence est detecte", async () => {
     const proof = withEvidence(await proofOf(), (e) => (e.code_hash = `0x${"00".repeat(32)}`));
@@ -227,6 +235,12 @@ describe("replay --check : verdict en chaine", () => {
     expect(bad.length).toBe(1);
     expect(bad[0]).toContain("on-chain");
   });
+  test("a gas limit on chain other than the one simulated with: refused (the guard would sign with another)", async () => {
+    const proof = await proofOf();
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { gas_limit: 600_000 }) }));
+    expect(bad.length).toBe(1);
+    expect(bad[0]).toContain("gas limit");
+  });
   test("devis en chaine different de celui de la preuve : refus", async () => {
     const proof = await proofOf();
     const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { quote: "1" }) }));
@@ -244,14 +258,14 @@ describe("replay --check: NEAR facts the verdict rests on", () => {
   const SHA = "ab".repeat(32);
   const entry = (reporter: string) => async () => ({ reporter, evidence_sha256: SHA });
   test("a listing claimed in the evidence is found on the guard: confirmed", async () => {
-    const proof = await proofOf(tokens.usdc as Address, {}, GUARD_EVM, "0", { listed: [{ kind: "token", key: tokens.usdc.toLowerCase(), reporter: "b.testnet", evidence_sha256: SHA }], previous: null });
+    const proof = await proofOf(tokens.usdc as Address, {}, GUARD_EVM, "0", { listed: [{ key: tokens.usdc.toLowerCase(), reporter: "b.testnet", evidence_sha256: SHA }], previous: null });
     expect(proof.verdict).toBe("block");
     const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof), entry: entry("b.testnet") });
     expect(failed(lines)).toEqual([]);
-    expect(lines.some((l) => l.ok && l.line.includes("blocklist entry token"))).toBe(true);
+    expect(lines.some((l) => l.ok && l.line.includes("blocklist entry of"))).toBe(true);
   });
   test("a listing invented by the sentinel (another reporter on the guard) is refused", async () => {
-    const proof = await proofOf(tokens.usdc as Address, {}, GUARD_EVM, "0", { listed: [{ kind: "token", key: tokens.usdc.toLowerCase(), reporter: "b.testnet", evidence_sha256: SHA }], previous: null });
+    const proof = await proofOf(tokens.usdc as Address, {}, GUARD_EVM, "0", { listed: [{ key: tokens.usdc.toLowerCase(), reporter: "b.testnet", evidence_sha256: SHA }], previous: null });
     expect(failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof), entry: entry("c.testnet") })).some((l) => l.includes("blocklist entry"))).toBe(true);
   });
   test("a previous code that is not the one the guard stored for that check is refused", async () => {
@@ -268,7 +282,7 @@ describe("replay --check: NEAR facts the verdict rests on", () => {
 
 describe("replay of an exit quote", () => {
   const HOLDER = "0x60B1100000000000000000000000000000000001" as Address; // holds the demo tokens
-  const exitProof = async () => toProof(2, tokens.lp_burned, await checkExit(RPC, tokens.lp_burned as Address, HOLDER, 10n ** 21n));
+  const exitProof = async () => toProof(2, tokens.lp_burned, await checkExit(RPC, tokens.lp_burned as Address, HOLDER, 10n ** 21n, GAS));
   test("an intact exit quote replays: same request, same quote", async () => {
     const proof = await exitProof();
     expect(proof.verdict).toBe("allow");
@@ -279,6 +293,10 @@ describe("replay of an exit quote", () => {
   test("a lowered exit quote (a lower floor for the agent) is detected", async () => {
     const proof = withEvidence(await exitProof(), (e) => (e.quote = "1"));
     expect(failed(await replay(proof, RPC)).some((l) => l.includes("quote"))).toBe(true);
+  });
+  test("an exit quote simulated with another gas limit than its evidence says is detected", async () => {
+    const forged = withEvidence(await exitProof(), (e) => (e.gas_limit = 1_000_000));
+    expect(failed(await replay(forged, RPC)).some((l) => l.includes("request is not the exit sale"))).toBe(true);
   });
   test("--check: the seller must be the guard's derived address", async () => {
     const proof = await exitProof();

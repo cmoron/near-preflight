@@ -93,6 +93,9 @@ pub struct Check {
     pub decision_sha256: Option<String>,
     /// Same, as given to the `buy` that last asked for the signature (a retry overwrites it).
     pub buy_decision_sha256: Option<String>,
+    /// Gas limit the sentinel simulated every transaction with (0 without simulation). A buy or an
+    /// exit on this verdict needs it to be the gas limit the guard signs with.
+    pub gas_limit: u64,
 }
 
 /// The target's code as the sentinel read it at the verdict's block: keccak256 of its runtime code
@@ -235,10 +238,16 @@ const WEEK_NS: u64 = 7 * 24 * 3600 * 1_000_000_000;
 /// faire grossir le stockage du contrat sans fin (un budget de 1 yocto suffit a ajouter une entree).
 const MAX_ARMINGS_7D: usize = 32;
 
-/// Upper bound of one blocklist entry's storage (key `code:0x` + 64 hex, reporter <= 64 bytes, evidence
+/// Upper bound of one blocklist entry's storage (key: a token address, reporter <= 64 bytes, evidence
 /// sha256, note <= `MAX_NOTE`, length prefixes, 40 bytes per record), measured by a test. A reporter's
 /// credit pays it, so reporting cannot eat into the contract's balance.
 const ENTRY_STORAGE_BYTES: u128 = 500;
+/// Bounds of the owner's gas settings. A Uniswap V2 swap uses about 140,000 gas; a token may need
+/// more to let a sale through, so the owner can raise the limit up to 2,000,000 and retry an exit.
+const MIN_GAS_LIMIT: u64 = 21_000;
+const MAX_GAS_LIMIT: u64 = 2_000_000;
+/// 10 gwei, about 2,000 times Base's usual base fee.
+const MAX_FEE_PER_GAS: u128 = 10_000_000_000;
 /// Most entries `list_entries` returns per call.
 const MAX_PAGE: u32 = 50;
 /// Longest note on a blocklist entry.
@@ -283,13 +292,15 @@ pub struct Guard {
     last_exit: Option<Exit>,
     /// Accounts the owner allows to `report` to the blocklist (the sentinel always may).
     reporters: LookupSet<AccountId>,
-    /// Shared blocklist, keyed `token:0x..` or `code:0x..` (lowercase).
+    /// Shared blocklist of tokens, keyed by address (lowercase).
     blocklist: IterableMap<String, Entry>,
     /// Per target (lowercase), the check whose verdict saw its code last.
     seen: LookupMap<String, u64>,
-    /// Tokens (lowercase) each agent may still sell, keyed `agent:token`: credited from the signed
-    /// buy's `min_out`, reserved by `sell_quoted`. The guard's EVM address holds them all together.
-    holdings: LookupMap<String, u128>,
+    /// Per token (lowercase), the one agent it is held for and the amount it may still sell: credited
+    /// from the signed buy's `min_out`, reserved by `sell_quoted`, removed at 0. The guard's EVM address
+    /// holds every agent's tokens together, so a token is held for one agent at a time: a credit whose
+    /// buy reverted on Base can never sell another agent's tokens.
+    holdings: LookupMap<String, (AccountId, u128)>,
 }
 
 /// Adresse EVM stricte : `0x` + 40 hexadecimaux (42 caracteres, pas un de plus).
@@ -297,9 +308,20 @@ fn is_evm_address(s: &str) -> bool {
     s.len() == 42 && s.starts_with("0x") && s.bytes().skip(2).all(|b| b.is_ascii_hexdigit())
 }
 
-/// Holdings map key: the agent account (no `:` possible) and the lowercase token address.
-fn holding_key(agent: &AccountId, token: &str) -> String {
-    format!("{agent}:{}", token.to_ascii_lowercase())
+/// The owner's gas settings must stay within `MIN_GAS_LIMIT`..=`MAX_GAS_LIMIT` and `MAX_FEE_PER_GAS`.
+fn check_gas(gas_limit: u64, max_fee_per_gas: u128, max_priority_fee_per_gas: u128) {
+    require!(
+        (MIN_GAS_LIMIT..=MAX_GAS_LIMIT).contains(&gas_limit),
+        "gas limit out of bounds: 21,000 to 2,000,000"
+    );
+    require!(
+        max_fee_per_gas <= MAX_FEE_PER_GAS,
+        "max fee per gas above 10 gwei"
+    );
+    require!(
+        max_priority_fee_per_gas <= max_fee_per_gas,
+        "priority fee above max fee"
+    );
 }
 
 /// Validates an optional decision digest (64 hex digits, no `0x`) and lowercases it.
@@ -318,15 +340,13 @@ fn is_hash(s: &str) -> bool {
     s.len() == 66 && s.starts_with("0x") && s.bytes().skip(2).all(|b| b.is_ascii_hexdigit())
 }
 
-/// Blocklist map key `kind:key`, key lowercase: `token` and an EVM address, or `code` and a code hash.
-fn list_key(kind: &str, key: &str) -> String {
-    let valid = match kind {
-        "token" => is_evm_address(key),
-        "code" => is_hash(key),
-        _ => env::panic_str("invalid kind: token or code"),
-    };
-    require!(valid, "invalid key");
-    format!("{kind}:{}", key.to_ascii_lowercase())
+/// Blocklist map key: the token's EVM address, lowercase.
+fn token_key(token: &str) -> String {
+    require!(
+        is_evm_address(token),
+        "invalid token: expected 0x + 40 hex digits"
+    );
+    token.to_ascii_lowercase()
 }
 
 /// Signature EVM tiree de la reponse du MPC : r = `big_r` sans son octet de prefixe, v = `recovery_id`,
@@ -413,14 +433,12 @@ impl Guard {
             "price below the storage cost of a check"
         );
         require!(is_evm_address(&evm.address), "invalid derived address");
-        require!(
-            evm.gas_limit > 0 && evm.yocto_per_wei.0 > 0,
-            "zero gas limit or rate"
+        check_gas(
+            evm.gas_limit,
+            evm.max_fee_per_gas.0,
+            evm.max_priority_fee_per_gas.0,
         );
-        require!(
-            evm.max_priority_fee_per_gas.0 <= evm.max_fee_per_gas.0,
-            "priority fee above max fee"
-        );
+        require!(evm.yocto_per_wei.0 > 0, "zero rate");
         require!(evm.max_slippage_bps < 10_000, "slippage of 100 % or more");
         require!(
             is_evm_address(&evm.withdraw_to),
@@ -621,7 +639,7 @@ impl Guard {
             "invalid target: expected 0x + 40 hex digits"
         );
         require!(
-            !self.blocklist.contains_key(&list_key("token", &target)),
+            !self.blocklist.contains_key(&token_key(&target)),
             "target is on the shared blocklist"
         );
         self.new_check(&target, None, decision.as_deref())
@@ -650,12 +668,28 @@ impl Guard {
     }
 
     fn require_holding(&self, agent: &AccountId, token: &str, amount: u128) {
-        let held = self
-            .holdings
-            .get(&holding_key(agent, token))
-            .copied()
-            .unwrap_or(0);
-        require!(amount <= held, "exit amount above the agent's holding");
+        require!(
+            amount <= self.held(agent, token),
+            "exit amount above the agent's holding"
+        );
+    }
+
+    /// What `agent` may still sell of `token` (0 when the token is held for another agent or none).
+    fn held(&self, agent: &AccountId, token: &str) -> u128 {
+        self.holdings
+            .get(&token.to_ascii_lowercase())
+            .filter(|(a, _)| a == agent)
+            .map_or(0, |&(_, n)| n)
+    }
+
+    /// Sets `agent`'s holding of `token`; at 0 the token is free for another agent.
+    fn set_held(&mut self, agent: &AccountId, token: &str, amount: u128) {
+        let key = token.to_ascii_lowercase();
+        if amount == 0 {
+            self.holdings.remove(&key);
+        } else {
+            self.holdings.insert(key, (agent.clone(), amount));
+        }
     }
 
     /// Debits the price from the caller and stores a new check of `target` (an exit quote with
@@ -688,6 +722,7 @@ impl Guard {
                 exit_amount,
                 decision_sha256: decision.map(str::to_owned),
                 buy_decision_sha256: None,
+                gas_limit: 0,
             },
         );
         emit(
@@ -712,6 +747,7 @@ impl Guard {
         quote: U128,
         code: Option<Code>,
         list_target: bool,
+        gas_limit: u64,
     ) {
         require!(
             env::predecessor_account_id() == self.sentinel,
@@ -777,6 +813,7 @@ impl Guard {
         check.evidence_sha256.clone_from(&evidence_sha256);
         check.quote = quote;
         check.code = code;
+        check.gas_limit = gas_limit;
         self.escrow -= self.price;
         self.fees += self.price;
         emit(
@@ -788,7 +825,7 @@ impl Guard {
         // Only a block of a buy check that rests on the target's code, and that the sentinel asks to
         // list, lists its target (never the fail-closed fallback, nor a reputation-only block), unless
         // already listed (the first entry stays).
-        let key = format!("token:{target}");
+        let key = target.clone();
         if verdict == Verdict::Block
             && !exit
             && has_code
@@ -828,6 +865,10 @@ impl Guard {
             Some(Verdict::Block) => env::panic_str("verdict does not allow the purchase"),
         }
         require!(
+            check.gas_limit == self.evm.gas_limit,
+            "verdict simulated with another gas limit"
+        );
+        require!(
             env::block_timestamp() < check.judged_ns.0.saturating_add(VERDICT_TTL_NS),
             "verdict expired"
         );
@@ -836,13 +877,17 @@ impl Guard {
             "an exit quote is not a buy verdict"
         );
         require!(
-            !self
-                .blocklist
-                .contains_key(&list_key("token", &check.target)),
+            !self.blocklist.contains_key(&token_key(&check.target)),
             "target is on the shared blocklist"
         );
         require!(amount_wei.0 > 0, "zero amount");
         let target = check.target.clone();
+        require!(
+            self.holdings
+                .get(&target.to_ascii_lowercase())
+                .is_none_or(|(a, _)| *a == who),
+            "token held for another agent"
+        );
         let Some(min_out) = min_out(check.quote.0, amount_wei.0, self.evm.max_slippage_bps) else {
             env::panic_str("amount too large")
         };
@@ -926,6 +971,10 @@ impl Guard {
             "no exit quote: the sentinel found no sale"
         );
         require!(
+            check.gas_limit == self.evm.gas_limit,
+            "verdict simulated with another gas limit"
+        );
+        require!(
             env::block_timestamp() < check.judged_ns.0.saturating_add(VERDICT_TTL_NS),
             "verdict expired"
         );
@@ -947,9 +996,7 @@ impl Guard {
         self.debit(&who, cost);
         self.escrow += cost;
         // Reserve the tokens until the exit is signed (restored in `on_exit_signed` otherwise).
-        let key = holding_key(&who, &token);
-        let held = self.holdings.get(&key).copied().unwrap_or(0);
-        self.holdings.insert(key, held - amount.0);
+        self.set_held(&who, &token, self.held(&who, &token) - amount.0);
         let charge = Charge {
             agent: who.clone(),
             check: id,
@@ -1059,9 +1106,7 @@ impl Guard {
             self.refund(&c.agent, c.per_tx * (all - done), c.armed_until_ns);
             // The swap is the last transaction: not signed, the tokens are still the agent's.
             if let (Some(token), true) = (&exit.token, done < all) {
-                let key = holding_key(&c.agent, token);
-                let held = self.holdings.get(&key).copied().unwrap_or(0);
-                self.holdings.insert(key, held + exit.amount.0);
+                self.set_held(&c.agent, token, self.held(&c.agent, token) + exit.amount.0);
             }
             if let Some(check) = self.checks.get_mut(&c.check).filter(|_| done > 0) {
                 check.settled = true;
@@ -1080,10 +1125,36 @@ impl Guard {
         self.last_exit.as_ref()
     }
 
-    /// EVM parameters fixed at init: derived address, withdrawal address, gas, fees, rate.
+    /// EVM parameters: derived address, withdrawal address, gas, fees, rate (gas and fees set by
+    /// the owner, the rest fixed at init).
     #[must_use]
     pub fn evm_config(&self) -> &EvmConfig {
         &self.evm
+    }
+
+    /// Owner only: gas limit and fees of every transaction the guard signs from now on (buys, exits,
+    /// withdrawals), within bounds, so a sale that needs more gas can be retried. A verdict simulated
+    /// with another gas limit no longer buys or exits. Refused during a signature, whose callback
+    /// rebuilds the transaction from these settings.
+    pub fn set_evm_gas(
+        &mut self,
+        gas_limit: u64,
+        max_fee_per_gas: U128,
+        max_priority_fee_per_gas: U128,
+    ) {
+        self.assert_owner();
+        require!(self.signing.is_none(), "a signature is already in progress");
+        check_gas(gas_limit, max_fee_per_gas.0, max_priority_fee_per_gas.0);
+        self.evm.gas_limit = gas_limit;
+        self.evm.max_fee_per_gas = max_fee_per_gas;
+        self.evm.max_priority_fee_per_gas = max_priority_fee_per_gas;
+        emit(
+            "evm_gas_set",
+            &near_sdk::serde_json::json!({
+                "gas_limit": gas_limit, "max_fee_per_gas": max_fee_per_gas,
+                "max_priority_fee_per_gas": max_priority_fee_per_gas,
+            }),
+        );
     }
 
     /// Owner only: approves a `warn` verdict so the agent may buy on it. The approval does not
@@ -1143,9 +1214,8 @@ impl Guard {
         );
         self.evm_nonce += 1;
         self.fees += p.cost;
-        let key = holding_key(&p.agent, &p.target);
-        let held = self.holdings.get(&key).copied().unwrap_or(0);
-        self.holdings.insert(key, held.saturating_add(p.min_out));
+        let held = self.held(&p.agent, &p.target).saturating_add(p.min_out);
+        self.set_held(&p.agent, &p.target, held);
         if let Some(check) = self.checks.get_mut(&p.id) {
             check.settled = true;
             check.signed_tx = Some(raw.into());
@@ -1340,19 +1410,19 @@ impl Guard {
         );
     }
 
-    /// Lists `key` (`kind` `token`: an EVM address, `code`: a code template hash) on the shared
-    /// blocklist with the sha256 of the evidence and a note; reporters registered by the owner and
-    /// the sentinel only. The entry's storage is paid from the reporter's credit (`deposit_credit`),
+    /// Lists `token` on the shared blocklist with the sha256 of the evidence and a note; reporters
+    /// registered by the owner and the sentinel only. Tokens only: a code template is never listed,
+    /// so copies of an honest token's code cannot get it blocked. The entry's storage is paid from the reporter's credit (`deposit_credit`),
     /// so a reporter spends its own deposit, never the contract's balance. An entry is never
     /// overwritten; only the owner removes one.
     #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
-    pub fn report(&mut self, kind: String, key: String, evidence_sha256: String, note: String) {
+    pub fn report(&mut self, token: String, evidence_sha256: String, note: String) {
         let who = env::predecessor_account_id();
         require!(
             who == self.sentinel || self.reporters.contains(&who),
             "reporter only"
         );
-        let map_key = list_key(&kind, &key);
+        let map_key = token_key(&token);
         require!(
             evidence_sha256.len() == 64
                 && evidence_sha256
@@ -1381,26 +1451,24 @@ impl Guard {
 
     /// Owner only: removes an entry from the blocklist.
     #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
-    pub fn unlist(&mut self, kind: String, key: String) {
+    pub fn unlist(&mut self, token: String) {
         self.assert_owner();
-        let map_key = list_key(&kind, &key);
+        let map_key = token_key(&token);
         require!(self.blocklist.remove(&map_key).is_some(), "not listed");
         emit(
             "unlisted",
-            &near_sdk::serde_json::json!({
-                "kind": kind, "key": key.to_ascii_lowercase(), "by": self.owner,
-            }),
+            &near_sdk::serde_json::json!({ "token": map_key, "by": self.owner }),
         );
     }
 
-    /// The blocklist entry of `key` (`kind` `token` or `code`), if listed.
+    /// The blocklist entry of `token`, if listed.
     #[must_use]
     #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
-    pub fn get_entry(&self, kind: String, key: String) -> Option<&Entry> {
-        self.blocklist.get(&list_key(&kind, &key))
+    pub fn get_entry(&self, token: String) -> Option<&Entry> {
+        self.blocklist.get(&token_key(&token))
     }
 
-    /// A page of the blocklist, `limit` capped at `MAX_PAGE`: (`token:0x..` or `code:0x..`, entry).
+    /// A page of the blocklist, `limit` capped at `MAX_PAGE`: (token, lowercase, entry).
     /// Order is unspecified and changes after `unlist` (O(1) removal swaps the last entry in).
     #[must_use]
     pub fn list_entries(&self, from_index: u32, limit: u32) -> Vec<(String, &Entry)> {
@@ -1425,25 +1493,19 @@ impl Guard {
     #[must_use]
     #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
     pub fn holding(&self, agent: AccountId, token: String) -> U128 {
-        U128(
-            self.holdings
-                .get(&holding_key(&agent, &token))
-                .copied()
-                .unwrap_or(0),
-        )
+        U128(self.held(&agent, &token))
     }
 
-    /// Stores a blocklist entry under `map_key` (`kind:key`) and emits `listed`.
-    fn list(&mut self, map_key: String, entry: Entry) {
-        let (kind, key) = map_key.split_once(':').unwrap_or_default();
+    /// Stores a blocklist entry under `token` (lowercase) and emits `listed`.
+    fn list(&mut self, token: String, entry: Entry) {
         emit(
             "listed",
             &near_sdk::serde_json::json!({
-                "kind": kind, "key": key, "reporter": entry.reporter,
+                "token": token, "reporter": entry.reporter,
                 "evidence_sha256": entry.evidence_sha256, "note": entry.note,
             }),
         );
-        self.blocklist.insert(map_key, entry);
+        self.blocklist.insert(token, entry);
     }
 
     /// Gives `amount` back to `agent`'s credit, and to its budget if it is still the arming that
@@ -1488,6 +1550,8 @@ mod tests {
     const QUOTE: u128 = 20_435_000;
     /// The owner's EVM address for ETH withdrawals, fixed at init.
     const WITHDRAW_TO: &str = "0x000000000000000000000000000000000000bEEF";
+    /// Gas limit of every signed transaction (`evm()`), and the one the sentinel simulates with.
+    const GAS: u64 = 250_000;
 
     fn id(s: &str) -> AccountId {
         s.parse().unwrap()
@@ -1507,7 +1571,7 @@ mod tests {
         EvmConfig {
             mpc: id("mpc.test"),
             address: ADDR.into(),
-            gas_limit: 250_000,
+            gas_limit: GAS,
             max_fee_per_gas: U128(50_000_000),
             max_priority_fee_per_gas: U128(1_000_000),
             yocto_per_wei: U128(RATE),
@@ -1942,6 +2006,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
         g.post_verdict(
             b,
@@ -1951,6 +2016,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
         assert_eq!(g.fees(), U128(2 * PRICE));
         ctx("owner.test", 0, 500);
@@ -1973,6 +2039,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
         ctx("owner.test", 0, 500);
         let _ = g.withdraw_fees(U128(PRICE + 1));
@@ -2023,6 +2090,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
         let c = g.get_check(check).unwrap();
         assert_eq!(c.verdict, Some(Verdict::Block));
@@ -2048,6 +2116,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
     }
 
@@ -2066,6 +2135,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
         g.post_verdict(
             check,
@@ -2075,6 +2145,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
     }
 
@@ -2110,6 +2181,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
         ctx("agent.test", 0, 700);
         (g, check)
@@ -2428,6 +2500,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
         assert_eq!(g.get_check(check).unwrap().quote, U128(QUOTE));
         let v = last_event();
@@ -2448,6 +2521,7 @@ mod tests {
             U128(0),
             code("aa"),
             true,
+            GAS,
         );
     }
 
@@ -2463,6 +2537,7 @@ mod tests {
             U128(0),
             code("aa"),
             true,
+            GAS,
         );
         assert_eq!(g.get_check(check).unwrap().verdict, Some(Verdict::Block));
     }
@@ -2803,6 +2878,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
         ctx("agent.test", 0, VERDICT_TIMEOUT_NS);
         g.refund_check(check);
@@ -2832,6 +2908,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
     }
 
@@ -2866,6 +2943,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
         let v = near_sdk::serde_json::to_value(g.get_check(check).unwrap()).unwrap();
         assert_eq!(
@@ -2915,6 +2993,7 @@ mod tests {
             U128(QUOTE),
             proxy("11"), // code with a proxy implementation; either verdict also writes `seen`
             true,
+            GAS,
         );
         let c = g.checks.get_mut(&check).unwrap();
         c.exit_amount = Some(U128(u128::MAX));
@@ -2924,7 +3003,8 @@ mod tests {
             c.signed_tx = Some(vec![0xff; 396].into());
             c.settled = true;
             c.buy_decision_sha256 = Some("f".repeat(64));
-            g.holdings.insert(holding_key(&big, TARGET), u128::MAX);
+            g.holdings
+                .insert(TARGET.to_ascii_lowercase(), (big.clone(), u128::MAX));
         }
         g.checks.flush();
         g.credits.flush();
@@ -2967,6 +3047,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
         assert_eq!(g.fees(), U128(PRICE));
     }
@@ -3019,6 +3100,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
         (g, check)
     }
@@ -3247,6 +3329,7 @@ mod tests {
             U128(QUOTE),
             code,
             true,
+            GAS,
         );
         check
     }
@@ -3331,14 +3414,9 @@ mod tests {
         g
     }
 
-    fn report_as(g: &mut Guard, who: &str, kind: &str, key: &str) {
+    fn report_as(g: &mut Guard, who: &str, token: &str) {
         ctx(who, 0, 50);
-        g.report(
-            kind.into(),
-            key.into(),
-            SHA.into(),
-            "honeypot seen by agent B".into(),
-        );
+        g.report(token.into(), SHA.into(), "honeypot seen by agent B".into());
     }
 
     #[test]
@@ -3346,8 +3424,8 @@ mod tests {
         let mut g = with_reporter(ONE_NEAR);
         let credit = g.credit_of(&id("reporter.test")).0;
         let fees = g.fees().0;
-        report_as(&mut g, "reporter.test", "token", TARGET);
-        let e = g.get_entry("token".into(), TARGET.to_lowercase()).unwrap();
+        report_as(&mut g, "reporter.test", TARGET);
+        let e = g.get_entry(TARGET.to_lowercase()).unwrap();
         assert_eq!(e.reporter, id("reporter.test"));
         assert_eq!(e.evidence_sha256, SHA);
         assert_eq!(e.at_ns, U64(50));
@@ -3357,25 +3435,25 @@ mod tests {
         assert_eq!(g.fees().0, fees + cost);
         let v = last_event();
         assert_eq!(v["event"], "listed");
-        assert_eq!(v["data"][0]["kind"], "token");
-        assert_eq!(v["data"][0]["key"], TARGET.to_lowercase());
+        assert_eq!(v["data"][0]["token"], TARGET.to_lowercase());
         assert_eq!(v["data"][0]["reporter"], "reporter.test");
         assert_eq!(v["data"][0]["evidence_sha256"], SHA);
     }
 
+    // A template is never listed: copies of an honest token's code launched later must not get it
+    // blocked (template reputation is the sentinel's, per target).
     #[test]
-    fn a_code_hash_can_be_listed() {
+    #[should_panic(expected = "invalid token")]
+    fn a_code_hash_cannot_be_listed() {
         let mut g = with_reporter(ONE_NEAR);
-        let key = format!("0x{}", "AB".repeat(32));
-        report_as(&mut g, "reporter.test", "code", &key);
-        assert!(g.get_entry("code".into(), key.to_lowercase()).is_some());
+        report_as(&mut g, "reporter.test", &format!("0x{}", "ab".repeat(32)));
     }
 
     #[test]
     #[should_panic(expected = "reporter only")]
     fn an_unregistered_account_cannot_report() {
         let mut g = with_reporter(ONE_NEAR);
-        report_as(&mut g, "agent.test", "token", TARGET);
+        report_as(&mut g, "agent.test", TARGET);
     }
 
     #[test]
@@ -3384,7 +3462,7 @@ mod tests {
         let mut g = with_reporter(ONE_NEAR);
         ctx("owner.test", 0, 10);
         g.set_reporter(id("reporter.test"), false);
-        report_as(&mut g, "reporter.test", "token", TARGET);
+        report_as(&mut g, "reporter.test", TARGET);
     }
 
     #[test]
@@ -3399,29 +3477,22 @@ mod tests {
     #[should_panic(expected = "insufficient credit for the entry's storage")]
     fn a_report_needs_credit_for_its_storage() {
         let mut g = with_reporter(2 * U); // about 1 U of credit left after the credit entry's own storage
-        report_as(&mut g, "reporter.test", "token", TARGET);
+        report_as(&mut g, "reporter.test", TARGET);
     }
 
     #[test]
     #[should_panic(expected = "already listed")]
     fn an_entry_is_never_overwritten() {
         let mut g = with_reporter(ONE_NEAR);
-        report_as(&mut g, "reporter.test", "token", TARGET);
-        report_as(&mut g, "reporter.test", "token", &TARGET.to_lowercase());
+        report_as(&mut g, "reporter.test", TARGET);
+        report_as(&mut g, "reporter.test", &TARGET.to_lowercase());
     }
 
     #[test]
-    #[should_panic(expected = "invalid kind")]
-    fn a_report_needs_a_known_kind() {
+    #[should_panic(expected = "invalid token")]
+    fn a_report_needs_a_token_address() {
         let mut g = with_reporter(ONE_NEAR);
-        report_as(&mut g, "reporter.test", "wallet", TARGET);
-    }
-
-    #[test]
-    #[should_panic(expected = "invalid key")]
-    fn a_report_needs_a_valid_key() {
-        let mut g = with_reporter(ONE_NEAR);
-        report_as(&mut g, "reporter.test", "code", TARGET);
+        report_as(&mut g, "reporter.test", "0xabc");
     }
 
     #[test]
@@ -3429,19 +3500,19 @@ mod tests {
     fn a_report_needs_an_evidence_sha256() {
         let mut g = with_reporter(ONE_NEAR);
         ctx("reporter.test", 0, 50);
-        g.report("token".into(), TARGET.into(), "abc".into(), String::new());
+        g.report(TARGET.into(), "abc".into(), String::new());
     }
 
     #[test]
     fn the_owner_unlists_an_entry_with_an_event() {
         let mut g = with_reporter(ONE_NEAR);
-        report_as(&mut g, "reporter.test", "token", TARGET);
+        report_as(&mut g, "reporter.test", TARGET);
         ctx("owner.test", 0, 60);
-        g.unlist("token".into(), TARGET.into());
-        assert!(g.get_entry("token".into(), TARGET.into()).is_none());
+        g.unlist(TARGET.into());
+        assert!(g.get_entry(TARGET.into()).is_none());
         let v = last_event();
         assert_eq!(v["event"], "unlisted");
-        assert_eq!(v["data"][0]["key"], TARGET.to_lowercase());
+        assert_eq!(v["data"][0]["token"], TARGET.to_lowercase());
         assert_eq!(v["data"][0]["by"], "owner.test");
     }
 
@@ -3449,16 +3520,16 @@ mod tests {
     #[should_panic(expected = "owner only")]
     fn a_reporter_cannot_unlist() {
         let mut g = with_reporter(ONE_NEAR);
-        report_as(&mut g, "reporter.test", "token", TARGET);
+        report_as(&mut g, "reporter.test", TARGET);
         ctx("reporter.test", 0, 60);
-        g.unlist("token".into(), TARGET.into());
+        g.unlist(TARGET.into());
     }
 
     #[test]
     fn a_block_verdict_lists_its_target_automatically() {
         let mut g = funded(ONE_NEAR, 100 * U, 1000);
         let check = verdict_on(&mut g, Verdict::Block, code("aa"), 10);
-        let e = g.get_entry("token".into(), TARGET.into()).unwrap();
+        let e = g.get_entry(TARGET.into()).unwrap();
         assert_eq!(e.reporter, id("sentinel.test"));
         assert_eq!(e.evidence_sha256, SHA_EMPTY);
         assert_eq!(e.note, format!("verdict #{check}"));
@@ -3468,7 +3539,7 @@ mod tests {
     #[test]
     fn a_block_on_a_listed_target_keeps_the_first_entry() {
         let mut g = with_reporter(ONE_NEAR);
-        report_as(&mut g, "reporter.test", "token", TARGET);
+        report_as(&mut g, "reporter.test", TARGET);
         ctx("agent.test", 0, 60);
         // the request is refused once listed: judge one made before the listing
         let mut g2 = funded(ONE_NEAR, 100 * U, 1000);
@@ -3484,19 +3555,17 @@ mod tests {
             U128(0),
             code("aa"),
             true,
+            GAS,
         );
-        assert_eq!(
-            g2.get_entry("token".into(), TARGET.into()).unwrap().note,
-            "verdict #2"
-        );
-        assert!(g.get_entry("token".into(), TARGET.into()).is_some());
+        assert_eq!(g2.get_entry(TARGET.into()).unwrap().note, "verdict #2");
+        assert!(g.get_entry(TARGET.into()).is_some());
     }
 
     #[test]
     #[should_panic(expected = "target is on the shared blocklist")]
     fn a_listed_target_cannot_be_checked_for_a_buy() {
         let mut g = with_reporter(ONE_NEAR);
-        report_as(&mut g, "reporter.test", "token", TARGET);
+        report_as(&mut g, "reporter.test", TARGET);
         ctx("agent.test", 0, 60);
         let _ = g.request_check(TARGET.to_lowercase(), None);
     }
@@ -3509,7 +3578,7 @@ mod tests {
         g.set_reporter(id("reporter.test"), true);
         ctx("owner.test", ONE_NEAR, 0);
         g.deposit_credit(Some(id("reporter.test")));
-        report_as(&mut g, "reporter.test", "token", TARGET);
+        report_as(&mut g, "reporter.test", TARGET);
         ctx("agent.test", 0, 700);
         buy(&mut g, check);
     }
@@ -3517,7 +3586,7 @@ mod tests {
     #[test]
     fn the_owner_still_sells_a_listed_token() {
         let mut g = with_reporter(ONE_NEAR);
-        report_as(&mut g, "reporter.test", "token", TARGET);
+        report_as(&mut g, "reporter.test", TARGET);
         ctx("owner.test", 0, 700);
         let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN));
         assert_eq!(signed_hashes(b"on_exit_signed"), [APPROVE_HASH, SELL_HASH]);
@@ -3535,12 +3604,7 @@ mod tests {
         g.credits.flush();
         ctx(big.as_str(), 0, 50);
         let before = env::storage_usage();
-        g.report(
-            "code".into(),
-            format!("0x{}", "ab".repeat(32)),
-            SHA.into(),
-            "n".repeat(MAX_NOTE),
-        );
+        g.report(TARGET.into(), SHA.into(), "n".repeat(MAX_NOTE));
         g.blocklist.flush();
         g.credits.flush();
         let used = u128::from(env::storage_usage() - before);
@@ -3559,8 +3623,7 @@ mod tests {
 
     /// Sets the holding of `agent.test` in TARGET (the real path is the signed buy's `min_out`).
     fn give_holding(g: &mut Guard, amount: u128) {
-        g.holdings
-            .insert(holding_key(&id("agent.test"), TARGET), amount);
+        g.set_held(&id("agent.test"), TARGET, amount);
     }
 
     /// The agent's buy of TARGET is signed (nonce 0); it then asks an exit quote of `SELL_AMOUNT` at
@@ -3581,6 +3644,7 @@ mod tests {
             U128(quote),
             None,
             true,
+            GAS,
         );
         (g, bought, exit)
     }
@@ -3712,7 +3776,7 @@ mod tests {
         ctx("owner.test", ONE_NEAR, 900);
         g.deposit_credit(Some(id("sentinel.test"))); // the sentinel's report is paid from its credit
         ctx("sentinel.test", 0, 900);
-        g.report("token".into(), TARGET.into(), SHA.into(), String::new());
+        g.report(TARGET.into(), SHA.into(), String::new());
         give_holding(&mut g, SELL_AMOUNT);
         ctx("agent.test", 0, 1000);
         let exit = g.request_exit(bought, U128(SELL_AMOUNT));
@@ -3725,6 +3789,7 @@ mod tests {
             U128(EXIT_QUOTE),
             None,
             true,
+            GAS,
         );
         sell_quoted_at(&mut g, exit, 1100);
         assert_eq!(last_event()["event"], "exit_requested");
@@ -3752,6 +3817,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
         ctx("agent.test", 0, 700);
         let other = "0".repeat(64);
@@ -3827,6 +3893,7 @@ mod tests {
             U128(QUOTE),
             code("aa"),
             true,
+            GAS,
         );
         ctx(who, 0, now_ns + 3);
         buy(g, check);
@@ -3847,6 +3914,7 @@ mod tests {
             U128(EXIT_QUOTE),
             None,
             true,
+            GAS,
         );
         exit
     }
@@ -3874,16 +3942,26 @@ mod tests {
         assert_eq!(holding_of(&g, "agent.test"), 0);
     }
 
+    // The guard's EVM address pools every agent's tokens: if two agents held the same token, a credit
+    // whose buy reverted on Base could sell the other agent's tokens. One agent per token at a time.
     #[test]
-    #[should_panic(expected = "exit amount above the agent's holding")]
-    fn agent_b_cannot_exit_the_tokens_bought_for_agent_a() {
+    #[should_panic(expected = "token held for another agent")]
+    fn agent_b_cannot_buy_a_token_held_for_agent_a() {
         let (mut g, _) = judged(Verdict::Allow);
-        let bought_a = bought_for(&mut g, "agent.test", 2000);
-        let bought_b = bought_for(&mut g, "agentb.test", 4000);
-        assert_ne!(bought_a, bought_b);
-        // the guard's address holds both, B may sell only its own share
-        ctx("agentb.test", 0, 6000);
-        let _ = g.request_exit(bought_b, U128(2 * MIN_OUT));
+        bought_for(&mut g, "agent.test", 2000);
+        bought_for(&mut g, "agentb.test", 4000);
+    }
+
+    #[test]
+    fn after_agent_a_sold_its_whole_holding_agent_b_may_buy_the_token() {
+        let (mut g, _) = judged(Verdict::Allow);
+        let bought = bought_for(&mut g, "agent.test", 2000);
+        let exit = exit_quote(&mut g, "agent.test", bought, MIN_OUT, 3000);
+        sell_quoted_at(&mut g, exit, 3100);
+        exit_signed(&mut g, vec![ok_sig(SIG_A), ok_sig(SIG_B)]);
+        bought_for(&mut g, "agentb.test", 4000);
+        assert_eq!(holding_of(&g, "agentb.test"), MIN_OUT);
+        assert_eq!(holding_of(&g, "agent.test"), 0);
     }
 
     #[test]
@@ -3995,6 +4073,7 @@ mod tests {
             U128(QUOTE),
             code("bb"),
             false, // not listed: the next check is still possible
+            GAS,
         );
         assert_eq!(g.last_code(TARGET.into()).unwrap().id, first);
         let back = verdict_on(&mut g, Verdict::Warn, code("aa"), 30); // same code, any verdict
@@ -4015,6 +4094,7 @@ mod tests {
             U128(QUOTE),
             code,
             list_target,
+            GAS,
         );
         ctx("agent.test", 0, 12);
         let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -4025,7 +4105,7 @@ mod tests {
     }
 
     fn listed(g: &Guard) -> bool {
-        g.get_entry("token".into(), TARGET.to_lowercase()).is_some()
+        g.get_entry(TARGET.to_lowercase()).is_some()
     }
 
     #[test]
@@ -4051,14 +4131,9 @@ mod tests {
     fn list_entries_pages_through_the_blocklist_and_follows_unlist() {
         let mut g = with_reporter(ONE_NEAR);
         for n in ["1", "2", "3"] {
-            report_as(
-                &mut g,
-                "reporter.test",
-                "code",
-                &format!("0x{}", n.repeat(64)),
-            );
+            report_as(&mut g, "reporter.test", &format!("0x{}", n.repeat(40)));
         }
-        report_as(&mut g, "reporter.test", "token", TARGET);
+        report_as(&mut g, "reporter.test", TARGET);
         let page = g.list_entries(0, 3);
         assert_eq!(page.len(), 3);
         let rest = g.list_entries(3, 50);
@@ -4072,25 +4147,120 @@ mod tests {
         assert_eq!(
             keys,
             [
-                format!("code:0x{}", "1".repeat(64)),
-                format!("code:0x{}", "2".repeat(64)),
-                format!("code:0x{}", "3".repeat(64)),
-                format!("token:{}", TARGET.to_lowercase()),
+                format!("0x{}", "1".repeat(40)),
+                format!("0x{}", "2".repeat(40)),
+                format!("0x{}", "3".repeat(40)),
+                TARGET.to_lowercase(),
             ]
         );
         assert!(g.list_entries(4, 10).is_empty());
         assert_eq!(page[0].1.reporter, id("reporter.test"));
         ctx("owner.test", 0, 60);
-        g.unlist("token".into(), TARGET.into());
+        g.unlist(TARGET.into());
         assert_eq!(g.list_entries(0, 50).len(), 3);
+    }
+
+    // 22. gas: the owner may change the gas limit and fees within bounds (a sale that needs more gas
+    // can be retried); a verdict simulated with another gas limit neither buys nor exits
+    /// The owner sets the gas limit to `gas` (fees unchanged) at 650 ns.
+    fn set_gas(g: &mut Guard, gas: u64) {
+        ctx("owner.test", 0, 650);
+        g.set_evm_gas(gas, U128(50_000_000), U128(1_000_000));
+    }
+
+    #[test]
+    fn the_owner_sets_the_gas_limit_and_fees_within_bounds_with_an_event() {
+        let mut g = guard();
+        ctx("owner.test", 0, 0);
+        g.set_evm_gas(600_000, U128(10_000_000_000), U128(2_000_000));
+        let e = g.evm_config();
+        assert_eq!(
+            (e.gas_limit, e.max_fee_per_gas, e.max_priority_fee_per_gas),
+            (600_000, U128(10_000_000_000), U128(2_000_000))
+        );
+        let v = last_event();
+        assert_eq!(v["event"], "evm_gas_set");
+        assert_eq!(v["data"][0]["gas_limit"], 600_000);
+        assert_eq!(v["data"][0]["max_fee_per_gas"], "10000000000");
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn only_the_owner_sets_the_gas() {
+        let mut g = funded(ONE_NEAR, 10 * U, 1000);
+        ctx("agent.test", 0, 0);
+        g.set_evm_gas(600_000, U128(50_000_000), U128(1_000_000));
+    }
+
+    #[test]
+    fn gas_settings_out_of_bounds_are_refused() {
+        let bad: [(u64, u128, u128); 4] = [
+            (20_999, 50_000_000, 1_000_000),
+            (2_000_001, 50_000_000, 1_000_000),
+            (250_000, 10_000_000_001, 1_000_000),
+            (250_000, 50_000_000, 50_000_001),
+        ];
+        for (gas, fee, tip) in bad {
+            let mut g = guard();
+            ctx("owner.test", 0, 0);
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                g.set_evm_gas(gas, U128(fee), U128(tip));
+            }));
+            assert!(r.is_err(), "accepted gas {gas}, fee {fee}, tip {tip}");
+        }
+    }
+
+    // its callback rebuilds the transaction from the config: changing it mid-signature would
+    // attach the signature to another transaction
+    #[test]
+    #[should_panic(expected = "a signature is already in progress")]
+    fn no_gas_change_while_a_signature_is_in_progress() {
+        let mut g = sell_as("owner.test");
+        set_gas(&mut g, 600_000);
+    }
+
+    #[test]
+    fn after_raising_the_gas_the_owner_retries_a_sale_signed_with_it() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 1000 * U);
+        set_gas(&mut g, 600_000);
+        ctx("owner.test", 0, 700);
+        let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN));
+        let raw = exit_signed(&mut g, vec![ok_sig(SIG_A), ok_sig(SIG_B)]);
+        assert_eq!(raw.len(), 2);
+        // RLP of the gas limit: 0x83 then 600,000 = 0x0927c0 (250,000 would be 0x8303d090)
+        assert!(raw
+            .iter()
+            .all(|t| t.contains("830927c0") && !t.contains("8303d090")));
+    }
+
+    #[test]
+    fn a_verdict_stores_the_gas_limit_it_was_simulated_with() {
+        let (g, check) = judged(Verdict::Allow);
+        assert_eq!(g.get_check(check).unwrap().gas_limit, GAS);
+    }
+
+    #[test]
+    #[should_panic(expected = "verdict simulated with another gas limit")]
+    fn a_buy_on_a_verdict_simulated_with_another_gas_limit_is_refused() {
+        let (mut g, check) = judged(Verdict::Allow);
+        set_gas(&mut g, 600_000);
+        ctx("agent.test", 0, 700);
+        buy(&mut g, check);
+    }
+
+    #[test]
+    #[should_panic(expected = "verdict simulated with another gas limit")]
+    fn an_exit_quote_simulated_with_another_gas_limit_is_refused() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        set_gas(&mut g, 600_000);
+        sell_quoted_at(&mut g, exit, 1100);
     }
 
     #[test]
     fn list_entries_caps_the_page_size() {
         let mut g = with_reporter(ONE_NEAR);
         for n in 0..=MAX_PAGE {
-            let key = format!("0x{}{}", hex(&n.to_be_bytes()[3..]), "0".repeat(62));
-            report_as(&mut g, "reporter.test", "code", &key);
+            report_as(&mut g, "reporter.test", &format!("0x{n:040x}"));
         }
         assert_eq!(g.list_entries(0, u32::MAX).len(), MAX_PAGE as usize);
     }

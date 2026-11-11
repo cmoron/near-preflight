@@ -14,7 +14,8 @@ contract DemoToken {
         HoldOneBlock, // honnete : pas de vente dans le bloc de l'achat (anti-sandwich), libre ensuite
         SimDetector, // la vente ne passe qu'en simulation : prix du gaz ou base fee nuls
         FrozenAddress, // tokens held by `special` can never leave it (e.g. the guard's public EVM address)
-        SellTax20 // 20 % of each sale goes to the owner: a warn, not a block
+        SellTax20, // 20 % of each sale goes to the owner: a warn, not a block
+        GasHungry // a sale reverts unless the transaction has 500,000 gas left (the guard signs 250,000)
     }
 
     string public name;
@@ -82,6 +83,7 @@ contract DemoToken {
             }
             if (trap == Trap.HoldOneBlock && block.number <= boughtBlock[from]) revert("hold one block");
             if (trap == Trap.SimDetector && tx.gasprice != 0 && block.basefee != 0) revert("real sale refused");
+            if (trap == Trap.GasHungry && gasleft() < 500_000) revert("sale needs 500,000 gas");
             if (trap == Trap.SellTax) fee = (value * 90) / 100;
             if (trap == Trap.SellTax20) fee = (value * 20) / 100;
             if (trap == Trap.SellTaxLater && block.timestamp > boughtAt[from] + 10 minutes) {

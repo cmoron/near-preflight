@@ -57,11 +57,13 @@ async function scopedKey(name: string, methods: string[], allowance: `${number}`
   return key.toString();
 }
 
-const guardKey = await subAccount("guard", "4"); // wasm of ~315 KB: ~3.2 NEAR of storage
-await subAccount("agent", "0.5");
-await subAccount("agent2", "0.3");
-await subAccount("sentinel", "0.5");
-await subAccount("armer", "0.3");
+// About 6.1 NEAR in all with the credit below: one 10 NEAR faucet account is enough, with room to spare.
+const guardKey = await subAccount("guard", "3.5"); // wasm of ~318 KB: ~3.2 NEAR of storage
+// Each role's own account pays the gas of its calls: a few thousandths of NEAR each.
+await subAccount("agent", "0.3");
+await subAccount("agent2", "0.2");
+await subAccount("sentinel", "0.3");
+await subAccount("armer", "0.2");
 // Adresse EVM que NEAR signe pour la garde : derivee de la cle maitresse du MPC, du compte et du chemin fixe.
 const evmAddress = deriveEvmAddress(await fetchMasterPublicKey(), id("guard"), GUARD_PATH);
 
@@ -95,7 +97,7 @@ if (!process.argv[3]) console.log("  0x...dEaD is a demo placeholder (a burn add
 // attaches 150 TGas (two signatures). 0,5 NEAR, le solde du compte de l'agent qui paie ce gaz.
 const agentKey = await scopedKey("agent", AGENT_METHODS, "0.5");
 const agent2Key = await scopedKey("agent2", AGENT_METHODS);
-const sentinelKey = await scopedKey("sentinel", ["post_verdict", "report"]);
+const sentinelKey = await scopedKey("sentinel", ["post_verdict"]);
 const armerKey = await scopedKey("armer", ["arm", "disarm"]);
 
 const owner = (methodName: string, args: Record<string, unknown>) => human.callFunction({ contractId: id("guard"), methodName, args });
@@ -107,21 +109,12 @@ await human.callFunction({
   contractId: id("guard"),
   methodName: "deposit_credit",
   args: { account_id: id("agent") },
-  deposit: nearToYocto("2"),
+  deposit: nearToYocto("1.5"),
 });
-console.log(`2 NEAR of credit deposited for ${id("agent")}`);
-// The second agent checks the farm token in the demo: one verdict, plus margin.
-await human.callFunction({ contractId: id("guard"), methodName: "deposit_credit", args: { account_id: id("agent2") }, deposit: nearToYocto("0.1") });
-console.log(`0.1 NEAR of credit deposited for ${id("agent2")}`);
-// The sentinel reports templates to the shared blocklist: each entry's storage (500 bytes, 0.005 NEAR)
-// is paid from its credit, never from the guard's balance.
-await human.callFunction({
-  contractId: id("guard"),
-  methodName: "deposit_credit",
-  args: { account_id: id("sentinel") },
-  deposit: nearToYocto("0.05"),
-});
-console.log(`0.05 NEAR of credit deposited for ${id("sentinel")} (storage of its blocklist reports)`);
+console.log(`1.5 NEAR of credit deposited for ${id("agent")} (a demo run spends 0.1 to 0.3 of it)`);
+// The second agent checks the farm token in ./demo.sh --full: one verdict, plus margin.
+await human.callFunction({ contractId: id("guard"), methodName: "deposit_credit", args: { account_id: id("agent2") }, deposit: nearToYocto("0.05") });
+console.log(`0.05 NEAR of credit deposited for ${id("agent2")}`);
 
 // Config partagee sans cle ; chaque cle function-call dans son fichier, charge par son seul processus
 // (bun --env-file=.env --env-file=.env.agent ...) : l'agent ne lit jamais la cle de la sentinelle

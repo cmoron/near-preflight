@@ -1,8 +1,8 @@
 'use strict';
 // Guard account to read. Override with ?guard=<account id>.
-const DEFAULT_GUARD = 'guard.goblin-guard-52320.testnet';
+const DEFAULT_GUARD = 'guard.goblin-guard-40291.testnet';
 const RPCS = ['https://test.rpc.fastnear.com', 'https://rpc.testnet.near.org'];
-const LAST_N = 20, REFRESH_MS = 15000, BATCH = 5;
+const LAST_N = 20, REFRESH_MS = 15000, BATCH = 5, PAGE = 50;
 
 const GUARD = new URLSearchParams(location.search).get('guard') || DEFAULT_GUARD;
 let rpcIdx = 0;
@@ -63,7 +63,7 @@ function row(c) {
   const tr = el('tr');
   const id = c.id;
   if (!c.check) { // get_check returned null: refunded or unknown
-    tr.append(cell('Id', String(id)), el('td', { colspan: 8, 'data-label': 'State' }, 'No such check (refunded or removed).'));
+    tr.append(cell('Id', String(id)), el('td', { colspan: 9, 'data-label': 'State' }, 'No such check (refunded or removed).'));
     return tr;
   }
   const k = c.check, v = k.verdict || 'pending';
@@ -78,8 +78,18 @@ function row(c) {
     cell('Human OK', k.approved ? 'yes' : k.verdict === 'warn' ? 'awaiting' : 'no'),
     cell('Signed', exit ? (k.settled ? 'yes (exit)' : 'no') : (k.signed_tx ? 'yes' : 'no')),
     cell('Evidence', k.evidence_sha256 ? mono(k.evidence_sha256) : '-'),
+    cell('Model decision', decisions(k)),
   );
   return tr;
+}
+
+// sha256 of the attested model decisions anchored with the check (request_check) and its buy
+function decisions(k) {
+  const d = [['check', k.decision_sha256], ['buy', k.buy_decision_sha256]].filter(([, h]) => h);
+  if (!d.length) return '-';
+  const out = el('span');
+  d.forEach(([what, h], i) => out.append(i ? el('br') : '', what + ' ', mono(h)));
+  return out;
 }
 
 function emptyRow(n, text) {
@@ -114,39 +124,32 @@ async function renderChecks() {
   for (let i = last; i >= 1 && ids.length < LAST_N; i--) ids.push(i);
   const checks = await mapBatches(ids, async (id) => ({ id, check: await view('get_check', { id }) }));
   const tb = $('checks').tBodies[0];
-  tb.replaceChildren(...(checks.length ? checks.map(row) : [emptyRow(9, 'No check yet.')]));
+  tb.replaceChildren(...(checks.length ? checks.map(row) : [emptyRow(10, 'No check yet.')]));
   $('count').textContent = '(last ' + checks.length + ' of ' + last + ', newest first)';
   return checks;
 }
 
-async function renderBlocklist(checks) {
-  const blocked = [], seen = new Set();
-  for (const { id, check: k } of checks) {
-    if (k && k.verdict === 'block' && k.exit_amount == null && !seen.has(k.target.toLowerCase())) {
-      seen.add(k.target.toLowerCase());
-      blocked.push({ id, k });
-    }
-  }
-  const entries = await mapBatches(blocked, async ({ id, k }) => ({
-    id, k, entry: await view('get_entry', { kind: 'token', key: k.target.toLowerCase() }),
-  }));
+// The whole blocklist, PAGE entries per list_entries call.
+async function renderBlocklist() {
+  const entries = [];
+  for (let page; !page || page.length === PAGE; entries.push(...page)) page = await view('list_entries', { from_index: entries.length, limit: PAGE });
   const tb = $('blocklist').tBodies[0];
-  const rows = entries.map(({ id, k, entry }) => el('tr', {},
-    cell('Target', mono(k.target)),
-    cell('Check', '#' + id),
-    cell('Listed', entry ? 'yes' : 'no (unlisted by owner?)'),
-    cell('Reporter', entry ? mono(entry.reporter, entry.reporter) : '-'),
-    cell('Listed at', entry ? when(entry.at_ns) : '-'),
-    cell('Evidence', entry ? mono(entry.evidence_sha256) : '-'),
-    cell('Note', entry ? entry.note || '-' : '-'),
+  const rows = entries.map(([token, e]) => el('tr', {},
+    cell('Token', mono(token)),
+    cell('Reporter', mono(e.reporter, e.reporter)),
+    cell('Listed at', when(e.at_ns)),
+    cell('Evidence', mono(e.evidence_sha256)),
+    cell('Note', e.note || '-'),
   ));
-  tb.replaceChildren(...(rows.length ? rows : [emptyRow(7, 'No blocked target among the listed checks.')]));
+  tb.replaceChildren(...(rows.length ? rows : [emptyRow(5, 'The blocklist is empty.')]));
+  $('listed').textContent = '(' + entries.length + ' token' + (entries.length === 1 ? '' : 's') + ')';
 }
 
 async function refresh() {
   try {
     await renderBounds();
-    await renderBlocklist(await renderChecks());
+    await renderChecks();
+    await renderBlocklist();
     $('updated').textContent = 'Last updated ' + new Date().toLocaleTimeString() + ', refresh every ' + REFRESH_MS / 1000 + ' s.';
     $('error').hidden = true;
   } catch (e) {

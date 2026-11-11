@@ -5,11 +5,13 @@
 // reset: clears the agent's 7-day arming log (after replacing a compromised armer).
 // withdraw <wei>: ETH from the guard's EVM address to the owner's address fixed at init.
 // sell <token> <amount> [min wei]: the owner's own exit, never blocked by a freeze, a verdict or the list.
-// unlist <token|code> <key>: removes an entry from the shared blocklist.
+// unlist <token>: removes a token from the shared blocklist.
+// gas <limit>: sets the gas limit of every transaction the guard signs (21,000 to 2,000,000, fees
+// unchanged): a sale that needs more gas than the limit can be retried with `sell` after raising it.
 // The relay broadcasts withdrawals and sales: bun --env-file=.env app/relay.ts exit <nonce>.
-// Usage : bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] | unlist <token|code> <key>
+// Usage : bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] | unlist <token> | gas <limit>
 import { parseTransaction, type Hex } from "viem";
-import { call, env, humanAccount } from "./near";
+import { call, env, humanAccount, view } from "./near";
 
 const human = await humanAccount(env("OWNER"));
 const agent = env("AGENT");
@@ -32,13 +34,17 @@ if (cmd === "stop") {
 } else if (cmd === "withdraw" && a) {
   const { value, tx } = await call<Hex[]>(human, "withdraw_eth", { amount_wei: a }, 0n, EXIT_GAS);
   console.log(`  [human] withdrawal of ${a} wei signed by NEAR (${value.length}/1 tx)${relayHint(value)}  ${tx}`);
-} else if (cmd === "unlist" && a && b) {
-  const { tx } = await call(human, "unlist", { kind: a, key: b });
-  console.log(`  [human] ${a} ${b} removed from the shared blocklist  ${tx}`);
+} else if (cmd === "unlist" && a) {
+  const { tx } = await call(human, "unlist", { token: a });
+  console.log(`  [human] ${a} removed from the shared blocklist  ${tx}`);
+} else if (cmd === "gas" && a) {
+  const { max_fee_per_gas, max_priority_fee_per_gas } = await view<{ max_fee_per_gas: string; max_priority_fee_per_gas: string }>("evm_config");
+  const { tx } = await call(human, "set_evm_gas", { gas_limit: Number(a), max_fee_per_gas, max_priority_fee_per_gas });
+  console.log(`  [human] gas limit of every signed transaction set to ${a} (fees unchanged)  ${tx}`);
 } else if (cmd === "sell" && a && b) {
   const { value, tx } = await call<Hex[]>(human, "sell", { token: a, amount: b, min_out_wei: c }, 0n, EXIT_GAS);
   console.log(`  [human] sale of ${b} ${a} signed by NEAR (${value.length}/2 tx)${relayHint(value)}  ${tx}`);
 } else {
-  console.error("usage: bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] | unlist <token|code> <key>");
+  console.error("usage: bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] | unlist <token> | gas <limit>");
   process.exit(2);
 }

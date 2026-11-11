@@ -36,6 +36,7 @@ type Evidence = {
   block: number;
   method: string;
   request_sha256: string;
+  gas_limit: number;
   code_hash: string;
   implementation: string | null;
   calls: string[];
@@ -45,7 +46,7 @@ type Evidence = {
   reputation: Reputation | null;
   near: NearFacts;
 };
-type ExitEvidence = { kind: "exit"; chain_id: number; block: number; method: string; request_sha256: string; amount: string; calls: string[]; quote: string };
+type ExitEvidence = { kind: "exit"; chain_id: number; block: number; method: string; request_sha256: string; gas_limit: number; amount: string; calls: string[]; quote: string };
 /** `skipped` : controle non verifiable sur ce noeud, dit comme tel (ni reussi ni echoue). */
 export type Line = { ok: boolean; line: string; skipped?: boolean };
 /** Demande lue par get_check sur la garde NEAR. */
@@ -59,13 +60,15 @@ export type OnChain = {
   judged_ns: string;
   code: { code_hash: string; implementation: string | null } | null;
   exit_amount: string | null;
+  /** Gas limit the verdict was simulated with: the guard signs a buy or an exit on it only if its own is the same. */
+  gas_limit: number;
 } | null;
 /** A blocklist entry as get_entry returns it, null if not listed. */
 export type OnChainEntry = { reporter: string; evidence_sha256: string } | null;
 type BlockStateCall = { blockOverrides: { time: Hex }; calls: { from: Address }[] };
 
-const EVIDENCE_KEYS = "block,calls,chain_id,code_hash,implementation,liquidity,method,near,quote,reputation,request_sha256,template";
-const EXIT_KEYS = "amount,block,calls,chain_id,kind,method,quote,request_sha256";
+const EVIDENCE_KEYS = "block,calls,chain_id,code_hash,gas_limit,implementation,liquidity,method,near,quote,reputation,request_sha256,template";
+const EXIT_KEYS = "amount,block,calls,chain_id,gas_limit,kind,method,quote,request_sha256";
 const REPUTATION_KEYS = "before_block,drained,from,index_sha256,median_drain_blocks,pools,template,to";
 /** Ecart tolere entre l'heure du bloc EVM et celles de la demande et du verdict NEAR : horloges de
  *  deux chaines, retard du RPC EVM lu par la sentinelle, intervalle de bloc. */
@@ -89,7 +92,7 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
   }
   if (isObj(e) && e.kind === "exit") {
     if (Object.keys(e).sort().join() !== EXIT_KEYS) return `exit evidence keys are not exactly ${EXIT_KEYS}`;
-    const typed = Number.isSafeInteger(e.chain_id) && Number.isSafeInteger(e.block) && e.method === "eth_simulateV1" && typeof e.request_sha256 === "string" &&
+    const typed = Number.isSafeInteger(e.chain_id) && Number.isSafeInteger(e.block) && e.method === "eth_simulateV1" && typeof e.request_sha256 === "string" && Number.isSafeInteger(e.gas_limit) &&
       typeof e.amount === "string" && /^\d+$/.test(e.amount) && Array.isArray(e.calls) && typeof e.quote === "string" && /^\d+$/.test(e.quote);
     return typed ? (e as unknown as ExitEvidence) : "exit evidence fields have unexpected types";
   }
@@ -100,6 +103,7 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
     (e.block as number) >= 0 &&
     e.method === "eth_simulateV1" &&
     typeof e.request_sha256 === "string" &&
+    Number.isSafeInteger(e.gas_limit) &&
     typeof e.code_hash === "string" &&
     (e.implementation === null || typeof e.implementation === "string") &&
     Array.isArray(e.calls) &&
@@ -161,8 +165,9 @@ async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[]): Pro
       if (!stranger) return { error: "request has no stranger probe where checkToken puts one" };
       blocks = plan(token, buyer, guard, block, now, { ...full, stranger });
     }
-    const funds = await balances(url, head, buyer, guard, stranger ? { stranger, owner: st.owner } : undefined);
-    const want = JSON.stringify(buildRequest(head, funds, blocks));
+    const gas = BigInt(e.gas_limit);
+    const funds = await balances(url, head, buyer, guard, gas, stranger ? { stranger, owner: st.owner } : undefined);
+    const want = JSON.stringify(buildRequest(head, funds, blocks, gas));
     if (want !== JSON.stringify(p.request)) return { error: "request is not the one checkToken builds for this target" };
     const labels = blocks.flatMap((b) => b.calls.map((c) => c.label));
     if (labels.length !== fresh.length) return { error: `expected ${labels.length} calls, node returned ${fresh.length}` };
@@ -194,7 +199,7 @@ async function probeProblems(url: string, e: Evidence, target: Address, r: Rebui
 }
 
 const readCheck = async (id: number) => (await import("./near")).view<OnChain>("get_check", { id }); // near.ts pose un fetch global : charge ici seulement
-const readEntry = async (kind: string, key: string) => (await import("./near")).view<OnChainEntry>("get_entry", { kind, key });
+const readEntry = async (token: string) => (await import("./near")).view<OnChainEntry>("get_entry", { token });
 /** The guard account (GUARD in .env) and its EVM address derived through Chain Signatures. */
 export type GuardInfo = { account: string; evm: Address };
 async function readGuard(): Promise<GuardInfo> {
@@ -207,7 +212,7 @@ const same = (a: string | null, b: string) => a?.toLowerCase() === b.toLowerCase
 type Opts = {
   check?: boolean;
   chain?: (id: number) => Promise<OnChain>;
-  entry?: (kind: string, key: string) => Promise<OnChainEntry>;
+  entry?: (token: string) => Promise<OnChainEntry>;
   guard?: GuardInfo;
   clock?: () => number;
 };
@@ -317,7 +322,7 @@ export async function replay(
   }
 
   // (e3) template reputation: the index rebuilt from the node over the same window, same sha256, and
-  // the pools before the target's own one counted by the same rule (beforeBlock reads the node too)
+  // the pools funded before the target's own one counted by the same rule (beforeBlock, pure)
   if (!e.reputation) add(true, "no template index used: reputation unknown, which the verdict counts as a warn");
   else {
     const r = e.reputation;
@@ -325,7 +330,7 @@ export async function replay(
       const index = await buildIndex(url, r.from, r.to);
       const sha = indexSha256(index);
       add(sha === r.index_sha256, sha === r.index_sha256 ? `template index of blocks ${r.from}..${r.to} rebuilt from the node: same sha256 ${sha.slice(0, 10)}...` : `template index of blocks ${r.from}..${r.to} rebuilt with sha256 ${sha}, evidence says ${r.index_sha256}`);
-      const want = JSON.stringify(reputationOf(index, e.template as Hex, await beforeBlock(url, index, e.liquidity?.pair ?? null)));
+      const want = JSON.stringify(reputationOf(index, e.template as Hex, beforeBlock(index, e.liquidity?.pair ?? null)));
       add(want === JSON.stringify(r), want === JSON.stringify(r) ? `template reputation recomputed identically (${r.drained} of ${r.pools} earlier pools drained)` : `template reputation differs: evidence ${JSON.stringify(r)} vs rebuilt ${want}`);
     } catch (err) {
       fail("rebuilding the template index", err);
@@ -361,6 +366,7 @@ export async function replay(
             : `on-chain evidence_sha256 ${c.evidence_sha256} != sha256 of the file's evidence ${h}`,
         );
         add(c.quote === e.quote, c.quote === e.quote ? `on-chain quote ${c.quote} matches evidence` : `on-chain quote ${c.quote} != evidence quote ${e.quote}`);
+        add(c.gas_limit === e.gas_limit, c.gas_limit === e.gas_limit ? `on-chain gas limit ${c.gas_limit} is the one simulated with` : `on-chain gas limit ${c.gas_limit} != simulated gas limit ${e.gas_limit}`);
         if (c.target.toLowerCase() !== proof.target.toLowerCase()) add(false, `on-chain target ${c.target} is not the proof target ${proof.target}`);
         else {
           const same = c.verdict === proof.verdict && c.reasons === proof.reasons;
@@ -380,24 +386,23 @@ export async function replay(
   return out;
 }
 
-/** The NEAR facts in the evidence against the guard now: each listing cited is the target or its
- *  template and is on the guard with the same reporter and evidence (or was removed since), and the
- *  previous code is the one the guard stored with that check. Listings the sentinel left out are
- *  not detectable here; the guard itself refuses to buy a listed token and an allow on changed code. */
-async function nearFacts(proof: Proof, e: Evidence, chain: (id: number) => Promise<OnChain>, entry: (kind: string, key: string) => Promise<OnChainEntry>): Promise<Line[]> {
+/** The NEAR facts in the evidence against the guard now: each listing cited is the target's and is on
+ *  the guard with the same reporter and evidence (or was removed since), and the previous code is the
+ *  one the guard stored with that check. Listings the sentinel left out are not detectable here; the
+ *  guard itself refuses to buy a listed token and an allow on changed code. */
+async function nearFacts(proof: Proof, e: Evidence, chain: (id: number) => Promise<OnChain>, entry: (token: string) => Promise<OnChainEntry>): Promise<Line[]> {
   const out: Line[] = [];
   const line = (ok: boolean, text: string, skipped = false): Line => ({ ok, skipped, line: `${skipped ? "SKIPPED " : ok ? "OK      " : "MISMATCH"} ${text}` });
   for (const l of e.near.listed) {
-    const subject = l.kind === "token" ? proof.target.toLowerCase() : e.template.toLowerCase();
-    if (l.key.toLowerCase() !== subject) {
-      out.push(line(false, `blocklist entry ${l.kind} ${l.key} is neither the target nor its template`));
+    if (l.key.toLowerCase() !== proof.target.toLowerCase()) {
+      out.push(line(false, `blocklist entry of ${l.key} is not the target's`));
       continue;
     }
-    const now = await entry(l.kind, l.key);
-    if (!now) out.push(line(true, `blocklist entry ${l.kind} ${l.key} no longer on the guard (removed by the owner since)`, true));
+    const now = await entry(l.key);
+    if (!now) out.push(line(true, `blocklist entry of ${l.key} no longer on the guard (removed by the owner since)`, true));
     else {
       const same = now.reporter === l.reporter && now.evidence_sha256 === l.evidence_sha256;
-      out.push(line(same, same ? `blocklist entry ${l.kind} ${l.key} by ${l.reporter} found on the guard` : `blocklist entry ${l.kind} ${l.key}: guard says ${now.reporter} ${now.evidence_sha256}, evidence says ${l.reporter} ${l.evidence_sha256}`));
+      out.push(line(same, same ? `blocklist entry of ${l.key} by ${l.reporter} found on the guard` : `blocklist entry of ${l.key}: guard says ${now.reporter} ${now.evidence_sha256}, evidence says ${l.reporter} ${l.evidence_sha256}`));
     }
   }
   const p = e.near.previous;
@@ -430,7 +435,7 @@ async function replayExit(proof: Proof, e: ExitEvidence, url: string, opts: Opts
     seller = (proof.request.params[0] as { blockStateCalls: BlockStateCall[] }).blockStateCalls[0].calls[0]?.from ?? null;
     const head = await blockOf(url, toHex(e.block));
     const blocks = exitPlan(proof.target as Address, seller ?? NOBODY, BigInt(e.amount), BigInt(head.timestamp) + NEXT_S);
-    const same = JSON.stringify(buildRequest(head, { [seller ?? NOBODY]: FUND }, blocks)) === JSON.stringify(proof.request);
+    const same = JSON.stringify(buildRequest(head, { [seller ?? NOBODY]: FUND }, blocks, BigInt(e.gas_limit))) === JSON.stringify(proof.request);
     add(same, same ? `request is the exit sale checkExit builds for ${e.amount} tokens from ${seller}` : "request is not the exit sale checkExit builds for this target and amount");
     const fresh = (await rpc<{ calls: Result[] }[]>(url, proof.request.method, proof.request.params)).flatMap((b) => b.calls);
     const sameResults = JSON.stringify(fresh.map((r) => [r.status, r.returnData])) === JSON.stringify(proof.response.map((r) => [r.status, r.returnData]));
@@ -453,8 +458,8 @@ async function replayExit(proof: Proof, e: ExitEvidence, url: string, opts: Opts
     else {
       const h = sha256(stringToHex(proof.evidence)).slice(2);
       add(h === c.evidence_sha256, h === c.evidence_sha256 ? `on-chain evidence_sha256 ${h} is the sha256 of the evidence replayed above` : `on-chain evidence_sha256 ${c.evidence_sha256} != ${h}`);
-      const ok = c.verdict === proof.verdict && c.reasons === proof.reasons && c.quote === e.quote && c.exit_amount === e.amount && same(c.target, proof.target);
-      add(ok, ok ? `on-chain exit quote #${proof.id}: ${c.verdict}, ${c.quote} wei for ${c.exit_amount} tokens, matches` : `on-chain #${proof.id} (${c.verdict}, quote ${c.quote}, amount ${c.exit_amount}, ${c.target}) differs from the file`);
+      const ok = c.verdict === proof.verdict && c.reasons === proof.reasons && c.quote === e.quote && c.exit_amount === e.amount && c.gas_limit === e.gas_limit && same(c.target, proof.target);
+      add(ok, ok ? `on-chain exit quote #${proof.id}: ${c.verdict}, ${c.quote} wei for ${c.exit_amount} tokens at gas limit ${c.gas_limit}, matches` : `on-chain #${proof.id} (${c.verdict}, quote ${c.quote}, amount ${c.exit_amount}, gas limit ${c.gas_limit}, ${c.target}) differs from the file`);
     }
   } catch (err) {
     out.push({ ok: false, line: `ERROR    reading the NEAR contract: ${msg(err)}` });

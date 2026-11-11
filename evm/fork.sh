@@ -104,14 +104,17 @@ farm() { # creator name symbol drain|keep -> token address, 1 ETH of liquidity a
 }
 for i in 1 2 3 4 5; do farm 0xfa4300000000000000000000000000000000000$i "Farm $i" FARM$i drain >/dev/null; done
 FARM_FRESH=$(farm 0xfa43000000000000000000000000000000000006 "Farm Fresh" FRESH keep)
+# Deployed last, so every address above stays the same: a sale reverts with less than 500,000 gas
+# left, while the guard signs with its gas limit (250,000 at setup).
+GAS_HUNGRY=$(deploy "Demo Gas Hungry" GASHUNGRY 10)
 
 jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked "$BLOCKED" \
   --arg later "$LATER" --arg tax "$TAX" --arg taxlater "$TAX_LATER" --arg hold "$HOLD" --arg sim "$SIM" \
-  --arg frozen "$FROZEN" --arg tax20 "$TAX20" --arg late "$LATE" --arg lpburned "$LP_BURNED" --arg lpheld "$LP_HELD" --arg fresh "$FARM_FRESH" --argjson block "$FORK_BLOCK" \
+  --arg frozen "$FROZEN" --arg tax20 "$TAX20" --arg late "$LATE" --arg lpburned "$LP_BURNED" --arg lpheld "$LP_HELD" --arg fresh "$FARM_FRESH" --arg gashungry "$GAS_HUNGRY" --argjson block "$FORK_BLOCK" \
   '{fork_block: $block, usdc: $usdc, safe: $safe, owner_reclaim: $reclaim, sell_blocked: $blocked,
     sell_blocked_later: $later, sell_tax: $tax, sell_tax_later: $taxlater, hold_one_block: $hold, sim_detector: $sim,
     guard_frozen: $frozen, sell_tax_20: $tax20, late_liquidity: $late, lp_burned: $lpburned, lp_held: $lpheld,
-    farm_fresh: $fresh}' > tokens.json
+    farm_fresh: $fresh, gas_hungry: $gashungry}' > tokens.json
 echo "guard_frozen freezes $GUARD_EVM"
 echo "fork de Base au bloc $FORK_BLOCK pret sur $RPC ; jetons dans evm/tokens.json :"
 cat tokens.json

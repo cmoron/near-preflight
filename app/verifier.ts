@@ -28,8 +28,9 @@ export const NEXT_S = 2n;
 const LATER_S = 3600n; // timestamp of the late sale: one hour after the buy
 // Sans prix du gaz ni limite par appel, eth_simulateV1 donne tx.gasprice = 0, block.basefee = 0 et
 // gasleft() = limite du bloc : un jeton y reconnait la simulation et ne refuse que la vraie vente.
+// Every call gets the gas limit the guard signs with (its evm_config, read per check): a token whose
+// sale needs more gas than that passes a looser simulation and traps the real exit.
 const TIP = 1_000_000n; // pourboire propose par mainnet.base.org (eth_maxPriorityFeePerGas)
-const GAS = 1_000_000n; // limite de gaz d'un appel, celle d'un vrai swap
 export const FUND = parseEther("1"); // solde des sondes neuves, de quoi acheter et payer le gaz
 // eth_simulateV1 refuse plus de 256 blocs au-dessus du bloc de base : the late sale is 256 blocks
 // ahead (about 8.5 min of 2 s Base blocks, 1800 blocks would be 1 h) with its timestamp 1 h ahead. A
@@ -113,6 +114,8 @@ export type Report = {
     reputation: Reputation | null;
     /** What the guard on NEAR said before the verdict: blocklist entries, code at the last verdict. */
     near: NearFacts;
+    /** Gas limit of every simulated call: the guard's, which it also stores with the verdict. */
+    gas_limit: number;
   };
   /** Requete et reponse completes, pour rejouer la simulation au meme bloc. */
   request: { method: string; params: unknown[] };
@@ -142,10 +145,10 @@ export type Block = { number?: bigint; time: bigint; calls: Call[] };
 export type Header = { number: Hex; hash: Hex; timestamp: Hex; baseFeePerGas: Hex; mixHash: Hex; miner: Address };
 
 /** Requete eth_simulateV1 complete, telle qu'envoyee et sauvegardee dans la preuve. */
-export function buildRequest(head: Header, balances: Record<string, bigint>, blocks: Block[]) {
+export function buildRequest(head: Header, balances: Record<string, bigint>, blocks: Block[], gas: bigint) {
   const baseFee = BigInt(head.baseFeePerGas);
   const env = { baseFeePerGas: toHex(baseFee), prevRandao: head.mixHash, feeRecipient: head.miner };
-  const fees = { gas: toHex(GAS), maxFeePerGas: toHex(2n * baseFee + TIP), maxPriorityFeePerGas: toHex(TIP) };
+  const fees = { gas: toHex(gas), maxFeePerGas: toHex(2n * baseFee + TIP), maxPriorityFeePerGas: toHex(TIP) };
   const request = {
     blockStateCalls: blocks.map((b, i) => ({
       blockOverrides: { ...(b.number ? { number: toHex(b.number) } : {}), time: toHex(b.time), ...env },
@@ -160,20 +163,20 @@ export function buildRequest(head: Header, balances: Record<string, bigint>, blo
 /** Soldes poses par la simulation : sondes neuves financees ; owner() complete seulement s'il ne peut
  *  pas payer le gaz de son appel, sinon son solde reel reste (un vrai owner() paie aussi son gaz).
  *  The guard's EVM address gets the same balance as the probe buyer, whatever it holds on chain. */
-export async function balances(url: string, head: Header, buyer: Address, guard: Address, full?: { stranger: Address; owner: Address | null }) {
+export async function balances(url: string, head: Header, buyer: Address, guard: Address, gas: bigint, full?: { stranger: Address; owner: Address | null }) {
   const out: Record<string, bigint> = { [buyer]: FUND, [guard]: FUND };
   if (!full) return out;
   out[full.stranger] = FUND;
   if (full.owner) {
-    const need = GAS * (2n * BigInt(head.baseFeePerGas) + TIP);
+    const need = gas * (2n * BigInt(head.baseFeePerGas) + TIP);
     if (BigInt(await rpc<Hex>(url, "eth_getBalance", [full.owner, head.number])) < need) out[full.owner] = FUND;
   }
   return out;
 }
 
 /** Simule des blocs successifs au-dessus de `head` ; renvoie la requete et un resultat par appel. */
-async function simulate(url: string, head: Header, funds: Record<string, bigint>, blocks: Block[]) {
-  const request = buildRequest(head, funds, blocks);
+async function simulate(url: string, head: Header, funds: Record<string, bigint>, blocks: Block[], gas: bigint) {
+  const request = buildRequest(head, funds, blocks, gas);
   const out = await rpc<{ calls: Result[] }[]>(url, request.method, request.params);
   return { request, results: out.flatMap((b) => b.calls) };
 }
@@ -366,19 +369,20 @@ export async function implementationAt(url: string, token: Address, block: bigin
   return null;
 }
 
-/** A blocklist entry read from the guard (`get_entry`), on the target (`token`) or its template (`code`). */
-export type Listing = { kind: "token" | "code"; key: string; reporter: string; evidence_sha256: string };
+/** The target's blocklist entry read from the guard (`get_entry`): the guard lists tokens only. */
+export type Listing = { key: string; reporter: string; evidence_sha256: string };
 /** What the guard on NEAR says about the target: its blocklist entries, and the code its last verdict
  *  saw (`last_code`), null if never judged. */
 export type NearFacts = { listed: Listing[]; previous: { id: number; code_hash: Hex; implementation: Address | null } | null };
-/** What the sentinel knows beside the EVM chain: the template index it loaded (app/index.ts) and a
- *  reader of the guard's blocklist and last code for a target and its template. */
-export type Context = { index: Index | null; near: (target: Address, template: Hex) => Promise<NearFacts> };
+/** What the sentinel knows beside the EVM chain: the template index it loaded (app/index.ts), a
+ *  reader of the guard's blocklist entry and last code for a target, and the gas limit the guard
+ *  signs with (evm_config), which every simulated call gets. */
+export type Context = { index: Index | null; near: (target: Address) => Promise<NearFacts>; gas: bigint };
 
 /** Listed on NEAR: block. Code (or proxy implementation) changed since the last verdict: warn, the
  *  human decides (the guard refuses an allow on changed code anyway). */
 export function nearFindings(n: NearFacts, codeHash: Hex, implementation: Address | null): Finding[] {
-  const out: Finding[] = n.listed.map((l) => ({ level: "block", text: `listed on NEAR by ${l.reporter} (${l.kind === "code" ? "template" : "token"})` }));
+  const out: Finding[] = n.listed.map((l) => ({ level: "block", text: `listed on NEAR by ${l.reporter}` }));
   const p = n.previous;
   const same = (a: string | null, b: string | null) => (a ?? "").toLowerCase() === (b ?? "").toLowerCase();
   if (p && !(same(p.code_hash, codeHash) && same(p.implementation, implementation))) out.push({ level: "warn", text: `code changed since the last check #${p.id}` });
@@ -398,19 +402,19 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const implementation = await implementationAt(url, token, block);
   const liquidity = await liquidityFacts(url, token, block);
   const template = templateOf(code);
-  const reputation = ctx.index?.chain_id === chainId ? reputationOf(ctx.index, template, await beforeBlock(url, ctx.index, liquidity?.pair ?? null)) : null;
-  const near = await ctx.near(token, template);
-  const proof = { chain_id: chainId, block, code_hash: keccak256(code), implementation, liquidity, template, reputation, near };
+  const reputation = ctx.index?.chain_id === chainId ? reputationOf(ctx.index, template, beforeBlock(ctx.index, liquidity?.pair ?? null)) : null;
+  const near = await ctx.near(token);
+  const proof = { chain_id: chainId, block, code_hash: keccak256(code), implementation, liquidity, template, reputation, near, gas_limit: Number(ctx.gas) };
   const [first1] = plan(token, buyer, guard, block, now);
 
   // 1re simulation : quantites achetees et proprietaire, pour construire la seconde.
-  const first = await simulate(url, head, await balances(url, head, buyer, guard), [first1]);
+  const first = await simulate(url, head, await balances(url, head, buyer, guard, ctx.gas), [first1], ctx.gas);
   const buyLabels = first1.calls.map((c) => c.label);
   const st = buyStages(byLabel(buyLabels, first.results));
   if (st.stop) return report(proof, first, buyLabels);
 
   const blocks = plan(token, buyer, guard, block, now, { stranger, amounts: st.amounts, owner: st.owner });
-  const sim = await simulate(url, head, await balances(url, head, buyer, guard, { stranger, owner: st.owner }), blocks);
+  const sim = await simulate(url, head, await balances(url, head, buyer, guard, ctx.gas, { stranger, owner: st.owner }), blocks, ctx.gas);
   return report(proof, sim, blocks.flatMap((b) => b.calls.map((c) => c.label)));
 }
 
@@ -471,17 +475,19 @@ function sideFindings(r: Record<string, Result>, p: string, stop: boolean): Find
 
 /** Jugement pur : ne depend que des libelles des appels et de leurs resultats, donc rejouable
  *  par n'importe qui a partir d'une preuve (voir app/replay.ts). The guard side's findings that the
- *  probe buyer does not share are reported as "guard address: ...". */
+ *  probe buyer does not share are reported as "guard address only, not listed: ...". */
 export function judge(labels: string[], results: Result[], facts: Facts): { verdict: Verdict; reasons: string; list_target: boolean } {
   const r = byLabel(labels, results);
   const { stop } = buyStages(r);
   const findings = sideFindings(r, "", stop);
-  const seen = new Set(findings.map((f) => f.text));
-  for (const f of sideFindings(r, GUARD, stop)) if (!seen.has(f.text)) findings.push({ ...f, text: `guard address: ${f.text}` });
-  findings.push(...liquidityFindings(facts.liquidity, facts.block));
-  // Only a block on the token's own simulation or liquidity lists it on the guard: its template's
-  // reputation can be poisoned by copies, and an existing NEAR listing is already there.
+  // Only a block on the probe side lists the token: the probes are fresh addresses derived from a
+  // block hash, so their findings are the token's own behaviour. The guard's address is public and a
+  // third party can change its state (send it tokens, get it frozen): a failure there blocks this
+  // check but lists nothing. Template reputation can be poisoned by copies; it never lists either.
   const list_target = findings.some((f) => f.level === "block");
+  const seen = new Set(findings.map((f) => f.text));
+  for (const f of sideFindings(r, GUARD, stop)) if (!seen.has(f.text)) findings.push({ ...f, text: `guard address only, not listed: ${f.text}` });
+  findings.push(...liquidityFindings(facts.liquidity, facts.block));
   findings.unshift(...nearFindings(facts.near, facts.code_hash, facts.implementation), ...reputationFindings(facts.reputation));
   const rank = (f: Finding) => (f.level === "block" ? 0 : 1);
   findings.sort((a, b) => rank(a) - rank(b)); // stable: blocks first, so the 280-byte cut keeps them
@@ -503,7 +509,7 @@ export const byLabel = (labels: string[], results: Result[]) => Object.fromEntri
 export type Facts = Pick<Report["evidence"], "block" | "code_hash" | "implementation" | "liquidity" | "reputation" | "near">;
 
 function report(
-  proof: Omit<Facts, "block"> & { chain_id: number; block: bigint; template: Hex },
+  proof: Omit<Facts, "block"> & { chain_id: number; block: bigint; template: Hex; gas_limit: number },
   sim: { request: Report["request"]; results: Result[] },
   labels: string[],
 ): Report {
@@ -513,6 +519,7 @@ function report(
     block: Number(proof.block),
     method: "eth_simulateV1" as const,
     request_sha256: sha256(stringToHex(JSON.stringify(sim.request))),
+    gas_limit: proof.gas_limit,
     code_hash: proof.code_hash,
     implementation: proof.implementation,
     calls: sim.results.map((res, i) => `${labels[i]}: ${ok(res) ? "ok" : "revert"}`),
@@ -548,7 +555,7 @@ export function exitPlan(token: Address, guard: Address, amount: bigint, now: bi
 export type ExitReport = {
   verdict: Verdict;
   reasons: string;
-  evidence: { kind: "exit"; chain_id: number; block: number; method: "eth_simulateV1"; request_sha256: Hex; amount: string; calls: string[]; quote: string };
+  evidence: { kind: "exit"; chain_id: number; block: number; method: "eth_simulateV1"; request_sha256: Hex; gas_limit: number; amount: string; calls: string[]; quote: string };
   request: Report["request"];
   response: Result[];
 };
@@ -562,11 +569,12 @@ export function judgeExit(labels: string[], results: Result[]): { verdict: Verdi
   return { verdict: "allow", reasons: "exit sale from the guard's address simulated: quote = its ETH out", quote };
 }
 
-export async function checkExit(url: string, token: Address, guard: Address, amount: bigint): Promise<ExitReport> {
+/** `gas`: the guard's gas limit, the one its approve and swap will be signed with. */
+export async function checkExit(url: string, token: Address, guard: Address, amount: bigint, gas: bigint): Promise<ExitReport> {
   const head = await rpc<Header>(url, "eth_getBlockByNumber", ["latest", false]);
   const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
   const blocks = exitPlan(token, guard, amount, BigInt(head.timestamp) + NEXT_S);
-  const sim = await simulate(url, head, { [guard]: FUND }, blocks);
+  const sim = await simulate(url, head, { [guard]: FUND }, blocks, gas);
   const labels = blocks[0].calls.map((c) => c.label);
   const { verdict, reasons, quote } = judgeExit(labels, sim.results);
   const evidence = {
@@ -575,6 +583,7 @@ export async function checkExit(url: string, token: Address, guard: Address, amo
     block: Number(BigInt(head.number)),
     method: "eth_simulateV1" as const,
     request_sha256: sha256(stringToHex(JSON.stringify(sim.request))),
+    gas_limit: Number(gas),
     amount: amount.toString(),
     calls: sim.results.map((res, i) => `${labels[i]}: ${ok(res) ? "ok" : "revert"}`),
     quote: quote.toString(),

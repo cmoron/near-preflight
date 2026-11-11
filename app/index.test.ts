@@ -36,18 +36,22 @@ describe("template hash", () => {
 describe("index rebuilt from chain logs", async () => {
   const index = await buildIndex(RPC, tokens.fork_block + 1, head);
   const farm = templateOf(await codeOf(tokens.farm_fresh));
-  test("the farm template: 6 pools, 5 drained 2 blocks after creation, the fresh one not drained", () => {
+  test("the farm template: 6 pools, 5 drained 2 blocks after their funding, the fresh one not drained", () => {
     const pools = index.templates[farm];
     expect(pools.length).toBe(6);
-    expect(pools.filter((p) => p.drained !== null).map((p) => p.drained! - p.created)).toEqual([2, 2, 2, 2, 2]);
+    expect(pools.filter((p) => p.drained !== null).map((p) => p.drained! - p.funded!)).toEqual([2, 2, 2, 2, 2]);
     expect(pools.find((p) => p.token === tokens.farm_fresh.toLowerCase())?.drained).toBeNull();
   });
-  test("each pool records the WETH its liquidity provider added (Mint logs): 1 ETH for every farm pool", () => {
-    expect(index.templates[farm].map((p) => p.weth_added)).toEqual(Array(6).fill("1000000000000000000"));
+  test("each farm pool is funded (1 ETH, at least 0.5 ETH, from its Mint log) in the block that created it", () => {
+    expect(index.templates[farm].every((p) => p.funded === p.created)).toBe(true);
+  });
+  test("a pair created with dust and funded 2000 blocks later is dated by its funding (late_liquidity)", () => {
+    const late = Object.values(index.templates).flat().find((p) => p.token === tokens.late_liquidity.toLowerCase())!;
+    expect(late.funded! - late.created).toBeGreaterThanOrEqual(2000);
   });
   test("the demo tokens (LP burned or held, never removed) are not drained", async () => {
     const demo = index.templates[templateOf(await codeOf(tokens.safe))];
-    expect(demo.length).toBe(13);
+    expect(demo.length).toBe(14);
     expect(demo.every((p) => p.drained === null)).toBe(true);
   });
   test("deterministic: rebuilt from the same chain state, same sha256", async () => {
@@ -55,29 +59,24 @@ describe("index rebuilt from chain logs", async () => {
   });
   test("reputation of the fresh token: only pools before its own, 5 of 5 drained, median 2 blocks -> block", async () => {
     const own = index.templates[farm].find((p) => p.token === tokens.farm_fresh.toLowerCase())!;
-    const r = reputationOf(index, farm, await beforeBlock(RPC, index, own.pair));
-    expect(r).toMatchObject({ template: farm, before_block: own.created, pools: 5, drained: 5, median_drain_blocks: 2, index_sha256: indexSha256(index) });
+    const r = reputationOf(index, farm, beforeBlock(index, own.pair));
+    expect(r).toMatchObject({ template: farm, before_block: own.funded, pools: 5, drained: 5, median_drain_blocks: 2, index_sha256: indexSha256(index) });
     const [f] = reputationFindings(r);
     expect(f.level).toBe("block");
-    expect(f.text).toBe(`template ${farm.slice(0, 6)}..${farm.slice(-4)}: 5 of 5 earlier pools drained, median 2 blocks after creation`);
+    expect(f.text).toBe(`template ${farm.slice(0, 6)}..${farm.slice(-4)}: 5 of 5 earlier pools drained, median 2 blocks after funding`);
   });
-  test("own pool outside the index: one eth_getCode at `from` says whether it predates the window (none earlier) or came after it (all earlier)", async () => {
+  test("own pool outside the index window: the whole window counts", async () => {
     const own = index.templates[farm].find((p) => p.token === tokens.farm_fresh.toLowerCase())!;
-    const old = index.templates[farm][0]; // farm 1's pool, created before the fresh one
-    const later = await buildIndex(RPC, own.created, head); // only the fresh pool; farm 1's pair already has code at `from`
-    expect(await beforeBlock(RPC, later, old.pair)).toBe(later.from);
-    expect(reputationOf(later, farm, later.from).pools).toBe(0);
-    const before = await buildIndex(RPC, tokens.fork_block + 1, own.created - 1); // no code at `from` yet
-    expect(await beforeBlock(RPC, before, own.pair)).toBe(before.to + 1);
+    const before = await buildIndex(RPC, tokens.fork_block + 1, own.created - 1); // the fresh pool is not in it
+    expect(beforeBlock(before, own.pair)).toBe(before.to + 1);
     expect(reputationOf(before, farm, before.to + 1)).toMatchObject({ pools: 5, drained: 5 });
   });
 });
 
 describe("farm rule", () => {
   const index: Index = { chain_id: 8453, factory: "0x", weth: "0x", from: 1, to: 100, templates: {} };
-  const ONE_ETH = "1000000000000000000";
   const pools = (drained: (number | null)[], created = 10) =>
-    drained.map((d, i) => ({ pair: `0x${created}${i}` as Address, token: `0x${created}${i}` as Address, created, drained: d, weth_added: ONE_ETH }));
+    drained.map((d, i) => ({ pair: `0x${created}${i}` as Address, token: `0x${created}${i}` as Address, created, funded: created, drained: d }));
   /** No own pool: every pool of the index counts. */
   const ALL = index.to + 1;
   test("no index: reputation unknown, which is a warn, never a pass", () => {
@@ -96,25 +95,41 @@ describe("farm rule", () => {
     const t = "0xaa" as Hex;
     expect(reputationOf({ ...index, templates: { [t]: pools([12, 12, 10 + 43_201]) } }, t, ALL).drained).toBe(2);
   });
-  test("pools created after the target's own pool are not counted (copies drained later cannot poison it)", async () => {
+  test("pools funded after the target's own pool are not counted (copies drained later cannot poison it)", async () => {
     const t = "0xaa" as Hex;
     const [own] = pools([null], 20);
     const i = { ...index, templates: { [t]: [...pools([22], 10), own, ...pools([22, 22, 22], 30)] } };
-    const before = await beforeBlock("http://unused.invalid", i, own.pair); // own pool in the index: no RPC read
+    const before = beforeBlock(i, own.pair);
     expect(before).toBe(20);
     expect(reputationOf(i, t, before)).toMatchObject({ before_block: 20, pools: 1, drained: 1 });
     expect(reputationFindings(reputationOf(i, t, before))).toEqual([]);
   });
-  test("a pool seeded with less than MIN_POOL_WETH (0.5 ETH) is not counted: dust decoys are free", () => {
+  test("a pool never funded to MIN_POOL_WETH (0.5 ETH) is not counted: dust decoys are free", () => {
     const t = "0xaa" as Hex;
-    const dust = { ...pools([12], 11)[0], weth_added: "499999999999999999" };
+    const dust = { ...pools([12], 11)[0], funded: null };
     const r = reputationOf({ ...index, templates: { [t]: [...pools([12, 12]), dust] } }, t, ALL);
     expect(r).toMatchObject({ pools: 2, drained: 2 });
     expect(reputationFindings(r)).toEqual([]);
   });
+  test("a target pair created empty before the farm and funded after it is dated by its funding: the farm counts", async () => {
+    const t = "0xaa" as Hex;
+    const own = { pair: "0x0e" as Address, token: "0x0e" as Address, created: 5, funded: 40, drained: null };
+    const farm = [10, 20, 30].map((b) => ({ pair: `0x${b}` as Address, token: `0x${b}` as Address, created: b, funded: b, drained: b + 2 }));
+    const i = { ...index, templates: { [t]: [own, ...farm] } };
+    const before = beforeBlock(i, own.pair);
+    expect(before).toBe(40);
+    expect(reputationFindings(reputationOf(i, t, before))[0]?.level).toBe("block");
+  });
+  test("own pool not in the index, or never funded to the minimum: all history counts, no chain read", async () => {
+    const t = "0xaa" as Hex;
+    const dust = { pair: "0x0d" as Address, token: "0x0d" as Address, created: 5, funded: null, drained: null };
+    const i = { ...index, templates: { [t]: [dust] } };
+    expect(beforeBlock(i, "0x00000000000000000000000000000000000000ff")).toBe(ALL);
+    expect(beforeBlock(i, dust.pair)).toBe(ALL);
+  });
   test("with no own pool (no V2 WETH pair) every pool of the index counts", async () => {
     const t = "0xaa" as Hex;
-    expect(await beforeBlock("http://unused.invalid", index, null)).toBe(ALL);
+    expect(beforeBlock(index, null)).toBe(ALL);
     expect(reputationOf({ ...index, templates: { [t]: pools([12, 12, 12], 100) } }, t, ALL)).toMatchObject({ before_block: ALL, pools: 3, drained: 3 });
   });
 });
