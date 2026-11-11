@@ -1,9 +1,10 @@
 // Off-chain verification of the transaction signed by NEAR, no network. Same vectors as the
 // Rust tests of src/lib.rs: viem produces them, the contract produces the same bytes.
 import { expect, test } from "bun:test";
-import { createPublicClient, encodeFunctionData, http, keccak256, parseAbi, serializeTransaction, type Address } from "viem";
+import { createPublicClient, encodeFunctionData, http, keccak256, maxUint256, parseAbi, serializeTransaction, type Address } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { broadcast, verifyBuy, verifyExit } from "./relay";
+import { localPreviews } from "./testkit";
 import { ROUTER, WETH } from "./verifier";
 
 const signer = privateKeyToAccount("0x0000000000000000000000000000000000000000000000000000000000000001");
@@ -110,8 +111,26 @@ test("exit refused: other spender, other recipient, other token, other signer, s
   await expect(verifyExit([swap, ok], sale, ADDR, OTHER)).rejects.toThrow();
 });
 
+test("the owner's sale with an approve of 2^256 - 1 is accepted only when its exit says so", async () => {
+  const max = await signer.signTransaction({ ...approveTx(), data: encodeFunctionData({ abi: exitAbi, functionName: "approve", args: [ROUTER, maxUint256] }) });
+  const swap = await signer.signTransaction(swapTx());
+  expect((await verifyExit([max, swap], { ...sale, approve: maxUint256 }, ADDR, OTHER))[0]).toContain(`approve(router, ${maxUint256})`);
+  await expect(verifyExit([max, swap], sale, ADDR, OTHER)).rejects.toThrow("approve");
+});
+
 test("a withdrawal pays the owner's address fixed at init, nothing else", async () => {
   const pay = (to: Address) => signer.signTransaction({ ...fees, nonce: 0, to, value: 1_000n, data: "0x" });
   expect((await verifyExit([await pay(OTHER)], { token: null, amount: 1_000n }, ADDR, OTHER))[0]).toContain("withdraw");
   await expect(verifyExit([await pay(TARGET)], { token: null, amount: 1_000n }, ADDR, OTHER)).rejects.toThrow("withdraw");
+});
+
+test("the tests' stand-in for the guard's previews builds the contract's bytes (src/lib.rs vectors)", async () => {
+  const p = localPreviews({ guard: ADDR, target: TARGET, amount: 10_000_000_000_000n });
+  // the_preview_is_the_transaction_the_buy_signs: quote 20,435 -> minimum 19,821, deadline 300 s, nonce 0
+  expect((await p.check(20_435n)).map((t) => keccak256(t))).toEqual(["0x314bf89cb90d7232250c56241836f4ab662a81de9030d250712eedbcdd5fd5e0"]);
+  // the_sale_preview_is_the_exit_the_guard_signs_with_a_floor_of_0: 1,000,000 tokens, deadline 300 s
+  expect((await p.sale(1_000_000n, 300n)).map((t) => keccak256(t))).toEqual([
+    "0x655e06dcbeba90aa01c2e4fb6f9b6bf827516faf20694d21488d2d9e168bb101",
+    "0x4e63831862f4e2d50eab33966eee2e53843bd3f8cea8c0d01f4ece43e71cf1d1",
+  ]);
 });

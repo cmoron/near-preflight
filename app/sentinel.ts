@@ -2,14 +2,15 @@
 // posts verdict, reasons and proof digest with its function-call key (post_verdict only).
 // It also reads the guard's shared blocklist and the code seen at the target's last verdict, consults
 // the template index in INDEX (app/index.ts), and quotes agents' exits (request_exit) by simulating the
-// sale from the guard's EVM address. Every call is simulated with the guard's own gas limit
-// (evm_config, read per check), which it posts with the verdict.
+// sale from the guard's EVM address. The guard side runs the guard's own transactions, read from the
+// guard (preview_check, preview_sale): same calldata, value, nonce, gas and fees as it signs. The
+// verdict carries their hashes, and the guard signs nothing else for that check.
 // The full proof (eth_simulateV1 request, response and posted evidence string, byte for byte)
 // goes to proofs/<id>.json; the contract stores the sha256 of that string with the verdict.
-import type { Address, Hex } from "viem";
+import { formatEther, type Address, type Hex } from "viem";
 import type { Index } from "./index";
 import type { Check, Entry } from "./near";
-import type { NearFacts } from "./verifier";
+import type { NearFacts, Previews } from "./verifier";
 
 /** What to do with the request read at block height `readAt`, its id being <= last_check_id read at
  *  height `lastAt`. Absent at a height >= lastAt: it existed at lastAt and no longer does, so it was
@@ -55,30 +56,33 @@ if (import.meta.main) {
 
   const judge = async (id: number, check: Check) => {
     const target = check.target as Address;
-    // The gas limit the guard signs with now: the simulation uses it, the guard stores it with the
-    // verdict and refuses a buy or an exit on it once its own has changed.
-    const { gas_limit } = await view<{ gas_limit: number }>("evm_config");
-    const gas = BigInt(gas_limit);
+    // What the guard would sign for this check, built by the guard itself: the guard side simulates
+    // exactly these transactions, and the guard signs only those whose hashes the verdict carries.
+    const preview: Previews = {
+      check: (quote) => view<Hex[]>("preview_check", { id, quote: quote.toString() }),
+      sale: (amount, deadline) => view<Hex[]>("preview_sale", { token: target, amount: amount.toString(), deadline_s: Number(deadline) }),
+    };
+    const unprefixed = (hs: Hex[]) => hs.map((h) => h.slice(2));
     if (check.exit_amount) {
-      log(`#${id} : ${check.agent} wants to sell ${check.exit_amount} of ${target}: exit quote, sale simulated as the guard's EVM address...`);
-      const r = await checkExit(EVM, target, GUARD_EVM, BigInt(check.exit_amount), gas);
+      log(`#${id} : ${check.agent} wants to sell ${check.exit_amount} of ${target}: exit quote, the guard's approve and swap simulated from its EVM address...`);
+      const r = await checkExit(EVM, target, GUARD_EVM, BigInt(check.exit_amount), preview.check);
       const proof = toProof(id, target, r);
       await Bun.write(`proofs/${id}.json`, JSON.stringify(proof, null, 2));
-      const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code: null, list_target: false, gas_limit });
+      const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code: null, list_target: false, tx_hashes: unprefixed(r.evidence.tx_hashes) });
       log(`#${id} : exit quote ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.quote} wei for ${check.exit_amount} tokens, block ${r.evidence.block}, proof proofs/${id}.json  ${tx}`);
       return;
     }
-    log(`#${id} : ${check.agent} wants to buy ${target}: read-only simulation, liquidity, template reputation, blocklist...`);
+    log(`#${id} : ${check.agent} wants to buy ${formatEther(BigInt(check.amount_wei))} ETH of ${target}: the guard's own buy and sales simulated, liquidity, template reputation, blocklist...`);
     // Probes derived from on-chain data, not chosen here: replay --check recomputes them.
     const ticket = { guard: env("GUARD"), id, requested_ns: check.requested_ns };
-    const r = await checkToken(EVM, target, GUARD_EVM, (head) => deriveProbes(ticket, head.hash), { index, near: nearFacts, gas });
+    const r = await checkToken(EVM, target, GUARD_EVM, (head) => deriveProbes(ticket, head.hash), { index, near: nearFacts, amount: BigInt(check.amount_wei), preview });
     const proof = toProof(id, target, r);
     await Bun.write(`proofs/${id}.json`, JSON.stringify(proof, null, 2));
     const code = { code_hash: r.evidence.code_hash, implementation: r.evidence.implementation };
     // list_target: the guard lists the token only on a block from the probe side of its simulation (judge).
-    const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code, list_target: r.list_target, gas_limit });
+    const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code, list_target: r.list_target, tx_hashes: unprefixed(r.evidence.tx_hashes) });
     const failed = r.evidence.calls.filter((c) => c.endsWith("revert")).length;
-    log(`#${id} : ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.calls.length} simulated calls (${failed} reverted, takeback probes included), quote ${r.evidence.quote} for 0.01 ETH, block ${r.evidence.block}, proof proofs/${id}.json  ${tx}`);
+    log(`#${id} : ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.calls.length} simulated calls (${failed} reverted, takeback probes included), quote ${r.evidence.quote} for ${r.evidence.amount_wei} wei, guard tx ${r.evidence.tx_hashes[0].slice(0, 10)}..., block ${r.evidence.block}, proof proofs/${id}.json  ${tx}`);
     // An entry is never overwritten: a token already listed keeps its first entry.
     if (r.list_target && !r.evidence.near.listed.length) log(`#${id} : ${target} listed on the guard's shared blocklist by this block verdict (evidence sha256 = the proof's)`);
   };
@@ -116,7 +120,7 @@ if (import.meta.main) {
               quote: "0",
               code: null,
               list_target: false,
-              gas_limit: 0,
+              tx_hashes: [],
             });
             log(`#${next} : BLOCK, simulation impossible (${msg})  ${tx}`);
           } catch (e2) {

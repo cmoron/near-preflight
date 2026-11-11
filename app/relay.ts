@@ -63,10 +63,11 @@ const exitAbi = parseAbi([
   "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint256,uint256,address[],address,uint256)",
 ]);
 
-/** Accepts the exit's signed transactions only if, in order, they are approve(router, amount) on
- *  the token then the swap of `amount` back to `address` (a sale), or the payment of `amount` to
- *  `withdrawTo` (token null: a withdrawal), all signed by `address` on Base. One line per tx. */
-export async function verifyExit(raws: Hex[], exit: { token: Address | null; amount: bigint }, address: Address, withdrawTo: Address): Promise<string[]> {
+/** Accepts the exit's signed transactions only if, in order, they are approve(router, approve or
+ *  amount) on the token then the swap of `amount` back to `address` (a sale), or the payment of
+ *  `amount` to `withdrawTo` (token null: a withdrawal), all signed by `address` on Base. `approve`: the
+ *  owner's own approve amount, if any. One line per tx. */
+export async function verifyExit(raws: Hex[], exit: { token: Address | null; amount: bigint; approve?: bigint | null }, address: Address, withdrawTo: Address): Promise<string[]> {
   const reject = (what: string): never => {
     throw new Error(`signed exit rejected: ${what}`);
   };
@@ -85,9 +86,10 @@ export async function verifyExit(raws: Hex[], exit: { token: Address | null; amo
     }
     const { functionName, args } = decodeFunctionData({ abi: exitAbi, data: tx.data ?? "0x" });
     if (i === 0) {
-      if (functionName !== "approve" || to !== getAddress(exit.token) || getAddress(args[0] as Address) !== ROUTER || args[1] !== exit.amount)
-        reject(`tx 0 is not approve(router, ${exit.amount}) on ${exit.token}`);
-      out.push(`approve(router, ${exit.amount}) on ${exit.token}, nonce ${tx.nonce}`);
+      const allowed = exit.approve ?? exit.amount;
+      if (functionName !== "approve" || to !== getAddress(exit.token) || getAddress(args[0] as Address) !== ROUTER || args[1] !== allowed)
+        reject(`tx 0 is not approve(router, ${allowed}) on ${exit.token}`);
+      out.push(`approve(router, ${allowed}) on ${exit.token}, nonce ${tx.nonce}`);
     } else {
       if (i !== 1 || functionName !== "swapExactTokensForETHSupportingFeeOnTransferTokens" || to !== ROUTER) reject(`tx ${i} is not the swap on the router`);
       const [amount, min, path, recipient] = args as readonly [bigint, bigint, readonly Address[], Address, bigint];
@@ -168,12 +170,12 @@ if (import.meta.main) {
   if (arg === "exit") {
     const nonce = Number(nonceArg);
     if (!Number.isInteger(nonce)) throw new Error(usage);
-    type Exit = { by: string; token: Address | null; amount: string; nonce: number; signed_txs: string[] } | null;
+    type Exit = { by: string; token: Address | null; amount: string; approve: Hex | null; nonce: number; signed_txs: string[] } | null;
     const exit = await reread(() => view<Exit>("last_exit"), (e) => e?.nonce === nonce);
     if (exit?.nonce !== nonce) throw new Error(`no signed exit at nonce ${nonce} stored by the guard (latest: ${exit?.nonce ?? "none"})`);
     const { withdraw_to } = await view<{ withdraw_to: Address }>("evm_config");
     const raws = exit.signed_txs.map((b) => `0x${Buffer.from(b, "base64").toString("hex")}` as Hex);
-    const lines = await verifyExit(raws, { token: exit.token, amount: BigInt(exit.amount) }, address, withdraw_to);
+    const lines = await verifyExit(raws, { token: exit.token, amount: BigInt(exit.amount), approve: exit.approve ? BigInt(exit.approve) : null }, address, withdraw_to);
     for (const l of lines) log(`exit by ${exit.by}, signed tx decoded: ${l}`);
     const watched = exit.token ? address : withdraw_to;
     await fund(client, raws, address, log); // once for all, so the balance change below is the real one

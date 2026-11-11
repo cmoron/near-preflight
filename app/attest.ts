@@ -7,10 +7,13 @@
 // measured in the quote (mr_config_id). Taken on trust: NVIDIA's NRAS verdict on the GPU evidence
 // (fetched over TLS, its JWT signature not checked, as in the official verifiers), Intel's PCS
 // collateral, and that the measured code is what it claims (no published reference to compare to).
+// With --check, the package is tied to check <id> on the guard: its sha256 is stored there, the signed
+// response asked for that action, and the signed request names that guard, the check's agent and a NEAR
+// block at most 600 s before the check was requested (a package cannot be re-anchored on another guard).
 // Usage: bun [--env-file=.env] app/attest.ts <package.json> [--check <id>]   (--check reads GUARD)
 import { js_get_collateral, js_verify } from "@phala/dcap-qvl-node";
 import { recoverMessageAddress, sha256, type Hex } from "viem";
-import { digest, type Package } from "./llm";
+import { BINDING, digest, type Package } from "./llm";
 import type { Check } from "./near";
 
 export type Line = { ok: boolean; skipped?: boolean; line: string };
@@ -106,6 +109,33 @@ export function onChain(p: Package, sha: string, id: number, check: Check | null
   return out;
 }
 
+/** How long before its check's request the NEAR block a decision cites may be. */
+const FRESH_S = 600n;
+/** A NEAR block by hash: its time and height (the CLI asks the NEAR RPC; the tests pass fixed ones). */
+export type NearBlock = (hash: string) => Promise<{ timestamp_ns: bigint; height: number }>;
+
+/** The signed request must name the guard checked, the check's agent and a NEAR block at most FRESH_S
+ *  before the check was requested (never after): then the package was written for this check, not
+ *  replayed onto another guard, another agent or a later check. */
+export async function bound(p: Package, id: number, check: Check, guard: string, block: NearBlock): Promise<Line[]> {
+  const messages = (JSON.parse(p.request) as { messages?: { role: string; content: string | null }[] }).messages ?? [];
+  const m = (messages.find((x) => x.role === "system")?.content ?? "").match(BINDING);
+  if (!m) return [line(false, "the signed request names no guard, agent and NEAR block: it could be anchored on any check")];
+  const [, g, a, hash, height] = m;
+  const who = g === guard && a === check.agent;
+  const out = [line(who, `the signed request names guard ${g} and agent ${a}${who ? `: the guard checked and check #${id}'s agent` : `, not ${guard} and ${check.agent}`}`)];
+  try {
+    const b = await block(hash);
+    const requested = BigInt(check.requested_ns);
+    const age = (requested - b.timestamp_ns) / 1_000_000_000n;
+    const fresh = b.height === Number(height) && b.timestamp_ns <= requested && age <= FRESH_S;
+    out.push(line(fresh, `the signed request cites NEAR block ${hash.slice(0, 8)}... (height ${b.height}${b.height === Number(height) ? "" : `, not ${height}`}), ${age} s before check #${id} was requested (at most ${FRESH_S} s, never after)`));
+  } catch (e) {
+    out.push(line(false, `NEAR block ${hash} cited by the signed request not found: ${why(e)}`));
+  }
+  return out;
+}
+
 export function summary(lines: Line[]): string {
   const bad = lines.filter((l) => !l.ok).length;
   const skipped = lines.filter((l) => l.skipped).length;
@@ -130,6 +160,14 @@ if (import.meta.main) {
     const { env, view } = await import("./near");
     const check = await view<Check | null>("get_check", { id }).catch((e) => (lines.push(line(false, `get_check(${id}) on ${env("GUARD")} failed: ${why(e)}`)), null));
     if (lines.at(-1)?.ok !== false || check) lines.push(...onChain(pkg, sha, id, check).map((l) => ({ ...l, line: l.line.replace("the guard", env("GUARD")) })));
+    if (check) {
+      const { provider } = await import("./near");
+      const nearBlock: NearBlock = async (hash) => {
+        const { header } = await provider.viewBlock({ blockId: hash });
+        return { timestamp_ns: BigInt(header.timestamp_nanosec), height: header.height };
+      };
+      lines.push(...(await bound(pkg, id, check, env("GUARD"), nearBlock)));
+    }
   }
   for (const l of lines) console.log(l.line);
   console.log(summary(lines));

@@ -15,8 +15,8 @@ if (!parent?.endsWith(".testnet") || !/^0x[0-9a-fA-F]{40}$/.test(withdrawTo)) {
 const human = await humanAccount(parent);
 const id = (name: string) => `${name}.${parent}`;
 // Price of a verdict: covers the storage of a check, its code record and, on a block, its listing
-// (CHECK_STORAGE_BYTES = 1500 in src/lib.rs, at 10^19 yoctoNEAR per byte).
-const PRICE = nearToYocto("0.015");
+// (CHECK_STORAGE_BYTES = 1700 in src/lib.rs, at 10^19 yoctoNEAR per byte).
+const PRICE = nearToYocto("0.017");
 // Demo bounds set by the human: 0.5 NEAR per arming (the demo arms 0.4), 1 h at most, 5 NEAR per 7 days.
 const BOUNDS = { max_budget: nearToYocto("0.5").toString(), max_duration_s: 3600, max_7d: nearToYocto("5").toString() };
 const AGENT_METHODS = ["request_check", "buy", "refund_check", "request_exit", "sell_quoted"];
@@ -57,8 +57,8 @@ async function scopedKey(name: string, methods: string[], allowance: `${number}`
   return key.toString();
 }
 
-// About 6.1 NEAR in all with the credit below: one 10 NEAR faucet account is enough, with room to spare.
-const guardKey = await subAccount("guard", "3.5"); // wasm of ~318 KB: ~3.2 NEAR of storage
+// About 6.3 NEAR in all with the credit below: one 10 NEAR faucet account is enough, with room to spare.
+const guardKey = await subAccount("guard", "3.7"); // wasm of ~334 KB: ~3.35 NEAR of storage
 // Each role's own account pays the gas of its calls: a few thousandths of NEAR each.
 await subAccount("agent", "0.3");
 await subAccount("agent2", "0.2");
@@ -87,7 +87,7 @@ await guard.signAndSendTransaction({
     ),
   ],
 });
-console.log(`guard deployed and initialized on ${id("guard")} (owner ${parent}, armer ${id("armer")}, price 0.015 NEAR)`);
+console.log(`guard deployed and initialized on ${id("guard")} (owner ${parent}, armer ${id("armer")}, price 0.017 NEAR)`);
 console.log(`derived EVM address of ${id("guard")} (path ${GUARD_PATH}, signer ${MPC_CONTRACT}): ${evmAddress}`);
 console.log(`ETH withdrawals from it go only to ${withdrawTo}, fixed at init`);
 if (!process.argv[3]) console.log("  0x...dEaD is a demo placeholder (a burn address), not an owner's address: pass your own EVM address as 2nd argument");

@@ -80,6 +80,10 @@ cast send -r $RPC --unlocked --from $DEPLOYER "$pair" 'transfer(address,uint256)
 # A young pool whose whole liquidity sits with one EOA, the deployer, who can remove it at any block.
 LP_HELD=$(deploy "Demo LP Held" LPHELD 0)
 
+drained() { # pair holder: stops the setup if the holder still has LP (a removal that reverted)
+  [[ $(cast call "$1" 'balanceOf(address)(uint256)' "$2" -r $RPC | cut -d' ' -f1) == 0 ]] || { echo "liquidity of $1 not removed" >&2; exit 1; }
+}
+
 # A farm (src/FarmToken.sol, no trap): five tokens of one template, each from a fresh creator who
 # pulls all the liquidity 2 blocks after the pool is created; then a sixth, fresh, liquidity in place.
 farm() { # creator name symbol drain|keep -> token address, 1 ETH of liquidity against 1,000,000 tokens
@@ -96,9 +100,11 @@ farm() { # creator name symbol drain|keep -> token address, 1 ETH of liquidity a
     pair=$(cast call $FACTORY 'getPair(address,address)(address)' "$token" "$WETH" -r $RPC)
     lp=$(cast call "$pair" 'balanceOf(address)(uint256)' "$c" -r $RPC | cut -d' ' -f1)
     cast send -r $RPC --unlocked --from "$c" "$pair" 'approve(address,uint256)' $ROUTER "$lp" >/dev/null
-    cast send -r $RPC --unlocked --from "$c" $ROUTER \
+    # Explicit gas: cast's estimate was once too tight (out of gas), and cast send exits 0 on a revert.
+    cast send -r $RPC --unlocked --from "$c" --gas-limit 500000 $ROUTER \
       'removeLiquidityETH(address,uint256,uint256,uint256,address,uint256)' \
       "$token" "$lp" 0 0 "$c" 9999999999 >/dev/null
+    drained "$pair" "$c"
   fi
   echo "$token"
 }
@@ -107,14 +113,61 @@ FARM_FRESH=$(farm 0xfa43000000000000000000000000000000000006 "Farm Fresh" FRESH 
 # Deployed last, so every address above stays the same: a sale reverts with less than 500,000 gas
 # left, while the guard signs with its gas limit (250,000 at setup).
 GAS_HUNGRY=$(deploy "Demo Gas Hungry" GASHUNGRY 10)
+# Deployed after it, so every address above stays the same: the review's Trap2, keyed on what the
+# guard signs and a looser simulation did not (an approve of the exact amount, a buy other than 0.01 ETH).
+# Their LP is burned, as in the review: the trap is then the only thing to find.
+burn_lp() { # token: sends the deployer's LP of its WETH pair to 0xdead
+  local pair lp
+  pair=$(cast call $FACTORY 'getPair(address,address)(address)' "$1" "$WETH" -r $RPC)
+  lp=$(cast call "$pair" 'balanceOf(address)(uint256)' $DEPLOYER -r $RPC | cut -d' ' -f1)
+  cast send -r $RPC --unlocked --from $DEPLOYER "$pair" 'transfer(address,uint256)' 0x000000000000000000000000000000000000dEaD "$lp" >/dev/null
+}
+APPROVE_MAX_ONLY=$(deploy "Demo Approve Max Only" APPROVEMAX 11)
+burn_lp "$APPROVE_MAX_ONLY"
+BUY_001_ONLY=$(deploy "Demo Buy 0.01 Only" BUY001 12)
+burn_lp "$BUY_001_ONLY"
+
+# Last: the review's template poisoning. Three copies of USDC's runtime code (its proxy, implementation
+# slot set by the constructor to a storage-only ERC-20), each with a 0.6 ETH pool drained in the next
+# block, from an address without a key. USDC's own pool predates the template index window, so the
+# drained copies must not get it blocked (app/index.ts beforeBlock).
+POISONER=0xb0150000000000000000000000000000000000b0
+cast rpc -r $RPC anvil_setBalance $POISONER 0x56BC75E2D63100000 >/dev/null # 100 ETH
+cast rpc -r $RPC anvil_impersonateAccount $POISONER >/dev/null
+COPY_IMPL=$(forge create --rpc-url $RPC --unlocked --from $POISONER --broadcast --json src/CopyImpl.sol:CopyImpl | jq -r .deployedTo)
+runtime=$(cast code $USDC -r $RPC)
+runtime=${runtime#0x}
+size=$(printf '%04x' $((${#runtime} / 2)))
+# Constructor: PUSH32 implementation, PUSH32 ZeppelinOS implementation slot, SSTORE; CODECOPY the runtime
+# that follows this 82-byte (0x52) prefix to memory 0, RETURN it.
+IMPL_SLOT=7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3
+init="0x7f$(printf '%064s' "${COPY_IMPL#0x}" | tr ' ' 0)7f${IMPL_SLOT}55""61${size}610052600039""61${size}6000f3${runtime}"
+COPIES=()
+for i in 1 2 3; do
+  copy=$(cast send -r $RPC --unlocked --from $POISONER --create "$init" --json | jq -r .contractAddress)
+  [[ $(cast code "$copy" -r $RPC) == "0x$runtime" ]] || { echo "copy $i: runtime differs from USDC's" >&2; exit 1; }
+  cast send -r $RPC --unlocked --from $POISONER "$copy" 'mint(address,uint256)' $POISONER 1000000000000 >/dev/null
+  cast send -r $RPC --unlocked --from $POISONER "$copy" 'approve(address,uint256)' $ROUTER 1000000000000 >/dev/null
+  cast send -r $RPC --unlocked --from $POISONER --value 0.6ether $ROUTER \
+    'addLiquidityETH(address,uint256,uint256,uint256,address,uint256)' "$copy" 1000000000000 0 0 $POISONER 9999999999 >/dev/null
+  pair=$(cast call $FACTORY 'getPair(address,address)(address)' "$copy" "$WETH" -r $RPC)
+  lp=$(cast call "$pair" 'balanceOf(address)(uint256)' $POISONER -r $RPC | cut -d' ' -f1)
+  cast send -r $RPC --unlocked --from $POISONER "$pair" 'approve(address,uint256)' $ROUTER "$lp" >/dev/null
+  cast send -r $RPC --unlocked --from $POISONER --gas-limit 500000 $ROUTER \
+    'removeLiquidityETH(address,uint256,uint256,uint256,address,uint256)' "$copy" "$lp" 0 0 $POISONER 9999999999 >/dev/null
+  drained "$pair" $POISONER
+  COPIES+=("$copy")
+done
 
 jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked "$BLOCKED" \
   --arg later "$LATER" --arg tax "$TAX" --arg taxlater "$TAX_LATER" --arg hold "$HOLD" --arg sim "$SIM" \
-  --arg frozen "$FROZEN" --arg tax20 "$TAX20" --arg late "$LATE" --arg lpburned "$LP_BURNED" --arg lpheld "$LP_HELD" --arg fresh "$FARM_FRESH" --arg gashungry "$GAS_HUNGRY" --argjson block "$FORK_BLOCK" \
+  --arg frozen "$FROZEN" --arg tax20 "$TAX20" --arg late "$LATE" --arg lpburned "$LP_BURNED" --arg lpheld "$LP_HELD" --arg fresh "$FARM_FRESH" --arg gashungry "$GAS_HUNGRY" \
+  --arg approvemax "$APPROVE_MAX_ONLY" --arg buy001 "$BUY_001_ONLY" --argjson copies "$(printf '%s\n' "${COPIES[@]}" | jq -R . | jq -s .)" --argjson block "$FORK_BLOCK" \
   '{fork_block: $block, usdc: $usdc, safe: $safe, owner_reclaim: $reclaim, sell_blocked: $blocked,
     sell_blocked_later: $later, sell_tax: $tax, sell_tax_later: $taxlater, hold_one_block: $hold, sim_detector: $sim,
     guard_frozen: $frozen, sell_tax_20: $tax20, late_liquidity: $late, lp_burned: $lpburned, lp_held: $lpheld,
-    farm_fresh: $fresh, gas_hungry: $gashungry}' > tokens.json
+    farm_fresh: $fresh, gas_hungry: $gashungry, approve_max_only: $approvemax, buy_001_only: $buy001,
+    usdc_copies: $copies}' > tokens.json
 echo "guard_frozen freezes $GUARD_EVM"
 echo "Base fork at block $FORK_BLOCK ready on $RPC; tokens in evm/tokens.json:"
 cat tokens.json

@@ -19,7 +19,8 @@ const check = (verdict: Check["verdict"]): Check => ({
   exit_amount: null,
   decision_sha256: null,
   buy_decision_sha256: null,
-  gas_limit: 0,
+  amount_wei: "10000000000000",
+  tx_hashes: [],
 });
 
 test("absent on a node behind last_check_id: reread on the next round, not skipped", () => {

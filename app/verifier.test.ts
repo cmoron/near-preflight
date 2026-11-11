@@ -1,9 +1,10 @@
 // The sentinel's checks against the local copy of Base (run evm/fork.sh first).
 import { describe, expect, test } from "bun:test";
-import { decodeAbiParameters, encodeFunctionData, keccak256, parseAbi, parseEther, type Address, type Hex } from "viem";
+import { decodeAbiParameters, encodeFunctionData, keccak256, parseAbi, parseEther, parseTransaction, toHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
 import { buildIndex, type Index } from "./index";
-import { checkExit, checkToken, liquidityFindings, ROUTER, rpc, specialOf, WETH, type Holder, type Liquidity, type NearFacts } from "./verifier";
+import { localPreviews, SETUP_FEES } from "./testkit";
+import { checkExit, checkToken, liquidityFindings, ROUTER, rpc, specialOf, WETH, type Fees, type Holder, type Liquidity, type NearFacts } from "./verifier";
 
 const quoteAbi = parseAbi(["function getAmountsOut(uint256,address[]) view returns (uint256[])"]);
 
@@ -14,10 +15,15 @@ const rand = (): Address => `0x${Buffer.from(crypto.getRandomValues(new Uint8Arr
 /** Index of every pool the fork setup launched (evm/fork.sh), as the sentinel would load it. */
 const INDEX = await buildIndex(RPC, tokens.fork_block + 1, Number(BigInt(await rpc<Hex>(RPC, "eth_blockNumber", []))));
 const NO_NEAR: NearFacts = { listed: [], previous: null };
-/** The gas limit the guard signs with at setup (app/setup.ts): every simulated call gets it. */
-const GAS = 250_000n;
-const check = (token: string, guard: Address = GUARD_EVM, index: Index | null = INDEX, near: NearFacts = NO_NEAR, gas = GAS) =>
-  checkToken(RPC, token as `0x${string}`, guard, () => ({ buyer: rand(), stranger: rand() }), { index, near: async () => near, gas });
+/** The amount the agent states at request_check in the demo: 0.00001 ETH. */
+const AMOUNT = 10_000_000_000_000n;
+/** Time of the fork's latest block: a check requested now (its swap deadline is 300 s later). */
+const headTime = async () => BigInt((await rpc<{ timestamp: Hex }>(RPC, "eth_getBlockByNumber", ["latest", false])).timestamp);
+/** What the guard would sign for a check of `token` by `guard`, requested now. */
+const previews = async (token: string, guard: Address, fees: Fees = SETUP_FEES, amount = AMOUNT) =>
+  localPreviews({ guard, target: token as Address, amount, requestedS: await headTime(), fees });
+const check = async (token: string, guard: Address = GUARD_EVM, index: Index | null = INDEX, near: NearFacts = NO_NEAR, fees: Fees = SETUP_FEES) =>
+  checkToken(RPC, token as Address, guard, () => ({ buyer: rand(), stranger: rand() }), { index, near: async () => near, amount: AMOUNT, preview: await previews(token, guard, fees) });
 
 describe("sentinel verdict", () => {
   test("USDC, healthy witness already on Base: allow", async () => expect((await check(tokens.usdc)).verdict).toBe("allow"));
@@ -67,10 +73,9 @@ describe("sentinel verdict", () => {
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("sale refused in the next block");
     expect(r.list_target).toBe(true); // the probe's sale fails too: the token's own behaviour
-    expect(r.evidence.gas_limit).toBe(250_000);
   });
   test("the same token simulated with 1,000,000 gas sells: only the guard's own gas limit says what a sale will meet", async () => {
-    const r = await check(tokens.gas_hungry, GUARD_EVM, INDEX, NO_NEAR, 1_000_000n);
+    const r = await check(tokens.gas_hungry, GUARD_EVM, INDEX, NO_NEAR, { ...SETUP_FEES, gas: 1_000_000n });
     expect(r.verdict).not.toBe("block"); // its young pool's LP sits with an EOA: a warn
     expect(r.reasons).not.toContain("sale refused");
   });
@@ -81,6 +86,35 @@ describe("sentinel verdict", () => {
     const r = await check(tokens.sim_detector);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("sale refused in the next block"); // the router masks the token's reason
+  });
+});
+
+// The review's Trap2: tokens keyed on a difference between what a looser simulation did and what the
+// guard signs. The guard side now runs the guard's own transactions, so each is caught as a token trap.
+describe("the guard side simulates exactly what the guard signs", () => {
+  test("Trap2 mode 1, a sale only after an approve of 2^256 - 1 (the guard approves the exact amount): block, listed", async () => {
+    const r = await check(tokens.approve_max_only);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toContain("sale refused in the next block");
+    expect(r.list_target).toBe(true); // the probe signs the same approve: the token's own behaviour
+  });
+  test("Trap2 mode 2, a sale only after a buy of exactly 0.01 ETH (the agent asked 0.00001 ETH): block, listed", async () => {
+    const r = await check(tokens.buy_001_only);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toContain("sale refused in the next block");
+    expect(r.list_target).toBe(true);
+  });
+  test("the guard's buy is simulated as the very transaction it signs: calldata, value, nonce, gas, fees; its hash is in the evidence", async () => {
+    const p = await previews(tokens.usdc, GUARD_EVM);
+    const r = await checkToken(RPC, tokens.usdc as Address, GUARD_EVM, () => ({ buyer: rand(), stranger: rand() }), { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: p });
+    const [signed] = await p.check(BigInt(r.evidence.quote)); // what buy would sign on this verdict
+    expect(r.evidence.tx_hashes).toEqual([keccak256(signed)]);
+    const t = parseTransaction(signed);
+    const calls = (r.request.params[0] as { blockStateCalls: { calls: Record<string, string>[] }[] }).blockStateCalls[0].calls;
+    const buy = calls.find((c) => c.from.toLowerCase() === GUARD_EVM.toLowerCase() && c.to.toLowerCase() === ROUTER.toLowerCase() && c.value)!;
+    expect(buy).toEqual({ from: GUARD_EVM, to: t.to!, data: t.data!, value: toHex(t.value!), nonce: toHex(t.nonce!), gas: toHex(t.gas!), maxFeePerGas: toHex(t.maxFeePerGas!), maxPriorityFeePerGas: toHex(t.maxPriorityFeePerGas!) });
+    expect(t.value).toBe(AMOUNT); // the amount the agent stated, not a fixed 0.01 ETH
+    expect(r.evidence.amount_wei).toBe(AMOUNT.toString());
   });
 });
 
@@ -158,6 +192,15 @@ describe("template reputation", () => {
     expect(r.verdict).toBe("block");
     expect(r.list_target).toBe(true);
   });
+  // review's poisoning (evm/fork.sh deploys it): three copies of USDC's code, each pool funded with
+  // 0.6 ETH and drained the next block, are in the index under USDC's template
+  test("copies of a token's code cannot get it blocked: USDC stays allow, its pool predates the window", async () => {
+    const r = await check(tokens.usdc);
+    expect(r.verdict).toBe("allow");
+    expect(r.reasons).toContain("template reputation not applied: the token's own pool was not funded within the index window");
+    expect(r.evidence.reputation?.before_block).toBeNull();
+    expect(INDEX.templates[r.evidence.template].filter((p) => p.drained !== null).length).toBe(3);
+  });
   test("without an index the reputation is unknown: warn, never allow", async () => {
     const r = await check(tokens.safe, GUARD_EVM, null);
     expect(r.verdict).toBe("warn");
@@ -190,7 +233,8 @@ describe("shared blocklist and code changes read from NEAR", () => {
     await checkToken(RPC, tokens.farm_fresh as Address, GUARD_EVM, () => ({ buyer: rand(), stranger: rand() }), {
       index: INDEX,
       near: async (target) => (asked.push(target), NO_NEAR),
-      gas: GAS,
+      amount: AMOUNT,
+      preview: await previews(tokens.farm_fresh, GUARD_EVM),
     });
     expect(asked).toEqual([tokens.farm_fresh as Address]);
   });
@@ -198,24 +242,32 @@ describe("shared blocklist and code changes read from NEAR", () => {
 
 describe("exit quote (the agent's floor comes from it)", () => {
   const HOLDER = "0x60B1100000000000000000000000000000000001" as Address; // holds the demo tokens (evm/fork.sh)
-  test("sale of tokens the address holds: allow, quote = WETH out of the simulated sale", async () => {
-    const r = await checkExit(RPC, tokens.lp_burned as Address, HOLDER, parseEther("1000"), GAS);
+  /** The approve and swap the guard would sign for an exit quote of `amount` by `seller`. */
+  const exitPreview = async (seller: Address, amount: bigint) =>
+    localPreviews({ guard: seller, target: tokens.lp_burned as Address, amount: 0n, requestedS: await headTime(), exitAmount: amount }).check;
+  test("sale of tokens the address holds: allow, quote = ETH out of the simulated sale, simulated as the guard signs it", async () => {
+    const amount = parseEther("1000");
+    const preview = await exitPreview(HOLDER, amount);
+    const r = await checkExit(RPC, tokens.lp_burned as Address, HOLDER, amount, preview);
     expect(r.verdict).toBe("allow");
     expect(BigInt(r.evidence.quote)).toBeGreaterThan(0n);
     expect(r.evidence.kind).toBe("exit");
+    // the approve and swap simulated are those sell_quoted signs on this quote (floor = quote - 3 %)
+    expect(r.evidence.tx_hashes).toEqual((await preview(BigInt(r.evidence.quote))).map((t) => keccak256(t)));
   });
   test("sale of more than the address holds: no quote, block (the owner's own exit stays open)", async () => {
-    const r = await checkExit(RPC, tokens.lp_burned as Address, rand(), parseEther("1000"), GAS);
+    const seller = rand();
+    const r = await checkExit(RPC, tokens.lp_burned as Address, seller, parseEther("1000"), await exitPreview(seller, parseEther("1000")));
     expect(r.verdict).toBe("block");
     expect(r.evidence.quote).toBe("0");
   });
 });
 
 describe("quote posted with the verdict", () => {
-  test("USDC, no tax: tokens received by the simulated buy of 0.01 ETH = pool output at the block", async () => {
+  test("USDC, no tax: tokens the guard received for the amount stated = pool output at the block", async () => {
     const r = await check(tokens.usdc);
     const out = await rpc<Hex>(RPC, "eth_call", [
-      { to: ROUTER, data: encodeFunctionData({ abi: quoteAbi, args: [parseEther("0.01"), [WETH, tokens.usdc as Address]] }) },
+      { to: ROUTER, data: encodeFunctionData({ abi: quoteAbi, args: [AMOUNT, [WETH, tokens.usdc as Address]] }) },
       `0x${r.evidence.block.toString(16)}`,
     ]);
     const [amounts] = decodeAbiParameters([{ type: "uint256[]" }], out);

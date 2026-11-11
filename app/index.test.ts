@@ -3,7 +3,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { getContractAddress, keccak256, pad, parseEther, stringToHex, toHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
-import { beforeBlock, buildIndex, indexSha256, reputationFindings, reputationOf, templateOf, type Index } from "./index";
+import { beforeBlock, buildIndex, indexSha256, ownAfterIndex, reputationFindings, reputationOf, templateOf, type Index } from "./index";
 import { FACTORY, rpc, WETH } from "./verifier";
 
 const RPC = process.env.EVM_RPC ?? "http://127.0.0.1:8545";
@@ -51,7 +51,7 @@ describe("index rebuilt from chain logs", async () => {
   });
   test("the demo tokens (LP burned or held, never removed) are not drained", async () => {
     const demo = index.templates[templateOf(await codeOf(tokens.safe))];
-    expect(demo.length).toBe(14);
+    expect(demo.length).toBe(16); // 14 demo tokens and the two Trap2 variants
     expect(demo.every((p) => p.drained === null)).toBe(true);
   });
   test("deterministic: rebuilt from the same chain state, same sha256", async () => {
@@ -59,17 +59,31 @@ describe("index rebuilt from chain logs", async () => {
   });
   test("reputation of the fresh token: only pools before its own, 5 of 5 drained, median 2 blocks -> block", async () => {
     const own = index.templates[farm].find((p) => p.token === tokens.farm_fresh.toLowerCase())!;
-    const r = reputationOf(index, farm, beforeBlock(index, own.pair));
+    const r = reputationOf(index, farm, beforeBlock(index, own.pair, await ownAfterIndex(RPC, index, own.pair)));
     expect(r).toMatchObject({ template: farm, before_block: own.funded, pools: 5, drained: 5, median_drain_blocks: 2, index_sha256: indexSha256(index) });
     const [f] = reputationFindings(r);
     expect(f.level).toBe("block");
     expect(f.text).toBe(`template ${farm.slice(0, 6)}..${farm.slice(-4)}: 5 of 5 earlier pools drained, median 2 blocks after funding`);
   });
-  test("own pool outside the index window: the whole window counts", async () => {
+  test("own pool created after the index window: every pool of the index is earlier, all count", async () => {
     const own = index.templates[farm].find((p) => p.token === tokens.farm_fresh.toLowerCase())!;
     const before = await buildIndex(RPC, tokens.fork_block + 1, own.created - 1); // the fresh pool is not in it
-    expect(beforeBlock(before, own.pair)).toBe(before.to + 1);
+    expect(await ownAfterIndex(RPC, before, own.pair)).toBe(true); // no code at the window's end
+    expect(beforeBlock(before, own.pair, true)).toBe(before.to + 1);
     expect(reputationOf(before, farm, before.to + 1)).toMatchObject({ pools: 5, drained: 5 });
+  });
+  // review's poisoning: copies of an established token's code, funded and drained inside the window,
+  // got the token blocked because its own, older pool was judged on the whole window
+  test("three drained copies of USDC's code (evm/fork.sh): USDC's pool predates the window, so reputation does not apply", async () => {
+    const usdc = templateOf(await codeOf(tokens.usdc));
+    const copies = index.templates[usdc];
+    expect(copies.map((p) => p.token).sort()).toEqual(tokens.usdc_copies.map((a) => a.toLowerCase() as Address).sort());
+    expect(copies.every((p) => p.funded !== null && p.drained !== null && p.drained - p.funded <= 2)).toBe(true);
+    const pair = (await rpc<Hex>(RPC, "eth_call", [{ to: FACTORY, data: `0xe6a43905${pad(tokens.usdc as Hex).slice(2)}${pad(WETH).slice(2)}` }, "latest"])).replace(/^0x0{24}/, "0x") as Address;
+    expect(await ownAfterIndex(RPC, index, pair)).toBe(false); // the pair has code at the window's end: it is older
+    const r = reputationOf(index, usdc, beforeBlock(index, pair, false));
+    expect(r).toMatchObject({ before_block: null, pools: 0, drained: 0 });
+    expect(reputationFindings(r)).toEqual([{ level: "allow", text: `template reputation not applied: the token's own pool was not funded within the index window (blocks ${index.from}..${index.to})` }]);
   });
 });
 
@@ -99,7 +113,7 @@ describe("farm rule", () => {
     const t = "0xaa" as Hex;
     const [own] = pools([null], 20);
     const i = { ...index, templates: { [t]: [...pools([22], 10), own, ...pools([22, 22, 22], 30)] } };
-    const before = beforeBlock(i, own.pair);
+    const before = beforeBlock(i, own.pair, false);
     expect(before).toBe(20);
     expect(reputationOf(i, t, before)).toMatchObject({ before_block: 20, pools: 1, drained: 1 });
     expect(reputationFindings(reputationOf(i, t, before))).toEqual([]);
@@ -116,21 +130,32 @@ describe("farm rule", () => {
     const own = { pair: "0x0e" as Address, token: "0x0e" as Address, created: 5, funded: 40, drained: null };
     const farm = [10, 20, 30].map((b) => ({ pair: `0x${b}` as Address, token: `0x${b}` as Address, created: b, funded: b, drained: b + 2 }));
     const i = { ...index, templates: { [t]: [own, ...farm] } };
-    const before = beforeBlock(i, own.pair);
+    const before = beforeBlock(i, own.pair, false);
     expect(before).toBe(40);
     expect(reputationFindings(reputationOf(i, t, before))[0]?.level).toBe("block");
   });
-  test("own pool not in the index, or never funded to the minimum: all history counts, no chain read", async () => {
+  test("own pool older than the window, or never funded in it, or none: reputation does not apply, and says so", async () => {
     const t = "0xaa" as Hex;
     const dust = { pair: "0x0d" as Address, token: "0x0d" as Address, created: 5, funded: null, drained: null };
-    const i = { ...index, templates: { [t]: [dust] } };
-    expect(beforeBlock(i, "0x00000000000000000000000000000000000000ff")).toBe(ALL);
-    expect(beforeBlock(i, dust.pair)).toBe(ALL);
+    const i = { ...index, templates: { [t]: [dust, ...pools([12, 12, 12])] } };
+    expect(beforeBlock(i, "0x00000000000000000000000000000000000000ff", false)).toBeNull(); // not in it, older
+    expect(beforeBlock(i, dust.pair, false)).toBeNull();
+    expect(beforeBlock(i, null, false)).toBeNull();
+    const r = reputationOf(i, t, null);
+    expect(r).toMatchObject({ before_block: null, pools: 0, drained: 0, median_drain_blocks: null });
+    expect(reputationFindings(r)).toEqual([{ level: "allow", text: "template reputation not applied: the token's own pool was not funded within the index window (blocks 1..100)" }]);
   });
-  test("with no own pool (no V2 WETH pair) every pool of the index counts", async () => {
+  test("own pool not in the index but created after it: every pool of the index counts", () => {
     const t = "0xaa" as Hex;
-    expect(beforeBlock(index, null)).toBe(ALL);
+    expect(beforeBlock(index, "0x00000000000000000000000000000000000000ff", true)).toBe(ALL);
     expect(reputationOf({ ...index, templates: { [t]: pools([12, 12, 12], 100) } }, t, ALL)).toMatchObject({ before_block: ALL, pools: 3, drained: 3 });
+  });
+  test("no index and not applicable stay distinguishable from checked and clean", () => {
+    const t = "0xaa" as Hex;
+    const clean = reputationFindings(reputationOf({ ...index, templates: { [t]: pools([12, null, null]) } }, t, ALL));
+    expect(clean).toEqual([]);
+    expect(reputationFindings(null)[0].level).toBe("warn");
+    expect(reputationFindings(reputationOf(index, t, null))[0].text).toContain("not applied");
   });
 });
 

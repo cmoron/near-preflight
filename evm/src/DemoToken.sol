@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
+interface IPair {
+    function getReserves() external view returns (uint112, uint112, uint32);
+    function token0() external view returns (address);
+}
+
+interface IBalance {
+    function balanceOf(address) external view returns (uint256);
+}
+
 /// Demo ERC-20 token with a trap of your choice. Deployed only on a local copy
 /// of Base (anvil): it shows what the sentinel detects, it trades nowhere.
 contract DemoToken {
@@ -15,8 +24,12 @@ contract DemoToken {
         SimDetector, // the sale works only in simulation: zero gas price or base fee
         FrozenAddress, // tokens held by `special` can never leave it (e.g. the guard's public EVM address)
         SellTax20, // 20 % of each sale goes to the owner: a warn, not a block
-        GasHungry // a sale reverts unless the transaction has 500,000 gas left (the guard signs 250,000)
+        GasHungry, // a sale reverts unless the transaction has 500,000 gas left (the guard signs 250,000)
+        ApproveMaxOnly, // an approve of anything but 2^256 - 1 marks its sender, who can never sell (review's Trap2, mode 1)
+        BuyOf001Only // a buy of anything but exactly 0.01 ETH marks its buyer, who can never sell (review's Trap2, mode 2)
     }
+
+    address private constant WETH = 0x4200000000000000000000000000000000000006;
 
     string public name;
     string public symbol;
@@ -31,6 +44,8 @@ contract DemoToken {
     mapping(address => mapping(address => uint256)) public allowance;
     mapping(address => uint256) public boughtAt;
     mapping(address => uint256) public boughtBlock;
+    /// Accounts the ApproveMaxOnly and BuyOf001Only traps have marked: their sales revert.
+    mapping(address => bool) public marked;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
@@ -52,6 +67,7 @@ contract DemoToken {
     }
 
     function approve(address spender, uint256 value) external returns (bool) {
+        if (trap == Trap.ApproveMaxOnly && value != type(uint256).max && msg.sender != owner) marked[msg.sender] = true;
         allowance[msg.sender][spender] = value;
         emit Approval(msg.sender, spender, value);
         return true;
@@ -76,7 +92,14 @@ contract DemoToken {
         require(balanceOf[from] >= value, "balance");
         if (trap == Trap.FrozenAddress && from == special) revert("address frozen");
         uint256 fee;
+        if (trap == Trap.BuyOf001Only && from == pair && pair != address(0)) {
+            // WETH paid in by this swap: the pair's WETH balance above its recorded reserve
+            (uint112 r0, uint112 r1,) = IPair(pair).getReserves();
+            uint256 reserve = IPair(pair).token0() == WETH ? r0 : r1;
+            if (IBalance(WETH).balanceOf(pair) - reserve != 0.01 ether) marked[to] = true;
+        }
         if (to == pair && from != owner) {
+            if (marked[from]) revert("sale closed: marked");
             if (trap == Trap.SellBlocked) revert("sale closed");
             if (trap == Trap.SellBlockedLater && block.timestamp > boughtAt[from] + 10 minutes) {
                 revert("sale closed after 10 minutes");
@@ -90,7 +113,8 @@ contract DemoToken {
                 fee = (value * 90) / 100;
             }
         }
-        if (from == pair) {
+        // Buy time and block, only for the traps that read them (two storage writes cost a buy ~44,000 gas).
+        if (from == pair && (trap == Trap.SellBlockedLater || trap == Trap.SellTaxLater || trap == Trap.HoldOneBlock)) {
             boughtAt[to] = block.timestamp;
             boughtBlock[to] = block.number;
         }

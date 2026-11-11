@@ -1,16 +1,17 @@
 // Replay of a proof: anyone recovers the verdict from proofs/<id>.json and an EVM node.
 // The file carries the exact `evidence` string posted on chain; all of its content is rechecked.
 // Usage: bun app/replay.ts <proof.json> [rpc] [--check]
-import { keccak256, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
-import { beforeBlock, buildIndex, indexSha256, reputationOf, templateOf, type Reputation } from "./index";
+import { decodeFunctionData, encodeFunctionData, keccak256, parseAbi, parseTransaction, serializeTransaction, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
+import { beforeBlock, buildIndex, indexSha256, ownAfterIndex, reputationOf, templateOf, type Reputation } from "./index";
 import {
   balances,
   buildRequest,
   buyStages,
   byLabel,
+  callsBy,
   deriveProbes,
   exitPlan,
-  FUND,
+  FACTORY,
   GUARD,
   implementationAt,
   judge,
@@ -22,7 +23,11 @@ import {
   quoteOf,
   ROUTER,
   rpc,
+  saleAmounts,
+  topUp,
   WETH,
+  type Fees,
+  type GuardTxs,
   type Header,
   type Liquidity,
   type NearFacts,
@@ -36,7 +41,8 @@ type Evidence = {
   block: number;
   method: string;
   request_sha256: string;
-  gas_limit: number;
+  amount_wei: string;
+  tx_hashes: string[];
   code_hash: string;
   implementation: string | null;
   calls: string[];
@@ -46,7 +52,7 @@ type Evidence = {
   reputation: Reputation | null;
   near: NearFacts;
 };
-type ExitEvidence = { kind: "exit"; chain_id: number; block: number; method: string; request_sha256: string; gas_limit: number; amount: string; calls: string[]; quote: string };
+type ExitEvidence = { kind: "exit"; chain_id: number; block: number; method: string; request_sha256: string; amount: string; calls: string[]; quote: string; tx_hashes: string[] };
 /** `skipped`: check not verifiable on this node, reported as such (neither passed nor failed). */
 export type Line = { ok: boolean; line: string; skipped?: boolean };
 /** Request read by get_check on the NEAR guard. */
@@ -60,15 +66,19 @@ export type OnChain = {
   judged_ns: string;
   code: { code_hash: string; implementation: string | null } | null;
   exit_amount: string | null;
-  /** Gas limit the verdict was simulated with: the guard signs a buy or an exit on it only if its own is the same. */
-  gas_limit: number;
+  /** The buy the agent stated at request_check, in wei ("0" for an exit quote). */
+  amount_wei: string;
+  /** Signing hashes (no 0x) the sentinel posted: the guard signs only these transactions for the check. */
+  tx_hashes: string[];
+  /** The buy NEAR signed for this check (base64), null if none. */
+  signed_tx?: string | null;
 } | null;
 /** A blocklist entry as get_entry returns it, null if not listed. */
 export type OnChainEntry = { reporter: string; evidence_sha256: string } | null;
-type BlockStateCall = { blockOverrides: { time: Hex }; calls: { from: Address }[] };
+type BlockStateCall = { blockOverrides: { time: Hex }; calls: RequestCall[] };
 
-const EVIDENCE_KEYS = "block,calls,chain_id,code_hash,gas_limit,implementation,liquidity,method,near,quote,reputation,request_sha256,template";
-const EXIT_KEYS = "amount,block,calls,chain_id,gas_limit,kind,method,quote,request_sha256";
+const EVIDENCE_KEYS = "amount_wei,block,calls,chain_id,code_hash,implementation,liquidity,method,near,quote,reputation,request_sha256,template,tx_hashes";
+const EXIT_KEYS = "amount,block,calls,chain_id,kind,method,quote,request_sha256,tx_hashes";
 const REPUTATION_KEYS = "before_block,drained,from,index_sha256,median_drain_blocks,pools,template,to";
 /** Tolerated gap between the EVM block time and those of the NEAR request and verdict: clocks of
  *  two chains, lag of the EVM RPC read by the sentinel, block interval. */
@@ -81,6 +91,9 @@ const isObj = (x: unknown): x is Record<string, unknown> => typeof x === "object
 const iso = (s: number) => new Date(s * 1000).toISOString().replace(".000", "");
 const blockOf = (url: string, tag: string) => rpc<Header>(url, "eth_getBlockByNumber", [tag, false]);
 
+/** `n` keccak256 hashes (0x + 64 hex digits). */
+const hashes = (x: unknown, n: number) => Array.isArray(x) && x.length === n && x.every((h) => typeof h === "string" && /^0x[0-9a-f]{64}$/.test(h));
+
 /** Content of the evidence string: exactly the fields the sentinel posts, well typed. */
 function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
   if (typeof p.evidence !== "string") return "evidence is not the string posted on chain (old proof format?)";
@@ -92,8 +105,8 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
   }
   if (isObj(e) && e.kind === "exit") {
     if (Object.keys(e).sort().join() !== EXIT_KEYS) return `exit evidence keys are not exactly ${EXIT_KEYS}`;
-    const typed = Number.isSafeInteger(e.chain_id) && Number.isSafeInteger(e.block) && e.method === "eth_simulateV1" && typeof e.request_sha256 === "string" && Number.isSafeInteger(e.gas_limit) &&
-      typeof e.amount === "string" && /^\d+$/.test(e.amount) && Array.isArray(e.calls) && typeof e.quote === "string" && /^\d+$/.test(e.quote);
+    const typed = Number.isSafeInteger(e.chain_id) && Number.isSafeInteger(e.block) && e.method === "eth_simulateV1" && typeof e.request_sha256 === "string" &&
+      typeof e.amount === "string" && /^\d+$/.test(e.amount) && Array.isArray(e.calls) && typeof e.quote === "string" && /^\d+$/.test(e.quote) && hashes(e.tx_hashes, 2);
     return typed ? (e as unknown as ExitEvidence) : "exit evidence fields have unexpected types";
   }
   if (!isObj(e) || Object.keys(e).sort().join() !== EVIDENCE_KEYS) return `evidence keys are not exactly ${EVIDENCE_KEYS}`;
@@ -103,7 +116,9 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
     (e.block as number) >= 0 &&
     e.method === "eth_simulateV1" &&
     typeof e.request_sha256 === "string" &&
-    Number.isSafeInteger(e.gas_limit) &&
+    typeof e.amount_wei === "string" &&
+    /^\d+$/.test(e.amount_wei) &&
+    hashes(e.tx_hashes, 1) &&
     typeof e.code_hash === "string" &&
     (e.implementation === null || typeof e.implementation === "string") &&
     Array.isArray(e.calls) &&
@@ -113,7 +128,10 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
     (e.liquidity === null || isObj(e.liquidity)) &&
     typeof e.template === "string" &&
     (e.reputation === null ||
-      (isObj(e.reputation) && Object.keys(e.reputation).sort().join() === REPUTATION_KEYS && [e.reputation.from, e.reputation.to, e.reputation.before_block].every(Number.isSafeInteger))) &&
+      (isObj(e.reputation) &&
+        Object.keys(e.reputation).sort().join() === REPUTATION_KEYS &&
+        [e.reputation.from, e.reputation.to].every(Number.isSafeInteger) &&
+        (e.reputation.before_block === null || Number.isSafeInteger(e.reputation.before_block)))) &&
     isObj(e.near) &&
     Array.isArray(e.near.listed) &&
     (e.near.previous === null || isObj(e.near.previous));
@@ -133,45 +151,115 @@ function shapeError(p: Proof, e: { block: number }): string | null {
   return null;
 }
 
-type Rebuilt = { labels: string[]; buyer: Address; guard: Address; stranger: Address | null; owner: Address | null };
+type Rebuilt = { labels: string[]; buyer: Address; guard: Address; stranger: Address | null; owner: Address | null; buy: Hex };
 const NOBODY: Address = "0x0000000000000000000000000000000000000000";
+type RequestCall = { from: Address; to: Address; data: Hex; value?: Hex; nonce?: Hex; gas: Hex; maxFeePerGas: Hex; maxPriorityFeePerGas: Hex };
+const shape = parseAbi([
+  "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256) payable",
+  "function approve(address,uint256) returns (bool)",
+  "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint256,uint256,address[],address,uint256)",
+]);
+/** A placeholder unsigned transaction carrying `data`: only to lay out plan()'s calls by label. */
+const placeholder = (functionName: string, args: unknown[]) =>
+  serializeTransaction({ type: "eip1559", chainId: 1, to: NOBODY, data: encodeFunctionData({ abi: shape, functionName, args } as Parameters<typeof encodeFunctionData>[0]), gas: 1n, maxFeePerGas: 1n, maxPriorityFeePerGas: 1n });
+const SKELETON: GuardTxs = (() => {
+  const sale = [placeholder("approve", [NOBODY, 0n]), placeholder("swapExactTokensForETHSupportingFeeOnTransferTokens", [0n, 0n, [], NOBODY, 0n])];
+  return { buy: placeholder("swapExactETHForTokensSupportingFeeOnTransferTokens", [0n, [], NOBODY, 0n]), sales: [sale, sale] };
+})();
+/** One of the guard's calls of the request as the unsigned transaction it stands for (its hash is what
+ *  the MPC signs). */
+export function unsignedOf(c: RequestCall, chainId: number): Hex {
+  if (c.nonce === undefined) throw new Error("a guard transaction without its nonce");
+  return serializeTransaction({
+    type: "eip1559",
+    chainId,
+    nonce: Number(BigInt(c.nonce)),
+    to: c.to,
+    value: BigInt(c.value ?? "0x0"),
+    data: c.data,
+    gas: BigInt(c.gas),
+    maxFeePerGas: BigInt(c.maxFeePerGas),
+    maxPriorityFeePerGas: BigInt(c.maxPriorityFeePerGas),
+    accessList: [],
+  });
+}
+
+/** The guard's transactions must be what the guard builds for this check: a buy of `amount` wei of the
+ *  target for the guard's address, and sales that approve exactly the amount they sell then swap it to
+ *  ETH for the guard's address. Without --check this is all replay can say; with it, their hashes are
+ *  the ones the guard stored. Returns the defect, or null. */
+function guardShape(txs: GuardTxs, token: Address, guard: Address, amount: bigint, sold: [bigint, bigint] | null): string | null {
+  const b = parseTransaction(txs.buy);
+  const buy = decodeFunctionData({ abi: shape, data: b.data ?? "0x" });
+  const [, bp, bto] = buy.args as unknown as [bigint, Address[], Address];
+  if (buy.functionName !== "swapExactETHForTokensSupportingFeeOnTransferTokens" || !same(b.to ?? "", ROUTER) || b.value !== amount || bp.length !== 2 || !same(bp[0], WETH) || !same(bp[1], token) || !same(bto, guard))
+    return `the guard's buy is not ${amount} wei of WETH -> ${token} on the router for ${guard}`;
+  for (const [i, sale] of (txs.sales ?? []).entries()) {
+    const bad = saleShape(sale, token, guard, sold![i]);
+    if (bad) return `sale ${i + 1}: ${bad}`;
+  }
+  return null;
+}
+
+/** A sale as the guard signs it: approve(router, x) on the token, then the swap of x to ETH for `guard`. */
+function saleShape(sale: Hex[], token: Address, guard: Address, x: bigint): string | null {
+  const [a, s] = sale.map((t) => parseTransaction(t));
+  const approve = decodeFunctionData({ abi: shape, data: a.data ?? "0x" });
+  const swap = decodeFunctionData({ abi: shape, data: s.data ?? "0x" });
+  const [spender, allowed] = approve.args as unknown as [Address, bigint];
+  const [inAmount, , path, to] = swap.args as unknown as [bigint, bigint, Address[], Address];
+  if (approve.functionName !== "approve" || !same(a.to ?? "", token) || !same(spender, ROUTER) || allowed !== x) return `not approve(router, ${x}) on the target`;
+  if (swap.functionName !== "swapExactTokensForETHSupportingFeeOnTransferTokens" || !same(s.to ?? "", ROUTER) || inAmount !== x || path.length !== 2 || !same(path[0], token) || !same(path[1], WETH) || !same(to, guard))
+    return `not a swap of ${x} target -> ETH on the router for ${guard}`;
+  return null;
+}
 
 /** Rebuilds the request checkToken would have produced for proof.target (same calls, same
  *  addresses, router, WETH, blocks at the same time gaps) and derives the labels from it: those of the file
- *  do not count. Only the buyer, the guard's address, the unknown one and the time come from the
- *  request (at the positions plan() gives them); amounts and owner come from the fresh
- *  response; gas price, prevrandao, coinbase and the real balance of owner() come from the node, at the proof's
- *  block. No fallback: a missing probe is a defect. */
+ *  do not count. Only the buyer, the guard's address, the unknown one, the time and the guard's own
+ *  transactions come from the request (at the positions plan() gives them; the guard's must have the
+ *  shape the guard builds, and their hashes are checked against the evidence and, with --check, the
+ *  guard); amounts and owner come from the fresh response; base fee, prevrandao, coinbase and real
+ *  balances come from the node, at the proof's block. No fallback: a missing probe is a defect. */
 async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[]): Promise<Rebuilt | { error: string }> {
   try {
     const bs = (p.request.params[0] as { blockStateCalls: BlockStateCall[] }).blockStateCalls;
     const now = BigInt(bs[0].blockOverrides.time);
     const token = p.target as Address;
     const block = BigInt(e.block);
-    /** Sender of the first-block call that plan() labels `label`, in the request. */
-    const from = (blocks: { calls: { label: string }[] }[], label: string) => bs[0].calls[blocks[0].calls.findIndex((c) => c.label === label)]?.from;
-    const buyer = from(plan(token, NOBODY, NOBODY, block, now), "tokens before buy");
-    const guard = from(plan(token, NOBODY, NOBODY, block, now), `${GUARD}tokens before buy`);
-    if (!buyer || !guard) return { error: "request has no buyer or no guard side" };
+    const amount = BigInt(e.amount_wei);
+    /** The request's call that plan() labels `label` in block `i`. */
+    const at = (blocks: { calls: { label: string }[] }[], i: number, label: string) => bs[i]?.calls[blocks[i].calls.findIndex((c) => c.label === label)];
+    const layout = plan(token, NOBODY, NOBODY, block, now, amount, SKELETON);
+    const buyer = at(layout, 0, "tokens before buy")?.from;
+    const guard = at(layout, 0, `${GUARD}tokens before buy`)?.from;
+    const buyCall = at(layout, 0, `${GUARD}buy`);
+    if (!buyer || !guard || !buyCall) return { error: "request has no buyer, no guard side or no guard buy" };
+    const txs: GuardTxs = { buy: unsignedOf(buyCall, e.chain_id) };
+    const fees: Fees = { gas: BigInt(buyCall.gas), maxFeePerGas: BigInt(buyCall.maxFeePerGas), maxPriorityFeePerGas: BigInt(buyCall.maxPriorityFeePerGas) };
     const head = await blockOf(url, toHex(e.block));
-    const buyOnly = plan(token, buyer, guard, block, now);
+    const buyOnly = plan(token, buyer, guard, block, now, amount, txs);
     const buyLabels = buyOnly[0].calls.map((c) => c.label);
     const st = buyStages(byLabel(buyLabels, fresh.slice(0, buyLabels.length)));
     let blocks = buyOnly;
     let stranger: Address | null = null;
-    if (!st.stop) {
-      const full = { amounts: st.amounts, owner: st.owner };
-      stranger = from(plan(token, buyer, guard, block, now, { ...full, stranger: NOBODY }), "transferFrom by a stranger") ?? null;
+    if (!st.stop && e.liquidity) {
+      const full = { amounts: st.amounts, owner: st.owner, pair: e.liquidity.pair };
+      const fullLayout = plan(token, buyer, guard, block, now, amount, SKELETON, { ...full, stranger: NOBODY });
+      stranger = at(fullLayout, 0, "transferFrom by a stranger")?.from ?? null;
       if (!stranger) return { error: "request has no stranger probe where checkToken puts one" };
-      blocks = plan(token, buyer, guard, block, now, { ...full, stranger });
+      const sale = (i: 1 | 2, when: string) => [`${GUARD}approve router${when}`, `${GUARD}sale${when}`].map((l) => at(fullLayout, i, l)).map((c) => unsignedOf(c!, e.chain_id));
+      txs.sales = [sale(1, " in next block"), sale(2, " +256 blocks")];
+      blocks = plan(token, buyer, guard, block, now, amount, txs, { ...full, stranger });
     }
-    const gas = BigInt(e.gas_limit);
-    const funds = await balances(url, head, buyer, guard, gas, stranger ? { stranger, owner: st.owner } : undefined);
-    const want = JSON.stringify(buildRequest(head, funds, blocks, gas));
+    const bad = guardShape(txs, token, guard, amount, txs.sales ? saleAmounts(st.amounts.guard) : null);
+    if (bad) return { error: bad };
+    const funds = await balances(url, head, { buyer, guard, amount, fees, guardCalls: callsBy(blocks, guard) }, stranger ? { stranger, owner: st.owner } : undefined);
+    const want = JSON.stringify(buildRequest(head, funds, blocks, fees));
     if (want !== JSON.stringify(p.request)) return { error: "request is not the one checkToken builds for this target" };
     const labels = blocks.flatMap((b) => b.calls.map((c) => c.label));
     if (labels.length !== fresh.length) return { error: `expected ${labels.length} calls, node returned ${fresh.length}` };
-    return { labels, buyer, guard, stranger, owner: st.owner };
+    return { labels, buyer, guard, stranger, owner: st.owner, buy: txs.buy };
   } catch (err) {
     return { error: `request cannot be parsed (${msg(err)})` };
   }
@@ -308,7 +396,9 @@ export async function replay(
       const ok = j.verdict === proof.verdict && j.reasons === proof.reasons;
       add(ok, ok ? `verdict ${j.verdict} rejudged identically (same reasons)` : `verdict/reasons differ: file "${proof.verdict}: ${proof.reasons}" vs rejudged "${j.verdict}: ${j.reasons}"`);
       const q = quoteOf(r.labels, fresh).toString();
-      add(q === e.quote, q === e.quote ? `quote ${q} tokens for 0.01 ETH recomputed identically` : `quote in evidence ${e.quote} != recomputed ${q}`);
+      add(q === e.quote, q === e.quote ? `quote ${q} tokens for ${e.amount_wei} wei recomputed identically` : `quote in evidence ${e.quote} != recomputed ${q}`);
+      const h = keccak256(r.buy);
+      add(h === e.tx_hashes[0], h === e.tx_hashes[0] ? `the guard's buy simulated (calldata, value, nonce, gas, fees) hashes to evidence.tx_hashes ${h.slice(0, 10)}...` : `the guard's buy simulated hashes to ${h}, evidence says ${e.tx_hashes[0]}`);
     }
   }
 
@@ -330,7 +420,8 @@ export async function replay(
       const index = await buildIndex(url, r.from, r.to);
       const sha = indexSha256(index);
       add(sha === r.index_sha256, sha === r.index_sha256 ? `template index of blocks ${r.from}..${r.to} rebuilt from the node: same sha256 ${sha.slice(0, 10)}...` : `template index of blocks ${r.from}..${r.to} rebuilt with sha256 ${sha}, evidence says ${r.index_sha256}`);
-      const want = JSON.stringify(reputationOf(index, e.template as Hex, beforeBlock(index, e.liquidity?.pair ?? null)));
+      const own = e.liquidity?.pair ?? null;
+      const want = JSON.stringify(reputationOf(index, e.template as Hex, beforeBlock(index, own, await ownAfterIndex(url, index, own))));
       add(want === JSON.stringify(r), want === JSON.stringify(r) ? `template reputation recomputed identically (${r.drained} of ${r.pools} earlier pools drained)` : `template reputation differs: evidence ${JSON.stringify(r)} vs rebuilt ${want}`);
     } catch (err) {
       fail("rebuilding the template index", err);
@@ -366,7 +457,8 @@ export async function replay(
             : `on-chain evidence_sha256 ${c.evidence_sha256} != sha256 of the file's evidence ${h}`,
         );
         add(c.quote === e.quote, c.quote === e.quote ? `on-chain quote ${c.quote} matches evidence` : `on-chain quote ${c.quote} != evidence quote ${e.quote}`);
-        add(c.gas_limit === e.gas_limit, c.gas_limit === e.gas_limit ? `on-chain gas limit ${c.gas_limit} is the one simulated with` : `on-chain gas limit ${c.gas_limit} != simulated gas limit ${e.gas_limit}`);
+        add(c.amount_wei === e.amount_wei, c.amount_wei === e.amount_wei ? `on-chain amount ${c.amount_wei} wei (stated at request_check) is the one simulated` : `on-chain amount ${c.amount_wei} wei != simulated ${e.amount_wei}`);
+        out.push(...signedAsSimulated(proof.id, c, e.tx_hashes));
         if (c.target.toLowerCase() !== proof.target.toLowerCase()) add(false, `on-chain target ${c.target} is not the proof target ${proof.target}`);
         else {
           const same = c.verdict === proof.verdict && c.reasons === proof.reasons;
@@ -382,6 +474,21 @@ export async function replay(
   } else {
     out.push({ ok: true, skipped: true, line: "SKIPPED  probe addresses not verified: they are derived from on-chain data, checked only with --check" });
     out.push({ ok: true, skipped: true, line: "SKIPPED  NEAR facts (blocklist entries, code at the last check) not verified: checked only with --check" });
+  }
+  return out;
+}
+
+/** The guard signs only the transactions whose hashes it stored with the verdict: they must be the
+ *  simulated ones, and a buy NEAR already signed must be that very transaction, signature aside. */
+function signedAsSimulated(id: number, c: NonNullable<OnChain>, simulated: string[]): Line[] {
+  const line = (ok: boolean, text: string): Line => ({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
+  const stored = c.tx_hashes.map((h) => `0x${h}`);
+  const same = JSON.stringify(stored) === JSON.stringify(simulated);
+  const out = [line(same, same ? `on-chain tx hashes of #${id} are those of the transactions simulated: the guard signs nothing else for it` : `on-chain tx hashes of #${id} ${stored.join(", ") || "none"} != simulated ${simulated.join(", ")}`)];
+  if (c.signed_tx) {
+    const { r: _r, s: _s, v: _v, yParity: _y, ...unsigned } = parseTransaction(`0x${Buffer.from(c.signed_tx, "base64").toString("hex")}`);
+    const h = keccak256(serializeTransaction(unsigned));
+    out.push(line(h === simulated[0], h === simulated[0] ? `the buy NEAR signed for #${id} is the transaction simulated (${h.slice(0, 10)}...)` : `the buy NEAR signed for #${id} hashes to ${h}, not the simulated ${simulated[0]}`));
   }
   return out;
 }
@@ -432,11 +539,23 @@ async function replayExit(proof: Proof, e: ExitEvidence, url: string, opts: Opts
   try {
     const id = Number(await rpc<Hex>(url, "eth_chainId", []));
     add(id === e.chain_id, id === e.chain_id ? `chain id ${id} matches evidence` : `node chain id ${id} != evidence chain id ${e.chain_id}`);
-    seller = (proof.request.params[0] as { blockStateCalls: BlockStateCall[] }).blockStateCalls[0].calls[0]?.from ?? null;
+    const calls = (proof.request.params[0] as { blockStateCalls: BlockStateCall[] }).blockStateCalls[0].calls;
+    seller = calls[0]?.from ?? null;
     const head = await blockOf(url, toHex(e.block));
-    const blocks = exitPlan(proof.target as Address, seller ?? NOBODY, BigInt(e.amount), BigInt(head.timestamp) + NEXT_S);
-    const same = JSON.stringify(buildRequest(head, { [seller ?? NOBODY]: FUND }, blocks, BigInt(e.gas_limit))) === JSON.stringify(proof.request);
+    const token = proof.target as Address;
+    const pair = `0x${(await rpc<Hex>(url, "eth_call", [{ to: FACTORY, data: encodeFunctionData({ abi: parseAbi(["function getPair(address,address) view returns (address)"]), args: [token, WETH] }) }, toHex(e.block)])).slice(-40)}` as Address;
+    // the approve and swap the guard would sign (positions of exitPlan), from the request; shape checked, hashes against the evidence
+    const txs = [calls[1], calls[3]].map((c) => unsignedOf(c, e.chain_id));
+    const fees: Fees = { gas: BigInt(calls[1].gas), maxFeePerGas: BigInt(calls[1].maxFeePerGas), maxPriorityFeePerGas: BigInt(calls[1].maxPriorityFeePerGas) };
+    const blocks = exitPlan(token, seller ?? NOBODY, BigInt(e.amount), BigInt(head.timestamp) + NEXT_S, pair, txs);
+    const funds = await topUp(url, head, seller ?? NOBODY, BigInt(callsBy(blocks, seller ?? NOBODY)) * fees.gas * fees.maxFeePerGas);
+    const same = JSON.stringify(buildRequest(head, funds, blocks, fees)) === JSON.stringify(proof.request);
     add(same, same ? `request is the exit sale checkExit builds for ${e.amount} tokens from ${seller}` : "request is not the exit sale checkExit builds for this target and amount");
+    const sold = BigInt(e.amount);
+    const shapeBad = saleShape(txs, token, seller ?? NOBODY, sold);
+    add(!shapeBad, shapeBad ? `exit transactions: ${shapeBad}` : `exit transactions are approve(router, ${sold}) then the swap of ${sold} to ETH for ${seller}`);
+    const hs = txs.map((t) => keccak256(t));
+    add(JSON.stringify(hs) === JSON.stringify(e.tx_hashes), JSON.stringify(hs) === JSON.stringify(e.tx_hashes) ? "the approve and swap simulated hash to evidence.tx_hashes" : `the approve and swap simulated hash to ${hs.join(", ")}, evidence says ${e.tx_hashes.join(", ")}`);
     const fresh = (await rpc<{ calls: Result[] }[]>(url, proof.request.method, proof.request.params)).flatMap((b) => b.calls);
     const sameResults = JSON.stringify(fresh.map((r) => [r.status, r.returnData])) === JSON.stringify(proof.response.map((r) => [r.status, r.returnData]));
     add(sameResults, sameResults ? `request resent to ${url} at block ${e.block}: status and return data of all ${fresh.length} calls identical` : "call results differ");
@@ -458,8 +577,9 @@ async function replayExit(proof: Proof, e: ExitEvidence, url: string, opts: Opts
     else {
       const h = sha256(stringToHex(proof.evidence)).slice(2);
       add(h === c.evidence_sha256, h === c.evidence_sha256 ? `on-chain evidence_sha256 ${h} is the sha256 of the evidence replayed above` : `on-chain evidence_sha256 ${c.evidence_sha256} != ${h}`);
-      const ok = c.verdict === proof.verdict && c.reasons === proof.reasons && c.quote === e.quote && c.exit_amount === e.amount && c.gas_limit === e.gas_limit && same(c.target, proof.target);
-      add(ok, ok ? `on-chain exit quote #${proof.id}: ${c.verdict}, ${c.quote} wei for ${c.exit_amount} tokens at gas limit ${c.gas_limit}, matches` : `on-chain #${proof.id} (${c.verdict}, quote ${c.quote}, amount ${c.exit_amount}, gas limit ${c.gas_limit}, ${c.target}) differs from the file`);
+      const ok = c.verdict === proof.verdict && c.reasons === proof.reasons && c.quote === e.quote && c.exit_amount === e.amount && same(c.target, proof.target);
+      add(ok, ok ? `on-chain exit quote #${proof.id}: ${c.verdict}, ${c.quote} wei for ${c.exit_amount} tokens, matches` : `on-chain #${proof.id} (${c.verdict}, quote ${c.quote}, amount ${c.exit_amount}, ${c.target}) differs from the file`);
+      out.push(...signedAsSimulated(proof.id, c, e.tx_hashes));
     }
   } catch (err) {
     out.push({ ok: false, line: `ERROR    reading the NEAR contract: ${msg(err)}` });

@@ -4,19 +4,20 @@
 // approve <id>: approves a warn verdict so the agent may buy on it (within its 120 s).
 // reset: clears the agent's 7-day arming log (after replacing a compromised armer).
 // withdraw <wei>: ETH from the guard's EVM address to the owner's address fixed at init.
-// sell <token> <amount> [min wei]: the owner's own exit, never blocked by a freeze, a verdict or the list.
+// sell <token> <amount> [min wei] [max | 0x approve]: the owner's own exit, never blocked by a freeze, a verdict or the
+// list; the router is approved for the amount sold, or for 2^256 - 1 with "max", or any 0x amount.
 // unlist <token>: removes a token from the shared blocklist.
 // holding <token> <agent> [amount]: the token is now held for that agent (0, the default, frees it).
 // gas <limit>: sets the gas limit of every transaction the guard signs (21,000 to 2,000,000, fees
 // unchanged): a sale that needs more gas than the limit can be retried with `sell` after raising it.
 // The relay broadcasts withdrawals and sales: bun --env-file=.env app/relay.ts exit <nonce>.
-// Usage: bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] | unlist <token> | holding <token> <agent> [amount] | gas <limit>
+// Usage: bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] [max | 0x approve] | unlist <token> | holding <token> <agent> [amount] | gas <limit>
 import { parseTransaction, type Hex } from "viem";
 import { call, env, humanAccount, view } from "./near";
 
 const human = await humanAccount(env("OWNER"));
 const agent = env("AGENT");
-const [cmd, a, b, c = "0"] = process.argv.slice(2);
+const [cmd, a, b, c = "0", d] = process.argv.slice(2);
 const EXIT_GAS = 150_000_000_000_000n; // one or two sign calls to the MPC and the callback
 /** Where the relay picks the exit up: the nonce of its first signed transaction. */
 const relayHint = (signed: Hex[]) => (signed.length ? `; broadcast: bun --env-file=.env app/relay.ts exit ${parseTransaction(signed[0]).nonce}` : "");
@@ -46,9 +47,11 @@ if (cmd === "stop") {
   const { tx } = await call(human, "set_evm_gas", { gas_limit: Number(a), max_fee_per_gas, max_priority_fee_per_gas });
   console.log(`  [human] gas limit of every signed transaction set to ${a} (fees unchanged)  ${tx}`);
 } else if (cmd === "sell" && a && b) {
-  const { value, tx } = await call<Hex[]>(human, "sell", { token: a, amount: b, min_out_wei: c }, 0n, EXIT_GAS);
-  console.log(`  [human] sale of ${b} ${a} signed by NEAR (${value.length}/2 tx)${relayHint(value)}  ${tx}`);
+  // approve: "max" for 2^256 - 1 (a token may let only that sell), or 0x + hex; the amount sold by default
+  const approve = d === "max" ? `0x${"f".repeat(64)}` : (d ?? null);
+  const { value, tx } = await call<Hex[]>(human, "sell", { token: a, amount: b, min_out_wei: c, approve }, 0n, EXIT_GAS);
+  console.log(`  [human] sale of ${b} ${a} (approve ${d ?? "of the amount"}) signed by NEAR (${value.length}/2 tx)${relayHint(value)}  ${tx}`);
 } else {
-  console.error("usage: bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] | unlist <token> | holding <token> <agent> [amount] | gas <limit>");
+  console.error("usage: bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] [max | 0x approve] | unlist <token> | holding <token> <agent> [amount] | gas <limit>");
   process.exit(2);
 }

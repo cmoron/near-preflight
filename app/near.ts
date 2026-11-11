@@ -80,7 +80,9 @@ export type Check = {
   judged_ns: string;
   /** sha256 (hex) of the evidence string posted with the verdict; empty without a verdict. */
   evidence_sha256: string;
-  /** Tokens received by the simulated buy of 0.01 ETH (decimal); the guard derives the swap's minimum from it. */
+  /** The buy the agent stated at request_check, in wei (decimal; "0" for an exit quote). */
+  amount_wei: string;
+  /** Tokens the guard's address received in the simulated buy of amount_wei (decimal); the swap's minimum is it minus 3 %. */
   quote: string;
   settled: boolean;
   /** True once the owner approved this warn verdict (approve_warn). */
@@ -91,8 +93,8 @@ export type Check = {
   code: { code_hash: string; implementation: string | null } | null;
   /** An exit quote (request_exit): tokens to sell; its quote is then the ETH out, in wei. */
   exit_amount: string | null;
-  /** Gas limit the sentinel simulated with; a buy or an exit on this verdict needs the guard's to match. */
-  gas_limit: number;
+  /** Signing hashes (no 0x) of the transactions the sentinel simulated: the guard signs only these for the check. */
+  tx_hashes: string[];
 };
 /** A shared blocklist entry (get_entry). */
 export type Entry = { reporter: string; at_ns: string; evidence_sha256: string; note: string };

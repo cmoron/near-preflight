@@ -14,11 +14,12 @@ const log = (s: string) => console.log(`  [wrapper] ${s}`);
 const VERDICT_TTL_MS = 120_000; // an allow verdict expires 120 s after it is posted (same rule as the contract)
 const TIMEOUT_MS = 300_000; // contract delay before refunding a request without a verdict
 
-/** Asks the guard for a verdict on `target`. `decision`: sha256 of the model's decision package
+/** Asks the guard for a verdict on buying `wei` of `target`: the sentinel simulates that very buy,
+ *  and the guard signs no other amount on it. `decision`: sha256 of the model's decision package
  *  (app/llm.ts) that asked for it, stored with the check. */
-export async function requestCheck(target: string, decision?: string): Promise<number> {
-  const { value: id, tx } = await call<number>(agent, "request_check", { target, decision_sha256: decision });
-  log(`request #${id} : verdict on ${target}, 0.015 NEAR taken from credit${decision ? `, decision ${decision.slice(0, 12)}...` : ""}  ${tx}`);
+export async function requestCheck(target: string, wei: bigint, decision?: string): Promise<number> {
+  const { value: id, tx } = await call<number>(agent, "request_check", { target, amount_wei: wei.toString(), decision_sha256: decision });
+  log(`request #${id} : verdict on a buy of ${formatEther(wei)} ETH of ${target}, 0.017 NEAR taken from credit${decision ? `, decision ${decision.slice(0, 12)}...` : ""}  ${tx}`);
   return id;
 }
 
@@ -59,7 +60,7 @@ export async function guardedBuy(
   wei: bigint,
   opts: { approvalWaitMs?: number; onWarn?: (id: number) => void } = {},
 ): Promise<{ id: number; signed: string | null }> {
-  const id = await requestCheck(target);
+  const id = await requestCheck(target, wei);
   const check = await waitVerdict(id);
   if (!check) {
     await Bun.sleep(5_000); // the contract measures the delay at block time
@@ -125,7 +126,7 @@ export async function sellAll(buyId: number): Promise<{ nonce: number; signed: H
   ]);
   const amount = balance < BigInt(held) ? balance : BigInt(held);
   const { value: id, tx: asked } = await call<number>(agent, "request_exit", { buy_id: buyId, amount: amount.toString() });
-  log(`request #${id} : exit quote for ${amount} ${token} (bought by #${buyId}), 0.015 NEAR taken from credit  ${asked}`);
+  log(`request #${id} : exit quote for ${amount} ${token} (bought by #${buyId}), 0.017 NEAR taken from credit  ${asked}`);
   const quote = await waitVerdict(id);
   if (quote?.verdict !== "allow") {
     log(`#${id} : no exit quote (${quote?.reasons ?? "no verdict"}): no sale by the agent; the owner's own exit stays open`);

@@ -48,8 +48,9 @@ export type Reputation = {
   template: Hex;
   from: number;
   to: number;
-  /** Only pools funded before this block count (beforeBlock). */
-  before_block: number;
+  /** Only pools funded before this block count (beforeBlock); null: the rule does not apply to this
+   *  target (its own pool was not funded within the window), nothing counted. */
+  before_block: number | null;
   index_sha256: Hex;
   pools: number;
   drained: number;
@@ -138,28 +139,40 @@ export async function buildIndex(url: string, from: number, to: number, pace: ()
 
 export const indexSha256 = (i: Index): Hex => sha256(stringToHex(JSON.stringify(i)));
 
-/** The block before which an index pool is earlier than the target's own pool (`ownPair`, its V2
- *  WETH pair): the block where that pool was funded, when the index saw it funded. Otherwise (no own
- *  pair, own pair not in the index or never funded within it) every pool of the index counts
- *  (`to + 1`). Copies funded and drained after the target cannot poison it. Pure: no chain read. */
-export function beforeBlock(index: Index, ownPair: Address | null): number {
-  const own = ownPair && Object.values(index.templates).flat().find((p) => p.pair === ownPair.toLowerCase());
-  return own && own.funded !== null ? own.funded : index.to + 1;
+/** Template reputation judges a target only against pools funded before its own (`ownPair`, its V2
+ *  WETH pair), so copies funded and drained after it cannot poison it. That order is known in two
+ *  cases: its pool was funded within the index window (the pools funded before that block count), or
+ *  it was created after the window (`ownAfter`, no code at `to`: every pool of the index is earlier,
+ *  `to + 1`). Otherwise (its pool predates the window, was never funded to MIN_POOL_WETH within it, or
+ *  there is none) the rule does not apply: null. Pure. */
+export function beforeBlock(index: Index, ownPair: Address | null, ownAfter: boolean): number | null {
+  if (!ownPair) return null;
+  const own = Object.values(index.templates).flat().find((p) => p.pair === ownPair.toLowerCase());
+  if (own) return own.funded;
+  return ownAfter ? index.to + 1 : null;
 }
 
-/** The template's pools funded before `before` (beforeBlock); a drain counts within SHORT_BLOCKS of
- *  the funding. */
-export function reputationOf(index: Index, template: Hex, before: number): Reputation {
-  const earlier = (index.templates[template] ?? []).filter((p) => p.funded !== null && p.funded < before);
+/** True when `ownPair` is not in the index because it was created after the window: no code at `to`. */
+export async function ownAfterIndex(url: string, index: Index, ownPair: Address | null): Promise<boolean> {
+  if (!ownPair || Object.values(index.templates).flat().some((p) => p.pair === ownPair.toLowerCase())) return false;
+  return (await rpc<Hex>(url, "eth_getCode", [ownPair, toHex(index.to)])) === "0x";
+}
+
+/** The template's pools funded before `before` (beforeBlock; none when null); a drain counts within
+ *  SHORT_BLOCKS of the funding. */
+export function reputationOf(index: Index, template: Hex, before: number | null): Reputation {
+  const earlier = before === null ? [] : (index.templates[template] ?? []).filter((p) => p.funded !== null && p.funded < before);
   const delays = earlier.flatMap((p) => (p.drained !== null && p.drained - p.funded! <= SHORT_BLOCKS ? [p.drained - p.funded!] : [])).sort((a, b) => a - b);
   const mid = delays.length >> 1;
   const median = delays.length ? (delays.length % 2 ? delays[mid] : (delays[mid - 1] + delays[mid]) / 2) : null;
   return { template, from: index.from, to: index.to, before_block: before, index_sha256: indexSha256(index), pools: earlier.length, drained: delays.length, median_drain_blocks: median };
 }
 
-/** The farm rule. No index: the reputation is unknown, which is never a pass. */
+/** The farm rule. No index: the reputation is unknown, which is never a pass. Not applicable: a note
+ *  (level allow, which changes no verdict), so the reasons say the token was not judged on it. */
 export function reputationFindings(r: Reputation | null): Finding[] {
   if (!r) return [{ level: "warn", text: "template reputation not checked: no index for this chain" }];
+  if (r.before_block === null) return [{ level: "allow", text: `template reputation not applied: the token's own pool was not funded within the index window (blocks ${r.from}..${r.to})` }];
   if (r.pools < MIN_POOLS || r.drained / r.pools < FARM_SHARE) return [];
   return [{ level: "block", text: `template ${short(r.template)}: ${r.drained} of ${r.pools} earlier pools drained, median ${r.median_drain_blocks} blocks after funding` }];
 }

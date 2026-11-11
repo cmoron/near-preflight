@@ -1,9 +1,10 @@
 // Replay of a proof against the local copy of Base (run evm/fork.sh first).
 import { describe, expect, test } from "bun:test";
-import { sha256, stringToHex, type Address, type Hex } from "viem";
+import { encodeFunctionData, maxUint256, parseAbi, sha256, stringToHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
 import { buildIndex } from "./index";
 import { replay, summary, type OnChain, type Proof } from "./replay";
+import { localPreviews } from "./testkit";
 import { checkExit, checkToken, deriveProbes, rpc, ROUTER, specialOf, toProof, WETH, type NearFacts, type Probe } from "./verifier";
 
 const RPC = process.env.EVM_RPC ?? "http://127.0.0.1:8545";
@@ -19,8 +20,10 @@ const GUARD_INFO = { account: "guard.test", evm: GUARD_EVM };
 /** The template index the sentinel would load: every pool of the fork setup. */
 const INDEX = await buildIndex(RPC, tokens.fork_block + 1, Number(BigInt(await rpc<Hex>(RPC, "eth_blockNumber", []))));
 const NO_NEAR: NearFacts = { listed: [], previous: null };
-/** The guard's gas limit at setup (app/setup.ts): the sentinel simulates every call with it. */
-const GAS = 250_000n;
+/** The amount the agent states at request_check in the demo: 0.00001 ETH. */
+const AMOUNT = 10_000_000_000_000n;
+/** Time of the fork's latest block: a check requested now (its swap deadline is 300 s later). */
+const headTime = async () => BigInt((await rpc<{ timestamp: Hex }>(RPC, "eth_getBlockByNumber", ["latest", false])).timestamp);
 const proofOf = async (token: Address = TRAP, probe?: Partial<Probe>, guard: Address = GUARD_EVM, requested_ns = "0", near = NO_NEAR): Promise<Proof> =>
   toProof(
     1,
@@ -28,9 +31,12 @@ const proofOf = async (token: Address = TRAP, probe?: Partial<Probe>, guard: Add
     await checkToken(RPC, token, guard, (head) => ({ ...deriveProbes({ guard: GUARD_INFO.account, id: 1, requested_ns }, head.hash), ...probe }), {
       index: INDEX,
       near: async () => near,
-      gas: GAS,
+      amount: AMOUNT,
+      preview: localPreviews({ guard, target: token, amount: AMOUNT, requestedS: await headTime() }),
     }),
   );
+/** The request's calls of block `i`, editable. */
+const callsIn = (p: Proof, i: number) => (p.request as any).params[0].blockStateCalls[i].calls as Record<string, string>[];
 const failed = (lines: { ok: boolean; line: string }[]) => lines.filter((l) => !l.ok).map((l) => l.line);
 const evidenceOf = (p: Proof) => JSON.parse(p.evidence);
 /** Modifies the content of the evidence string (as a forger would) and reserializes it. */
@@ -55,7 +61,9 @@ const onChain = (p: Proof, over: Partial<NonNullable<OnChain>> = {}) => async ()
   judged_ns: "0",
   code: "code_hash" in evidenceOf(p) ? { code_hash: evidenceOf(p).code_hash, implementation: evidenceOf(p).implementation } : null,
   exit_amount: evidenceOf(p).amount ?? null,
-  gas_limit: evidenceOf(p).gas_limit,
+  amount_wei: evidenceOf(p).amount_wei ?? "0",
+  tx_hashes: evidenceOf(p).tx_hashes.map((h: string) => h.slice(2)),
+  signed_tx: null,
   ...over,
 });
 
@@ -135,9 +143,21 @@ describe("replay: the evidence string is the one posted on chain", () => {
     const proof = withEvidence(await proofOf(), (e) => (e.note = "audited"));
     expect(failed(await replay(proof, RPC)).some((l) => l.includes("evidence"))).toBe(true);
   });
-  test("evidence.gas_limit other than the gas the request was simulated with is detected", async () => {
-    const forged = withEvidence(await proofOf(), (e) => (e.gas_limit = 1_000_000));
-    expect(failed(await replay(forged, RPC)).some((l) => l.includes("request is not the one checkToken builds"))).toBe(true);
+  test("evidence.tx_hashes other than the hash of the guard's buy simulated is detected", async () => {
+    const forged = withEvidence(await proofOf(), (e) => (e.tx_hashes = [`0x${"00".repeat(32)}`]));
+    expect(failed(await replay(forged, RPC))).toEqual([expect.stringContaining("the guard's buy simulated hashes to")]);
+  });
+  test("a guard buy simulated at another nonce than evidence.tx_hashes says is detected", async () => {
+    const proof = structuredClone(await proofOf());
+    const buy = callsIn(proof, 0).find((c) => c.value && c.from.toLowerCase() === GUARD_EVM.toLowerCase())!;
+    buy.nonce = "0x7";
+    expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("the guard's buy simulated hashes to"))).toBe(true);
+  });
+  test("a guard sale simulated with an approve of 2^256 - 1 instead of the exact amount is refused (request shape)", async () => {
+    const proof = structuredClone(await proofOf(tokens.safe as Address));
+    const approve = callsIn(proof, 1).find((c) => c.from.toLowerCase() === GUARD_EVM.toLowerCase() && c.data.startsWith("0x095ea7b3"))!;
+    approve.data = encodeFunctionData({ abi: parseAbi(["function approve(address,uint256) returns (bool)"]), args: [ROUTER, maxUint256] });
+    expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("request shape: sale 1: not approve(router"))).toBe(true);
   });
   test("a tampered code_hash in evidence is detected", async () => {
     const proof = withEvidence(await proofOf(), (e) => (e.code_hash = `0x${"00".repeat(32)}`));
@@ -148,8 +168,9 @@ describe("replay: the evidence string is the one posted on chain", () => {
   test("a tampered chain (chain_id) in evidence is detected", async () => {
     const proof = withEvidence(await proofOf(), (e) => (e.chain_id = 1));
     const bad = failed(await replay(proof, RPC));
-    expect(bad.length).toBe(1);
     expect(bad[0]).toContain("chain id");
+    expect(bad[1]).toContain("the guard's buy simulated hashes to"); // the chain id is in the signed transaction
+    expect(bad.length).toBe(2);
   });
   test("a tampered quote in evidence is detected (replayed from the response)", async () => {
     const proof = withEvidence(await proofOf(), (e) => (e.quote = "1"));
@@ -235,11 +256,22 @@ describe("replay --check: on-chain verdict", () => {
     expect(bad.length).toBe(1);
     expect(bad[0]).toContain("on-chain");
   });
-  test("a gas limit on chain other than the one simulated with: refused (the guard would sign with another)", async () => {
+  test("on-chain tx hashes other than the simulated transaction's: refused (the guard would sign another)", async () => {
     const proof = await proofOf();
-    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { gas_limit: 600_000 }) }));
-    expect(bad.length).toBe(1);
-    expect(bad[0]).toContain("gas limit");
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { tx_hashes: ["11".repeat(32)] }) }));
+    expect(bad).toEqual([expect.stringContaining("on-chain tx hashes of #1")]);
+  });
+  test("on-chain amount other than the one simulated: refused", async () => {
+    const proof = await proofOf();
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { amount_wei: "1" }) }));
+    expect(bad).toEqual([expect.stringContaining("on-chain amount 1 wei")]);
+  });
+  test("a buy NEAR signed that is not the simulated transaction: refused", async () => {
+    const proof = await proofOf(tokens.usdc as Address);
+    const signed = (await import("viem/accounts")).privateKeyToAccount(`0x${"01".padStart(64, "0")}`);
+    const other = await signed.signTransaction({ type: "eip1559", chainId: 8453, nonce: 9, to: ROUTER, value: 1n, gas: 21_000n, maxFeePerGas: 1n, maxPriorityFeePerGas: 1n });
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { signed_tx: Buffer.from(other.slice(2), "hex").toString("base64") }) }));
+    expect(bad).toEqual([expect.stringContaining("the buy NEAR signed for #1 hashes to")]);
   });
   test("on-chain quote different from the proof's: refused", async () => {
     const proof = await proofOf();
@@ -282,7 +314,8 @@ describe("replay --check: NEAR facts the verdict rests on", () => {
 
 describe("replay of an exit quote", () => {
   const HOLDER = "0x60B1100000000000000000000000000000000001" as Address; // holds the demo tokens
-  const exitProof = async () => toProof(2, tokens.lp_burned, await checkExit(RPC, tokens.lp_burned as Address, HOLDER, 10n ** 21n, GAS));
+  const exitProof = async () =>
+    toProof(2, tokens.lp_burned, await checkExit(RPC, tokens.lp_burned as Address, HOLDER, 10n ** 21n, localPreviews({ guard: HOLDER, target: tokens.lp_burned as Address, amount: 0n, requestedS: await headTime(), exitAmount: 10n ** 21n }).check));
   test("an intact exit quote replays: same request, same quote", async () => {
     const proof = await exitProof();
     expect(proof.verdict).toBe("allow");
@@ -294,9 +327,9 @@ describe("replay of an exit quote", () => {
     const proof = withEvidence(await exitProof(), (e) => (e.quote = "1"));
     expect(failed(await replay(proof, RPC)).some((l) => l.includes("quote"))).toBe(true);
   });
-  test("an exit quote simulated with another gas limit than its evidence says is detected", async () => {
-    const forged = withEvidence(await exitProof(), (e) => (e.gas_limit = 1_000_000));
-    expect(failed(await replay(forged, RPC)).some((l) => l.includes("request is not the exit sale"))).toBe(true);
+  test("an exit simulated with other transactions than its evidence.tx_hashes is detected", async () => {
+    const forged = withEvidence(await exitProof(), (e) => (e.tx_hashes = [e.tx_hashes[1], e.tx_hashes[0]]));
+    expect(failed(await replay(forged, RPC))).toEqual([expect.stringContaining("the approve and swap simulated hash to")]);
   });
   test("--check: the seller must be the guard's derived address", async () => {
     const proof = await exitProof();

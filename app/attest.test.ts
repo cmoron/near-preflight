@@ -3,8 +3,8 @@
 // recorded next to it, so the TDX and GPU checks here run offline and deterministically (the CLI
 // fetches them live).
 import { describe, expect, test } from "bun:test";
-import { attest, onChain, summary, type Deps, type Line } from "./attest";
-import { digest, type Package } from "./llm";
+import { attest, bound, onChain, summary, type Deps, type Line } from "./attest";
+import { BINDING, bindingLine, digest, SYSTEM, type Package } from "./llm";
 import type { Check } from "./near";
 
 const RAW = await Bun.file(`${import.meta.dir}/fixtures/decision.json`).text();
@@ -96,5 +96,40 @@ describe("the package against the check on NEAR (--check)", () => {
     expect(failed(onChain(pkg(), sha, 7, null)).length).toBeGreaterThan(0);
     const field = call.function.name === "buy" ? "buy_decision_sha256" : "decision_sha256";
     expect(failed(onChain(pkg(), sha, 99_999, check({ [field]: sha, target: "0x000000000000000000000000000000000000dEaD" }))).length).toBeGreaterThan(0);
+  });
+});
+
+// The review re-anchored the recorded package on a guard that never called the model: attest --check
+// said OK. The signed request now names the guard, the agent and a fresh NEAR block, checked here.
+describe("the package is bound to its guard, agent and time (--check)", () => {
+  const HASH = "6Vq4fjGcvbQhjbTgWBPcYnkkn1tgEkkp6zkxSvqffmL5";
+  const REQUESTED = 1_794_400_000_000_000_000n; // ns
+  const withContext = (line: string): Package => ({
+    ...pkg(),
+    request: JSON.stringify({ model: "m", stream: false, messages: [{ role: "system", content: `${SYSTEM}\n${line}` }, { role: "user", content: "x" }] }),
+  });
+  const bound1 = withContext(bindingLine("guard.a.testnet", "agent.a.testnet", { hash: HASH, height: 42 }));
+  const check = (over: Partial<Check> = {}) => ({ agent: "agent.a.testnet", requested_ns: REQUESTED.toString(), ...over }) as Check;
+  const at = (secondsBefore: bigint, height = 42) => async () => ({ timestamp_ns: REQUESTED - secondsBefore * 1_000_000_000n, height });
+  test("guard checked, the check's agent, and a block 30 s before the request: OK", async () => {
+    expect(failed(await bound(bound1, 7, check(), "guard.a.testnet", at(30n)))).toEqual([]);
+  });
+  test("the same package anchored on another guard: MISMATCH", async () => {
+    expect(failed(await bound(bound1, 7, check(), "guard.b.testnet", at(30n))).join()).toContain("guard.a.testnet");
+  });
+  test("a check of another agent: MISMATCH", async () => {
+    expect(failed(await bound(bound1, 7, check({ agent: "agent.b.testnet" }), "guard.a.testnet", at(30n))).length).toBe(1);
+  });
+  test("a check requested more than 600 s after the block, or before it, or another height: MISMATCH", async () => {
+    expect(failed(await bound(bound1, 7, check(), "guard.a.testnet", at(601n))).length).toBe(1);
+    expect(failed(await bound(bound1, 7, check(), "guard.a.testnet", at(-1n))).length).toBe(1);
+    expect(failed(await bound(bound1, 7, check(), "guard.a.testnet", at(30n, 43))).length).toBe(1);
+  });
+  test("a request that names no guard, agent and block: MISMATCH", async () => {
+    expect(failed(await bound(withContext("no context"), 7, check(), "guard.a.testnet", at(30n)))).toEqual([expect.stringContaining("names no guard")]);
+  });
+  test("the recorded package names a guard, an agent and a NEAR block in its signed request", () => {
+    const system = JSON.parse(pkg().request).messages[0].content as string;
+    expect(system).toMatch(BINDING);
   });
 });

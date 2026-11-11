@@ -3,14 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Goblin guard, live on NEAR testnet</title>
+<title>near-preflight, live on NEAR testnet</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
-  <h1>goblin-near</h1>
+  <h1>near-preflight</h1>
   <p>A pre-buy guard for AI agents: an agent can buy a token on Base only through a NEAR contract, after a sentinel checked it, and the purchase is signed by NEAR. This page reads the guard <code id="guard">…</code> on NEAR testnet.</p>
+  <p class="note">The tokens checked here live on a local fork of Base (anvil), not on Base itself: the demo's traps and its buys run there, and the guard's signed transactions are broadcast only to that fork. The verdicts, checks and blocklist shown are real, on NEAR testnet.</p>
   <p class="status" role="status" aria-live="polite"><span id="updated">Loading…</span> <span id="error" class="err" hidden></span></p>
 </header>
 <main>
