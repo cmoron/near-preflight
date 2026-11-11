@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Goblin guard, live on NEAR testnet</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>goblin-near</h1>
+  <p>A pre-buy guard for AI agents: an agent can buy a token on Base only through a NEAR contract, after a sentinel checked it, and the purchase is signed by NEAR. This page reads the guard <code id="guard">…</code> on NEAR testnet.</p>
+  <p class="status" role="status" aria-live="polite"><span id="updated">Loading…</span> <span id="error" class="err" hidden></span></p>
+</header>
+<main>
+  <section aria-labelledby="h-bounds">
+    <h2 id="h-bounds">Human bounds and roles</h2>
+    <dl id="bounds"><dt>Loading</dt><dd>…</dd></dl>
+  </section>
+  <section aria-labelledby="h-checks">
+    <h2 id="h-checks">Checks <small id="count"></small></h2>
+    <table id="checks">
+      <thead><tr><th>Id</th><th>Kind</th><th>Verdict</th><th>Target token</th><th>Agent</th><th>Reasons</th><th>Human OK</th><th>Signed</th><th>Evidence sha256</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+  <section aria-labelledby="h-block">
+    <h2 id="h-block">Shared blocklist</h2>
+    <p class="note">A map cannot be enumerated from a browser: one <code>get_entry</code> lookup per blocked target above.</p>
+    <table id="blocklist">
+      <thead><tr><th>Target</th><th>Check</th><th>Listed</th><th>Reporter</th><th>Listed at</th><th>Evidence sha256</th><th>Note</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+<footer>
+  Read-only. Data straight from the NEAR testnet RPC, no backend, no wallet, no key. RPC in use: <span id="rpc">-</span>.
+  <a href="https://github.com/REPOSITORY">Repository</a> · <a href="../README.md">README (steps to reproduce)</a>
+</footer>
+<script src="app.js"></script>
+</body>
+</html>
