@@ -1,5 +1,6 @@
 /target/
 /res/
 .env
+.env.*
 *.json.key
 node_modules/

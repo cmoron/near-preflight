@@ -65,23 +65,21 @@ await human.callFunction({
 });
 console.log(`${id("shop")} permis ; 1 NEAR de credit depose pour ${id("agent")}`);
 
-await Bun.write(
-  ".env",
-  [
-    `NEAR_RPC=${RPC}`,
-    `OWNER=${parent}`,
-    `GUARD=${id("guard")}`,
-    `AGENT=${id("agent")}`,
-    `AGENT_KEY=${agentKey}`,
-    `SENTINEL=${id("sentinel")}`,
-    `SENTINEL_KEY=${sentinelKey}`,
-    `SHOP=${id("shop")}`,
-    `EVM_RPC=http://127.0.0.1:8545`,
-    "",
-  ].join("\n"),
-  { mode: 0o600 },
-);
-console.log(".env ecrit (cles function-call seulement) ; credit de l'agent :", await provider.callFunction({
+// Config partagee sans cle ; chaque cle function-call dans son fichier, charge par son seul processus
+// (bun --env-file=.env --env-file=.env.agent ...) : l'agent ne lit jamais la cle de la sentinelle.
+const write = (file: string, lines: string[]) => Bun.write(file, [...lines, ""].join("\n"), { mode: 0o600 });
+await write(".env", [
+  `NEAR_RPC=${RPC}`,
+  `OWNER=${parent}`,
+  `GUARD=${id("guard")}`,
+  `AGENT=${id("agent")}`,
+  `SENTINEL=${id("sentinel")}`,
+  `SHOP=${id("shop")}`,
+  `EVM_RPC=http://127.0.0.1:8545`,
+]);
+await write(".env.agent", [`AGENT_KEY=${agentKey}`]);
+await write(".env.sentinel", [`SENTINEL_KEY=${sentinelKey}`]);
+console.log(".env, .env.agent, .env.sentinel ecrits ; credit de l'agent :", await provider.callFunction({
   contractId: id("guard"),
   method: "credit_of",
   args: { account: id("agent") },
