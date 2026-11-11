@@ -4,3 +4,4 @@
 .env.*
 *.json.key
 node_modules/
+proofs/
