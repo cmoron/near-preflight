@@ -25,4 +25,9 @@ describe("verdict de la sentinelle", () => {
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("taxe");
   });
+  test("taxe de 90 % seulement sur la vente tardive : block", async () => {
+    const r = await checkToken(RPC, tokens.sell_tax_later as `0x${string}`);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toContain("+1 h");
+  });
 });

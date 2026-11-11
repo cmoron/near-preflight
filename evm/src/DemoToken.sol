@@ -9,7 +9,8 @@ contract DemoToken {
         OwnerReclaim, // le proprietaire reprend les jetons de n'importe qui par transferFrom
         SellBlocked, // toute vente vers la paire revert
         SellBlockedLater, // la vente passe juste apres l'achat, plus apres 10 minutes
-        SellTax // 90 % de chaque vente part au proprietaire
+        SellTax, // 90 % de chaque vente part au proprietaire
+        SellTaxLater // vente sans taxe juste apres l'achat, taxee a 90 % apres 10 minutes
     }
 
     string public name;
@@ -71,6 +72,9 @@ contract DemoToken {
                 revert("vente fermee apres 10 minutes");
             }
             if (trap == Trap.SellTax) fee = (value * 90) / 100;
+            if (trap == Trap.SellTaxLater && block.timestamp > boughtAt[from] + 10 minutes) {
+                fee = (value * 90) / 100;
+            }
         }
         if (from == pair) boughtAt[to] = block.timestamp;
         balanceOf[from] -= value;
