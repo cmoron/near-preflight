@@ -1,27 +1,27 @@
-// Role de la sentinelle : lit les demandes de verdict de la garde, simule l'achat sur la chaine EVM,
-// poste verdict, raisons et resume de preuve avec sa cle function-call (post_verdict only).
+// Sentinel role: reads the guard's verdict requests, simulates the buy on the EVM chain,
+// posts verdict, reasons and proof digest with its function-call key (post_verdict only).
 // It also reads the guard's shared blocklist and the code seen at the target's last verdict, consults
 // the template index in INDEX (app/index.ts), and quotes agents' exits (request_exit) by simulating the
 // sale from the guard's EVM address. Every call is simulated with the guard's own gas limit
 // (evm_config, read per check), which it posts with the verdict.
-// La preuve complete (requete eth_simulateV1, reponse et chaine evidence postee, octet pour octet)
-// va dans proofs/<id>.json ; le contrat stocke le sha256 de cette chaine avec le verdict.
+// The full proof (eth_simulateV1 request, response and posted evidence string, byte for byte)
+// goes to proofs/<id>.json; the contract stores the sha256 of that string with the verdict.
 import type { Address, Hex } from "viem";
 import type { Index } from "./index";
 import type { Check, Entry } from "./near";
 import type { NearFacts } from "./verifier";
 
-/** Que faire de la demande lue a la hauteur de bloc `readAt`, son id etant <= last_check_id lu a la
- *  hauteur `lastAt`. Absente a une hauteur >= lastAt : elle existait a lastAt et n'existe plus, donc
- *  effacee par refund_check (les ids ne reviennent jamais), on la saute. Absente a une hauteur
- *  inferieure : le noeud lu est en retard, on la relit au tour suivant sans avancer. */
+/** What to do with the request read at block height `readAt`, its id being <= last_check_id read at
+ *  height `lastAt`. Absent at a height >= lastAt: it existed at lastAt and no longer does, so it was
+ *  erased by refund_check (ids never come back), skip it. Absent at a lower
+ *  height: the node read is behind, reread it on the next round without advancing. */
 export function step(check: Check | null, readAt: number, lastAt: number): "judge" | "skip" | "retry" {
   if (check) return check.verdict ? "skip" : "judge";
   return readAt >= lastAt ? "skip" : "retry";
 }
 
 if (import.meta.main) {
-  // near.ts pose un fetch global et lit NEAR_RPC a l'import : charge ici seulement, pas par les tests.
+  // near.ts installs a global fetch and reads NEAR_RPC at import: loaded here only, not by the tests.
   const { account, call, env, view, viewAt } = await import("./near");
   const { checkExit, checkToken, deriveProbes, toProof } = await import("./verifier");
   const { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH } = await import("./derive");
@@ -48,7 +48,7 @@ if (import.meta.main) {
     return { listed, previous: last ? { id: last.id, ...last.code } : null };
   };
 
-  // ponytail: relit toutes les demandes depuis 1 au demarrage ; partir d'un curseur sauvegarde si elles se comptent par milliers.
+  // ponytail: rereads every request from 1 at startup; start from a saved cursor if they number in the thousands.
   let next = 1;
   const failures = new Map<number, number>();
   const MAX_TRIES = 3;
@@ -103,10 +103,10 @@ if (import.meta.main) {
             log(`#${next} : failure ${tries}/${MAX_TRIES}, will retry (${msg})`);
             break;
           }
-          // Echec ferme : un jeton qui fait echouer la simulation ne bloque pas les demandes suivantes,
-          // et ne s'achete pas.
-          // Si ce post echoue aussi (RPC NEAR, verdict deja arrive), le tour suivant relit la demande :
-          // un verdict deja en chaine est saute, sinon on reposte.
+          // Fail closed: a token that makes the simulation fail does not block the following requests,
+          // and is not bought.
+          // If this post fails too (NEAR RPC, verdict already arrived), the next round rereads the request:
+          // a verdict already on chain is skipped, otherwise it is reposted.
           try {
             const { tx } = await call(sentinel, "post_verdict", {
               id: next,
@@ -134,7 +134,7 @@ if (import.meta.main) {
     try {
       await scan();
     } catch (e) {
-      // RPC NEAR indisponible ou trop lent : rien n'est perdu, le tour suivant relit depuis `next`.
+      // NEAR RPC unavailable or too slow: nothing is lost, the next round rereads from `next`.
       log(`reading the guard failed, will retry (${e instanceof Error ? e.message.split("\n")[0] : e})`);
     }
     await Bun.sleep(1500);

@@ -1,6 +1,6 @@
-// Role de l'humain (proprietaire) : arret d'urgence et levee du gel. Signe avec sa cle complete,
-// rangee dans le trousseau near-cli (~/.near-credentials), jamais dans .env.
-// stop : desarme l'agent et le gele, l'armeur ne peut plus le rearmer ; unfreeze : leve le gel.
+// Human (owner) role: emergency stop and freeze lift. Signs with its full key,
+// kept in the near-cli keychain (~/.near-credentials), never in .env.
+// stop: disarms the agent and freezes it, the armer can no longer re-arm it; unfreeze: lifts the freeze.
 // approve <id>: approves a warn verdict so the agent may buy on it (within its 120 s).
 // reset: clears the agent's 7-day arming log (after replacing a compromised armer).
 // withdraw <wei>: ETH from the guard's EVM address to the owner's address fixed at init.
@@ -9,7 +9,7 @@
 // gas <limit>: sets the gas limit of every transaction the guard signs (21,000 to 2,000,000, fees
 // unchanged): a sale that needs more gas than the limit can be retried with `sell` after raising it.
 // The relay broadcasts withdrawals and sales: bun --env-file=.env app/relay.ts exit <nonce>.
-// Usage : bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] | unlist <token> | gas <limit>
+// Usage: bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] | unlist <token> | gas <limit>
 import { parseTransaction, type Hex } from "viem";
 import { call, env, humanAccount, view } from "./near";
 

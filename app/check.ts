@@ -1,6 +1,6 @@
-// Role de l'agent : demande un controle de verdict sur un jeton et attend la reponse de la sentinelle.
-// Usage : bun --env-file=.env --env-file=.env.agent app/check.ts <jeton 0x...>
-// Affiche l'id, le verdict, les raisons et le chemin de la preuve ; code 1 si pas de verdict.
+// Agent role: requests a verdict check on a token and waits for the sentinel's answer.
+// Usage: bun --env-file=.env --env-file=.env.agent app/check.ts <token 0x...>
+// Prints the id, verdict, reasons and proof path; code 1 if no verdict.
 import { requestCheck, waitVerdict } from "./agent";
 import { env, reason } from "./near";
 

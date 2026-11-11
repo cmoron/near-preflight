@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-/// Jeton ERC-20 de demonstration avec un piege au choix. Deploye seulement sur une copie
-/// locale de Base (anvil) : il montre ce que la sentinelle detecte, il ne s'echange nulle part.
+/// Demo ERC-20 token with a trap of your choice. Deployed only on a local copy
+/// of Base (anvil): it shows what the sentinel detects, it trades nowhere.
 contract DemoToken {
     enum Trap {
-        None, // temoin sain
-        OwnerReclaim, // le proprietaire reprend les jetons de n'importe qui par transferFrom
-        SellBlocked, // toute vente vers la paire revert
-        SellBlockedLater, // la vente passe juste apres l'achat, plus apres 10 minutes
-        SellTax, // 90 % de chaque vente part au proprietaire
-        SellTaxLater, // vente sans taxe juste apres l'achat, taxee a 90 % apres 10 minutes
-        HoldOneBlock, // honnete : pas de vente dans le bloc de l'achat (anti-sandwich), libre ensuite
-        SimDetector, // la vente ne passe qu'en simulation : prix du gaz ou base fee nuls
+        None, // healthy witness
+        OwnerReclaim, // the owner takes anyone's tokens back through transferFrom
+        SellBlocked, // every sale to the pair reverts
+        SellBlockedLater, // the sale works right after the buy, no longer after 10 minutes
+        SellTax, // 90 % of each sale goes to the owner
+        SellTaxLater, // untaxed sale right after the buy, taxed at 90 % after 10 minutes
+        HoldOneBlock, // honest: no sale in the buy's block (anti-sandwich), free afterwards
+        SimDetector, // the sale works only in simulation: zero gas price or base fee
         FrozenAddress, // tokens held by `special` can never leave it (e.g. the guard's public EVM address)
         SellTax20, // 20 % of each sale goes to the owner: a warn, not a block
         GasHungry // a sale reverts unless the transaction has 500,000 gas left (the guard signs 250,000)
@@ -77,9 +77,9 @@ contract DemoToken {
         if (trap == Trap.FrozenAddress && from == special) revert("address frozen");
         uint256 fee;
         if (to == pair && from != owner) {
-            if (trap == Trap.SellBlocked) revert("vente fermee");
+            if (trap == Trap.SellBlocked) revert("sale closed");
             if (trap == Trap.SellBlockedLater && block.timestamp > boughtAt[from] + 10 minutes) {
-                revert("vente fermee apres 10 minutes");
+                revert("sale closed after 10 minutes");
             }
             if (trap == Trap.HoldOneBlock && block.number <= boughtBlock[from]) revert("hold one block");
             if (trap == Trap.SimDetector && tx.gasprice != 0 && block.basefee != 0) revert("real sale refused");

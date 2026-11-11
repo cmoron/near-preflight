@@ -9,7 +9,7 @@
 // the guard's own EVM address, a second agent, and with the key the injection count and the model's
 // own USDC buy. demo.sh adds the armer's bounds, the emergency stop and the withdrawal.
 // The commands that verify this run (replay, attest) are written to proofs/verify.txt.
-// Usage : bun --env-file=.env --env-file=.env.agent [--env-file=.env.llm] app/demo.ts [--full]
+// Usage: bun --env-file=.env --env-file=.env.agent [--env-file=.env.llm] app/demo.ts [--full]
 import { formatNearAmount, nearToYocto } from "near-api-js";
 import { decodeFunctionData, formatEther, getAddress, parseAbi, parseEther, parseTransaction, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
@@ -28,7 +28,7 @@ const USDC = tokens.usdc as Address;
 const FRESH = tokens.farm_fresh as Address;
 const ATTACKER = `attacker.${env("OWNER")}`;
 const ATTACKER_EVM = "0x000000000000000000000000000000000000dEaD";
-const WEI = 10_000_000_000_000n; // 0,00001 ETH par achat
+const WEI = 10_000_000_000_000n; // 0.00001 ETH per buy
 const swap = parseAbi([
   "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256) payable",
 ]);
@@ -39,7 +39,7 @@ const spawnEnv = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
 const verify: string[] = [];
 const replayCmd = (id: number, what: string) => verify.push(`bun --env-file=.env app/replay.ts proofs/${id}.json --check   # ${what}`);
 
-/** Une tentative qui doit echouer pour la raison `want` ; sinon la demo echoue (code de sortie 1). */
+/** An attempt that must fail for the reason `want`; otherwise the demo fails (exit code 1). */
 async function mustFail(what: string, want: string, attempt: () => Promise<unknown>, by = "contract") {
   try {
     await attempt();
@@ -54,7 +54,7 @@ async function mustFail(what: string, want: string, attempt: () => Promise<unkno
   }
 }
 
-/** Relais dans son propre processus, sans la cle de l'agent : il ne lit que .env (aucune cle). */
+/** Relay in its own process, without the agent's key: it reads only .env (no key). */
 async function relay(...args: (string | number)[]): Promise<boolean> {
   const p = Bun.spawn(["bun", "--env-file=.env", "app/relay.ts", ...args.map(String)], { env: spawnEnv, stdout: "inherit", stderr: "inherit" });
   return (await p.exited) === 0;
@@ -168,13 +168,13 @@ await mustFail(`sign on ${MPC_CONTRACT} directly`, "does not match transaction r
   }),
   "protocol",
 );
-// Montant faible expres : l'agent a de quoi le payer, seule la permission de sa cle peut refuser.
+// Deliberately small amount: the agent can afford it, only its key's permission can refuse.
 await mustFail(`direct transfer of 0.01 NEAR to ${ATTACKER}`, "Access key requires full access", () => agent.transfer({ receiverId: ATTACKER, amount: nearToYocto("0.01") }), "protocol");
 const id = await requestCheck(USDC);
 const check = await waitVerdict(id);
 console.log(`  [agent] verdict #${id} on USDC: ${check?.verdict}; it now tries to spend it on its own terms`);
 await mustFail(`buy(#${id}) of 1 ETH`, "budget exceeded", () => call(agent, "buy", buyArgs(id, parseEther("1")), 0n, BUY_GAS));
-// buy n'a ni cible, ni routeur, ni destinataire, ni chemin, ni minimum : le contrat ignore ces champs injectes.
+// buy has no target, router, recipient, path or minimum: the contract ignores these injected fields.
 const injected = { ...buyArgs(id, WEI), target: TRAP, recipient: ATTACKER_EVM, router: ATTACKER_EVM, path: [WETH, TRAP], min_out: "0" };
 console.log(`  [agent] buy(#${id}) with target ${TRAP}, recipient and router ${ATTACKER_EVM}, min_out 0 added to the arguments`);
 const { value: raw } = await call<Hex | null>(agent, "buy", injected, 0n, BUY_GAS);

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Controle reel sur Base mainnet : l'armeur arme, la sentinelle simule sur mainnet, l'agent demande
-# un verdict sur USDC, puis replay --check de la preuve contre mainnet.base.org.
-# Prerequis : bun app/setup.ts <parent>.testnet a ete lance. Pas besoin de evm/fork.sh.
-# Code de sortie 0 si le replay concorde avec le verdict en chaine.
+# Real check on Base mainnet: the armer arms, the sentinel simulates on mainnet, the agent asks
+# for a verdict on USDC, then replay --check of the proof against mainnet.base.org.
+# Prerequisite: bun app/setup.ts <parent>.testnet has been run. No need for evm/fork.sh.
+# Exit code 0 if the replay matches the on-chain verdict.
 set -euo pipefail
 cd "$(dirname "$0")"
-TOKEN=${1:-0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913} # USDC sur Base
+TOKEN=${1:-0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913} # USDC on Base
 RPC=https://mainnet.base.org
 
 bun --env-file=.env --env-file=.env.armer app/arm.ts 0.03 600

@@ -1,9 +1,9 @@
-// Diffuseur, sans aucune cle : lit dans la garde la transaction signee par NEAR pour une demande,
-// verifie qu'elle achete la cible de la demande via le routeur, pour l'adresse derivee de la garde
-// et signee par elle, puis la diffuse sur le fork local de Base et affiche le recu.
+// Relay, without any key: reads from the guard the transaction signed by NEAR for a request,
+// checks that it buys the request's target via the router, for the guard's derived address
+// and signed by it, then broadcasts it on the local Base fork and prints the receipt.
 // `exit <nonce>`: same for the latest signed exit (sale or ETH withdrawal). A transaction already
 // mined is reported with its receipt.
-// Usage : bun --env-file=.env app/relay.ts <id> | exit <nonce>
+// Usage: bun --env-file=.env app/relay.ts <id> | exit <nonce>
 import {
   createPublicClient,
   decodeFunctionData,
@@ -27,7 +27,7 @@ import { ROUTER, WETH } from "./verifier";
 const swap = parseAbi([
   "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256) payable",
 ]);
-/** Oracle de frais de Base (predeploy OP) : frais de donnees L1 factures en plus du gaz. */
+/** Base's fee oracle (OP predeploy): L1 data fees billed on top of the gas. */
 const GAS_ORACLE = "0x420000000000000000000000000000000000000F";
 const oracle = parseAbi(["function getL1Fee(bytes) view returns (uint256)"]);
 const erc20 = parseAbi([
@@ -38,8 +38,8 @@ const erc20 = parseAbi([
 
 export type Buy = { nonce: number; value: bigint; minOut: bigint; deadline: bigint; gas: bigint; maxFeePerGas: bigint };
 
-/** Accepte `raw` seulement si c'est le swap WETH -> `target` sur le routeur de Base, jetons vers
- *  `address` et signe par `address` ; sinon leve une erreur qui nomme le champ refuse. */
+/** Accepts `raw` only if it is the WETH -> `target` swap on Base's router, tokens to
+ *  `address` and signed by `address`; otherwise throws an error naming the refused field. */
 export async function verifyBuy(raw: Hex, target: Address, address: Address): Promise<Buy> {
   const reject = (what: string): never => {
     throw new Error(`signed transaction rejected: ${what}`);
@@ -118,7 +118,7 @@ export async function fund(client: PublicClient, raws: Hex[], address: Address, 
  *  would not need: balance for value, max gas and L1 data fee (anvil_setBalance), nonce aligned after
  *  a fork restart (anvil_setNonce). */
 export async function broadcast(client: PublicClient, raw: Hex, address: Address, log: (s: string) => void): Promise<{ receipt: TransactionReceipt; already: boolean }> {
-  // Diffusion sur le fork local seulement : la transaction est aussi valable sur Base reel.
+  // Broadcast on the local fork only: the transaction is also valid on real Base.
   await client.request({ method: "anvil_nodeInfo" } as never).catch(() => {
     throw new Error("refusing to broadcast: the EVM node is not a local anvil fork");
   });
@@ -145,17 +145,17 @@ export async function broadcast(client: PublicClient, raw: Hex, address: Address
 }
 
 if (import.meta.main) {
-  // near.ts pose un fetch global et lit .env a l'import : charge ici seulement, pas par les tests.
+  // near.ts installs a global fetch and reads .env at import: loaded here only, not by the tests.
   const { env, view } = await import("./near");
   const { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH } = await import("./derive");
   const log = (s: string) => console.log(`  [relay] ${s}`);
   const usage = "usage: bun --env-file=.env app/relay.ts <check id> | exit <nonce>";
   const [arg, nonceArg] = process.argv.slice(2);
-  // Adresse recalculee ici depuis la cle maitresse du MPC, le compte de la garde et le chemin fixe.
+  // Address recomputed here from the MPC master key, the guard's account and the fixed path.
   const address = deriveEvmAddress(await fetchMasterPublicKey(), env("GUARD"), GUARD_PATH);
   const client = createPublicClient({ transport: http(env("EVM_RPC")) });
-  /** Le RPC repartit les lectures sur des noeuds plus ou moins a jour : ce qui vient d'etre signe peut
-   *  y manquer encore ; relire jusqu'a 30 s. */
+  /** The RPC spreads reads over nodes that are more or less up to date: what was just signed may
+   *  still be missing there; reread for up to 30 s. */
   const reread = async <T>(read: () => Promise<T>, done: (v: T) => boolean): Promise<T> => {
     let v = await read();
     for (let i = 1; i < 20 && !done(v); i++) {

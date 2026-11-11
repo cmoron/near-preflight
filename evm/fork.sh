@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Copie locale de Base (anvil) au bloc FORK_BLOCK, avec nos jetons pieges et leurs paires Uniswap V2.
-# Deterministe : deployeur neuf (nonce 0), meme bloc, donc memes adresses a chaque lancement.
-# Ecrit evm/tokens.json, puis garde anvil au premier plan (Ctrl-C pour arreter).
+# Local copy of Base (anvil) at block FORK_BLOCK, with our trap tokens and their Uniswap V2 pairs.
+# Deterministic: fresh deployer (nonce 0), same block, hence the same addresses on every run.
+# Writes evm/tokens.json, then keeps anvil in the foreground (Ctrl-C to stop).
 set -euo pipefail
 shopt -s inherit_errexit
 cd "$(dirname "$0")"
-FORK_URL=${FORK_URL:-https://mainnet.base.org} # sert l'etat ancien sans cle
+FORK_URL=${FORK_URL:-https://mainnet.base.org} # serves old state without a key
 FORK_BLOCK=${FORK_BLOCK:-55836672}
 RPC=http://127.0.0.1:8545
-ROUTER=0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24 # Uniswap V2 Router02 sur Base
-DEPLOYER=0x60B1100000000000000000000000000000000001 # adresse sans cle, sans historique sur Base
-USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 # temoin sain, deja sur Base
+ROUTER=0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24 # Uniswap V2 Router02 on Base
+DEPLOYER=0x60B1100000000000000000000000000000000001 # address without a key, without history on Base
+USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 # healthy witness, already on Base
 # The guard's derived EVM address is public: the guard-targeted trap freezes it. Derived from the
 # guard account in ../.env (written by app/setup.ts), unless GUARD_EVM is given.
 if [[ -z ${GUARD_EVM:-} ]]; then
@@ -19,7 +19,7 @@ if [[ -z ${GUARD_EVM:-} ]]; then
 fi
 
 if cast block-number -r $RPC >/dev/null 2>&1; then
-  echo "le port 8545 sert deja un noeud : arrete-le d'abord" >&2
+  echo "port 8545 already serves a node: stop it first" >&2
   exit 1
 fi
 anvil --fork-url "$FORK_URL" --fork-block-number "$FORK_BLOCK" --port 8545 --silent &
@@ -46,14 +46,14 @@ deploy() { # name symbol trap [special address] -> token address, with 5 ETH of 
   echo "$token"
 }
 
-SAFE=$(deploy "Demo Sain" SAIN 0)
-RECLAIM=$(deploy "Demo Reprise" REPRISE 1)
-BLOCKED=$(deploy "Demo Vente Fermee" FERME 2)
-LATER=$(deploy "Demo Vente Fermee Plus Tard" PLUSTARD 3)
-TAX=$(deploy "Demo Taxe 90" TAXE 4)
-TAX_LATER=$(deploy "Demo Taxe 90 Plus Tard" TAXETARD 5)
-HOLD=$(deploy "Demo Detention Un Bloc" DETENTION 6)
-SIM=$(deploy "Demo Detecteur De Simulation" SIMU 7)
+SAFE=$(deploy "Demo Healthy" HEALTHY 0)
+RECLAIM=$(deploy "Demo Takeback" TAKEBACK 1)
+BLOCKED=$(deploy "Demo Sale Closed" CLOSED 2)
+LATER=$(deploy "Demo Sale Closed Later" CLOSEDLATER 3)
+TAX=$(deploy "Demo Tax 90" TAX90 4)
+TAX_LATER=$(deploy "Demo Tax 90 Later" TAX90LATER 5)
+HOLD=$(deploy "Demo Hold One Block" HOLDONE 6)
+SIM=$(deploy "Demo Simulation Detector" SIMDETECT 7)
 # Deployed after the others: the earlier addresses do not change.
 FROZEN=$(deploy "Demo Frozen Guard" FROZEN 8 "$GUARD_EVM")
 TAX20=$(deploy "Demo Tax 20" TAX20 9)
@@ -116,6 +116,6 @@ jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked
     guard_frozen: $frozen, sell_tax_20: $tax20, late_liquidity: $late, lp_burned: $lpburned, lp_held: $lpheld,
     farm_fresh: $fresh, gas_hungry: $gashungry}' > tokens.json
 echo "guard_frozen freezes $GUARD_EVM"
-echo "fork de Base au bloc $FORK_BLOCK pret sur $RPC ; jetons dans evm/tokens.json :"
+echo "Base fork at block $FORK_BLOCK ready on $RPC; tokens in evm/tokens.json:"
 cat tokens.json
 wait $ANVIL

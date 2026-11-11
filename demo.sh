@@ -17,7 +17,7 @@ FULL=
 ARMER=(bun --env-file=.env --env-file=.env.armer app/arm.ts)
 HUMAN=(bun --env-file=.env app/human.ts)
 
-# Tentative qui doit etre refusee par le contrat pour la raison donnee ; sinon la demo echoue.
+# Attempt that must be refused by the contract for the given reason; otherwise the demo fails.
 refused() {
   local want=$1 out
   shift
@@ -54,7 +54,7 @@ rm -f proofs/verify.txt
 # The agent's buy and sale wait for the MPC signature: allow 60 s per NEAR RPC call (20 s by default).
 RPC_TIMEOUT_MS=60000 bun --env-file=.env --env-file=.env.agent "${LLM[@]}" app/demo.ts $FULL || status=$?
 kill $SENTINEL
-trap - EXIT # sinon le piege retue un processus deja recolte, et sous set -e son echec devient le code de sortie
+trap - EXIT # otherwise the trap kills an already reaped process, and under set -e its failure becomes the exit code
 
 if [[ $FULL ]]; then
   echo

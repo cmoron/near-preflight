@@ -1,18 +1,18 @@
-// Enveloppe cote agent : aucun achat sans verdict, refus d'acheter sur block. Signe uniquement avec
-// la cle function-call de l'agent, limitee a la garde (request_check, buy, refund_check, request_exit,
-// sell_quoted) ; l'agent
-// n'a aucune cle EVM : la garde construit la transaction d'achat et NEAR la signe.
+// Agent-side wrapper: no buy without a verdict, refuses to buy on block. Signs only with
+// the agent's function-call key, limited to the guard (request_check, buy, refund_check, request_exit,
+// sell_quoted); the agent
+// has no EVM key: the guard builds the buy transaction and NEAR signs it.
 import { createPublicClient, formatEther, http, parseAbi, parseTransaction, type Address, type Hex } from "viem";
 import { account, call, env, view, type Check } from "./near";
 
 export const agent = account(env("AGENT"), env("AGENT_KEY"));
-/** Gaz attache a `buy` : le sien, l'appel `sign` au MPC (15 TGas reserves) et le callback (10). */
+/** Gas attached to `buy`: its own, the `sign` call to the MPC (15 TGas reserved) and the callback (10). */
 export const BUY_GAS = 100_000_000_000_000n;
-/** Gaz attache a `sell` : deux appels `sign` au MPC (approve puis swap) et le callback. */
+/** Gas attached to `sell`: two `sign` calls to the MPC (approve then swap) and the callback. */
 export const SELL_GAS = 150_000_000_000_000n;
 const log = (s: string) => console.log(`  [wrapper] ${s}`);
-const VERDICT_TTL_MS = 120_000; // un verdict allow expire 120 s apres son poste (meme regle que le contrat)
-const TIMEOUT_MS = 300_000; // delai du contrat avant remboursement d'une demande sans verdict
+const VERDICT_TTL_MS = 120_000; // an allow verdict expires 120 s after it is posted (same rule as the contract)
+const TIMEOUT_MS = 300_000; // contract delay before refunding a request without a verdict
 
 /** Asks the guard for a verdict on `target`. `decision`: sha256 of the model's decision package
  *  (app/llm.ts) that asked for it, stored with the check. */
@@ -26,7 +26,7 @@ export async function waitVerdict(id: number): Promise<Check | null> {
   const end = Date.now() + TIMEOUT_MS;
   while (Date.now() < end) {
     try {
-      const check = await view<Check | null>("get_check", { id }); // null : le noeud lu n'a pas encore le bloc
+      const check = await view<Check | null>("get_check", { id }); // null: the node read does not have the block yet
       if (check?.verdict) return check;
     } catch (e) {
       log(`#${id} : reading the verdict failed, will retry (${e instanceof Error ? e.message.split("\n")[0] : e})`);
@@ -51,9 +51,9 @@ async function waitApproval(id: number, judgedNs: string, waitMs: number): Promi
   return false;
 }
 
-/** Achete `target` pour `wei` sur Base, sur verdict allow, or on warn once the human approved it on
- *  chain (asked through `onWarn`, waited for at most `approvalWaitMs`) : la garde construit la
- *  transaction et la fait signer par NEAR. Renvoie l'id et la transaction signee (null sans achat). */
+/** Buys `target` for `wei` on Base, on an allow verdict, or on warn once the human approved it on
+ *  chain (asked through `onWarn`, waited for at most `approvalWaitMs`): the guard builds the
+ *  transaction and has NEAR sign it. Returns the id and the signed transaction (null without a buy). */
 export async function guardedBuy(
   target: Address,
   wei: bigint,
@@ -62,7 +62,7 @@ export async function guardedBuy(
   const id = await requestCheck(target);
   const check = await waitVerdict(id);
   if (!check) {
-    await Bun.sleep(5_000); // le contrat mesure le delai a l'heure du bloc
+    await Bun.sleep(5_000); // the contract measures the delay at block time
     const { tx } = await call(agent, "refund_check", { id });
     log(`#${id} : no verdict in 5 min, fee refunded, purchase abandoned  ${tx}`);
     return { id, signed: null };

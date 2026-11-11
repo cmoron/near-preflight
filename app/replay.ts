@@ -1,6 +1,6 @@
-// Rejeu d'une preuve : n'importe qui retrouve le verdict a partir de proofs/<id>.json et d'un noeud EVM.
-// Le fichier porte la chaine `evidence` exacte postee en chaine ; tout son contenu est reverifie.
-// Usage : bun app/replay.ts <preuve.json> [rpc] [--check]
+// Replay of a proof: anyone recovers the verdict from proofs/<id>.json and an EVM node.
+// The file carries the exact `evidence` string posted on chain; all of its content is rechecked.
+// Usage: bun app/replay.ts <proof.json> [rpc] [--check]
 import { keccak256, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
 import { beforeBlock, buildIndex, indexSha256, reputationOf, templateOf, type Reputation } from "./index";
 import {
@@ -47,9 +47,9 @@ type Evidence = {
   near: NearFacts;
 };
 type ExitEvidence = { kind: "exit"; chain_id: number; block: number; method: string; request_sha256: string; gas_limit: number; amount: string; calls: string[]; quote: string };
-/** `skipped` : controle non verifiable sur ce noeud, dit comme tel (ni reussi ni echoue). */
+/** `skipped`: check not verifiable on this node, reported as such (neither passed nor failed). */
 export type Line = { ok: boolean; line: string; skipped?: boolean };
-/** Demande lue par get_check sur la garde NEAR. */
+/** Request read by get_check on the NEAR guard. */
 export type OnChain = {
   target: string;
   verdict: string | null;
@@ -70,10 +70,10 @@ type BlockStateCall = { blockOverrides: { time: Hex }; calls: { from: Address }[
 const EVIDENCE_KEYS = "block,calls,chain_id,code_hash,gas_limit,implementation,liquidity,method,near,quote,reputation,request_sha256,template";
 const EXIT_KEYS = "amount,block,calls,chain_id,gas_limit,kind,method,quote,request_sha256";
 const REPUTATION_KEYS = "before_block,drained,from,index_sha256,median_drain_blocks,pools,template,to";
-/** Ecart tolere entre l'heure du bloc EVM et celles de la demande et du verdict NEAR : horloges de
- *  deux chaines, retard du RPC EVM lu par la sentinelle, intervalle de bloc. */
+/** Tolerated gap between the EVM block time and those of the NEAR request and verdict: clocks of
+ *  two chains, lag of the EVM RPC read by the sentinel, block interval. */
 const CLOCK_SLACK_S = 60;
-/** Le noeud suit l'heure reelle si son dernier bloc a moins de 2 min d'ecart avec l'horloge locale. */
+/** The node follows real time if its latest block is less than 2 min from the local clock. */
 const LIVE_S = 120;
 
 const msg = (e: unknown) => (e instanceof Error ? e.message.split("\n")[0] : String(e));
@@ -81,7 +81,7 @@ const isObj = (x: unknown): x is Record<string, unknown> => typeof x === "object
 const iso = (s: number) => new Date(s * 1000).toISOString().replace(".000", "");
 const blockOf = (url: string, tag: string) => rpc<Header>(url, "eth_getBlockByNumber", [tag, false]);
 
-/** Contenu de la chaine evidence : exactement les champs que la sentinelle poste, bien types. */
+/** Content of the evidence string: exactly the fields the sentinel posts, well typed. */
 function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
   if (typeof p.evidence !== "string") return "evidence is not the string posted on chain (old proof format?)";
   let e: unknown;
@@ -120,8 +120,8 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
   return typed ? (e as unknown as Evidence) : "evidence fields have unexpected types";
 }
 
-/** Forme minimale de la requete, verifiee AVANT tout envoi : seule eth_simulateV1 (lecture seule) au
- *  bloc de la preuve part vers le noeud. Renvoie le defaut trouve, ou null. */
+/** Minimal shape of the request, checked BEFORE anything is sent: only eth_simulateV1 (read-only) at
+ *  the proof's block goes to the node. Returns the defect found, or null. */
 function shapeError(p: Proof, e: { block: number }): string | null {
   const r = p.request as unknown;
   if (!isObj(r) || r.method !== "eth_simulateV1") return "method is not eth_simulateV1";
@@ -136,12 +136,12 @@ function shapeError(p: Proof, e: { block: number }): string | null {
 type Rebuilt = { labels: string[]; buyer: Address; guard: Address; stranger: Address | null; owner: Address | null };
 const NOBODY: Address = "0x0000000000000000000000000000000000000000";
 
-/** Reconstruit la requete que checkToken aurait produite pour proof.target (memes appels, memes
- *  adresses, routeur, WETH, blocs aux memes ecarts de temps) et en tire les libelles : ceux du fichier
- *  ne comptent pas. Seuls l'acheteur, l'adresse de la garde, l'inconnu et l'heure viennent de la
- *  requete (at the positions plan() gives them); quantites et proprietaire viennent de la reponse
- *  fraiche ; prix du gaz, prevrandao, coinbase et solde reel de owner() viennent du noeud, au bloc de
- *  la preuve. Aucun repli : une sonde absente est un defaut. */
+/** Rebuilds the request checkToken would have produced for proof.target (same calls, same
+ *  addresses, router, WETH, blocks at the same time gaps) and derives the labels from it: those of the file
+ *  do not count. Only the buyer, the guard's address, the unknown one and the time come from the
+ *  request (at the positions plan() gives them); amounts and owner come from the fresh
+ *  response; gas price, prevrandao, coinbase and the real balance of owner() come from the node, at the proof's
+ *  block. No fallback: a missing probe is a defect. */
 async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[]): Promise<Rebuilt | { error: string }> {
   try {
     const bs = (p.request.params[0] as { blockStateCalls: BlockStateCall[] }).blockStateCalls;
@@ -177,8 +177,8 @@ async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[]): Pro
   }
 }
 
-/** Les sondes doivent etre des adresses neuves : ni routeur, ni WETH, ni cible, ni owner(), sans code
- *  au bloc, et distinctes. Sinon un jeton qui exempte une adresse privilegiee passerait pour sain. */
+/** The probes must be fresh addresses: not the router, WETH, target or owner(), without code
+ *  at the block, and distinct. Otherwise a token that exempts a privileged address would pass as healthy. */
 async function probeProblems(url: string, e: Evidence, target: Address, r: Rebuilt): Promise<string[]> {
   const known: [string, Address | null][] = [
     ["router", ROUTER],
@@ -198,7 +198,7 @@ async function probeProblems(url: string, e: Evidence, target: Address, r: Rebui
   return out;
 }
 
-const readCheck = async (id: number) => (await import("./near")).view<OnChain>("get_check", { id }); // near.ts pose un fetch global : charge ici seulement
+const readCheck = async (id: number) => (await import("./near")).view<OnChain>("get_check", { id }); // near.ts installs a global fetch: loaded here only
 const readEntry = async (token: string) => (await import("./near")).view<OnChainEntry>("get_entry", { token });
 /** The guard account (GUARD in .env) and its EVM address derived through Chain Signatures. */
 export type GuardInfo = { account: string; evm: Address };
@@ -233,7 +233,7 @@ export async function replay(
   }
   if ("kind" in e) return replayExit(proof, e, url, opts);
 
-  // (a) la requete du fichier est celle dont le hash est dans evidence
+  // (a) the file's request is the one whose hash is in evidence
   const hash = sha256(stringToHex(JSON.stringify(proof.request)));
   add(hash === e.request_sha256, `request hash ${hash === e.request_sha256 ? "matches evidence" : `${hash} != ${e.request_sha256}`}`);
 
@@ -243,7 +243,7 @@ export async function replay(
     return out;
   }
 
-  // (b) meme chaine ; heure du premier bloc simule = heure du bloc de la preuve + 2 s
+  // (b) same chain; time of the first simulated block = time of the proof's block + 2 s
   try {
     const id = Number(await rpc<Hex>(url, "eth_chainId", []));
     add(id === e.chain_id, id === e.chain_id ? `chain id ${id} matches evidence` : `node chain id ${id} != evidence chain id ${e.chain_id}`);
@@ -268,7 +268,7 @@ export async function replay(
     fail(`reading block ${e.block} or the first simulated block time`, err);
   }
 
-  // (c) meme requete, meme bloc ; memes statuts et memes donnees de retour
+  // (c) same request, same block; same statuses and same return data
   let fresh: Result[] | null = null;
   let rebuilt: Rebuilt | null = null;
   try {
@@ -281,7 +281,7 @@ export async function replay(
   if (fresh) {
     const diffs: string[] = [];
     if (fresh.length !== proof.response.length) diffs.push(`call count ${proof.response.length} -> ${fresh.length}`);
-    const labels = e.calls.map((c) => c.replace(/: (ok|revert)$/, "")); // pour nommer les ecarts seulement
+    const labels = e.calls.map((c) => c.replace(/: (ok|revert)$/, "")); // only to name the discrepancies
     proof.response.forEach((old, i) => {
       const now = fresh[i];
       if (!now) return;
@@ -290,7 +290,7 @@ export async function replay(
     });
     add(!diffs.length, diffs.length ? `call results differ: ${diffs.join(" ; ")}` : `status and return data of all ${fresh.length} calls identical`);
 
-    // (d) requete reconstruite, sondes neuves, libelles, puis rejugement a partir de la reponse fraiche
+    // (d) rebuilt request, fresh probes, labels, then rejudging from the fresh response
     const r = await rebuild(url, proof, e, fresh);
     if ("error" in r) add(false, `request shape: ${r.error}`);
     else {
@@ -337,7 +337,7 @@ export async function replay(
     }
   }
 
-  // (e) code de la cible et implementation du proxy au bloc
+  // (e) target's code and proxy implementation at the block
   try {
     const code = await rpc<Hex>(url, "eth_getCode", [proof.target, toHex(e.block)]);
     const h = keccak256(code);
@@ -351,7 +351,7 @@ export async function replay(
     fail("reading target code", err);
   }
 
-  // (f) verdict poste sur le contrat NEAR, lie a cette chaine evidence par son sha256
+  // (f) verdict posted on the NEAR contract, tied to this evidence string by its sha256
   if (opts.check) {
     try {
       const c = await (opts.chain ?? readCheck)(proof.id);
@@ -488,8 +488,8 @@ function derivation(id: number, r: Rebuilt, c: NonNullable<OnChain>, blockHash: 
   ];
 }
 
-/** L'heure du bloc EVM de la preuve doit tomber entre la demande et le verdict NEAR. Verifiable
- *  seulement si le noeud suit l'heure reelle : une copie locale (anvil) garde l'heure du bloc copie. */
+/** The proof's EVM block time must fall between the NEAR request and verdict. Verifiable
+ *  only if the node follows real time: a local copy (anvil) keeps the copied block's time. */
 async function timing(url: string, blockTs: number, c: NonNullable<OnChain>, clock: () => number): Promise<Line> {
   const head = Number(BigInt((await blockOf(url, "latest")).timestamp));
   const lag = Math.round(clock() - head);

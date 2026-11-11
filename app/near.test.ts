@@ -1,9 +1,9 @@
-// Un RPC qui accepte la connexion et ne repond jamais ne doit pas suspendre un role indefiniment.
+// An RPC that accepts the connection and never answers must not hang a role indefinitely.
 import { expect, test } from "bun:test";
 
-test("une vue NEAR sur un RPC muet echoue dans le delai", async () => {
+test("a NEAR view on a silent RPC fails within the timeout", async () => {
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
-  const saved = { ...process.env }; // bun partage process.env entre fichiers de test : on le rend intact
+  const saved = { ...process.env }; // bun shares process.env between test files: leave it intact
   try {
     process.env.NEAR_RPC = `http://127.0.0.1:${silent.port}`;
     process.env.RPC_TIMEOUT_MS = "300";
@@ -21,8 +21,8 @@ test("une vue NEAR sur un RPC muet echoue dans le delai", async () => {
   }
 }, 10_000);
 
-// Place apres le test precedent : celui-ci fixe NEAR_RPC avant le premier import de near.ts.
-test("un fichier de cle est ecrit en 0600, neuf ou deja present en 0664", async () => {
+// Placed after the previous test: that one sets NEAR_RPC before the first import of near.ts.
+test("a key file is written as 0600, new or already present as 0664", async () => {
   const { mkdtemp, rm, stat, writeFile } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { writeSecret } = await import("./near");

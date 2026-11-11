@@ -1,20 +1,20 @@
-// Derivation de l'adresse EVM d'un compte NEAR via Chain Signatures (MPC testnet).
+// Derivation of a NEAR account's EVM address via Chain Signatures (MPC testnet).
 // tweak = sha3_256("near-mpc-recovery v0.1.0 epsilon derivation:" + predecessor + "," + path)
-// cle = cle_maitresse + tweak*G ; adresse = 20 derniers octets de keccak256(cle sans le prefixe 04)
+// key = master_key + tweak*G ; address = last 20 bytes of keccak256(key without the 04 prefix)
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha3_256 } from "@noble/hashes/sha3.js";
 import bs58 from "bs58";
 import { keccak256, toHex, getAddress, type Hex } from "viem";
 
 export const MPC_CONTRACT = "v1.signer-prod.testnet";
-/** Chemin de derivation de la garde, fixe par le contrat (DERIVATION_PATH dans src/lib.rs). */
+/** Guard derivation path, fixed by the contract (DERIVATION_PATH in src/lib.rs). */
 export const GUARD_PATH = "evm-1";
 const RPC = "https://rpc.testnet.near.org";
 
-// Cle maitresse "secp256k1:<base58 de x||y>" -> 64 octets
+// Master key "secp256k1:<base58 of x||y>" -> 64 bytes
 export function parseNearSecpKey(s: string): Uint8Array {
   const raw = bs58.decode(s.replace(/^secp256k1:/, ""));
-  if (raw.length !== 64) throw new Error(`cle secp256k1 NEAR attendue sur 64 octets, recu ${raw.length}`);
+  if (raw.length !== 64) throw new Error(`NEAR secp256k1 key expected on 64 bytes, got ${raw.length}`);
   return raw;
 }
 
@@ -24,11 +24,11 @@ export function deriveEvmAddress(masterPublicKey: string, predecessor: string, p
   const tweak = sha3_256(new TextEncoder().encode(`near-mpc-recovery v0.1.0 epsilon derivation:${predecessor},${path}`));
   const t = BigInt("0x" + Buffer.from(tweak).toString("hex")) % secp256k1.Point.Fn.ORDER;
   const key = master.add(secp256k1.Point.BASE.multiply(t));
-  const uncompressed = key.toBytes(false); // 65 octets, prefixe 04
+  const uncompressed = key.toBytes(false); // 65 bytes, 04 prefix
   return getAddress("0x" + keccak256(toHex(uncompressed.slice(1))).slice(26));
 }
 
-// Appel de vue public_key sur le contrat MPC
+// View call public_key on the MPC contract
 export async function fetchMasterPublicKey(): Promise<string> {
   const r = await fetch(RPC, {
     method: "POST",
@@ -45,6 +45,6 @@ export async function fetchMasterPublicKey(): Promise<string> {
 
 if (import.meta.main) {
   const [account, path] = process.argv.slice(2);
-  if (!account || !path) throw new Error("usage: bun app/derive.ts <compte> <path>");
+  if (!account || !path) throw new Error("usage: bun app/derive.ts <account> <path>");
   console.log(deriveEvmAddress(await fetchMasterPublicKey(), account, path));
 }

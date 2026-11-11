@@ -1,4 +1,4 @@
-// Les controles de la sentinelle contre la copie locale de Base (lancer evm/fork.sh d'abord).
+// The sentinel's checks against the local copy of Base (run evm/fork.sh first).
 import { describe, expect, test } from "bun:test";
 import { decodeAbiParameters, encodeFunctionData, keccak256, parseAbi, parseEther, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
@@ -19,39 +19,39 @@ const GAS = 250_000n;
 const check = (token: string, guard: Address = GUARD_EVM, index: Index | null = INDEX, near: NearFacts = NO_NEAR, gas = GAS) =>
   checkToken(RPC, token as `0x${string}`, guard, () => ({ buyer: rand(), stranger: rand() }), { index, near: async () => near, gas });
 
-describe("verdict de la sentinelle", () => {
-  test("USDC, temoin sain deja sur Base : allow", async () => expect((await check(tokens.usdc)).verdict).toBe("allow"));
-  test("jeton sain de demonstration : allow", async () => expect((await check(tokens.safe)).verdict).toBe("allow"));
-  test("jeton honnete qui impose un bloc de detention : allow (revente simulee au bloc suivant)", async () => {
+describe("sentinel verdict", () => {
+  test("USDC, healthy witness already on Base: allow", async () => expect((await check(tokens.usdc)).verdict).toBe("allow"));
+  test("healthy demo token: allow", async () => expect((await check(tokens.safe)).verdict).toBe("allow"));
+  test("honest token that imposes a holding block: allow (resale simulated in the next block)", async () => {
     expect((await check(tokens.hold_one_block)).verdict).toBe("allow");
   });
-  test("pas de liquidite V2 : warn, pas block", async () => {
-    const r = await check("0x60B1100000000000000000000000000000000001"); // adresse sans paire
+  test("no V2 liquidity: warn, not block", async () => {
+    const r = await check("0x60B1100000000000000000000000000000000001"); // address without a pair
     expect(r.verdict).toBe("warn");
     expect(r.reasons).toContain("no liquidity");
   });
-  test("reprise par le proprietaire via transferFrom : block", async () => {
+  test("takeback by the owner via transferFrom: block", async () => {
     const r = await check(tokens.owner_reclaim);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("transferFrom");
   });
-  test("vente fermee des l'achat : block", async () => {
+  test("sale closed from the buy: block", async () => {
     const r = await check(tokens.sell_blocked);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("next block");
   });
-  test("vente fermee 1 h apres l'achat : block", async () => {
+  test("sale closed 1 h after the buy: block", async () => {
     const r = await check(tokens.sell_blocked_later);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("256 blocks (timestamp +1 h) after the buy");
     expect(r.reasons).not.toContain("next block");
   });
-  test("taxe de 90 % a la vente : block", async () => {
+  test("90 % tax on the sale: block", async () => {
     const r = await check(tokens.sell_tax);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("90 % tax");
   });
-  test("taxe de 90 % seulement sur la vente tardive : block", async () => {
+  test("90 % tax only on the late sale: block", async () => {
     const r = await check(tokens.sell_tax_later);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("256 blocks (timestamp +1 h) after the buy");
@@ -77,10 +77,10 @@ describe("verdict de la sentinelle", () => {
   test("the same token with another guard address: allow (only the guard is targeted)", async () => {
     expect((await check(tokens.guard_frozen, "0x000000000000000000000000000000000000bEEF")).verdict).toBe("allow");
   });
-  test("vente permise seulement en simulation (prix du gaz ou base fee nuls) : block", async () => {
+  test("sale allowed only in simulation (zero gas price or base fee): block", async () => {
     const r = await check(tokens.sim_detector);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toContain("sale refused in the next block"); // le routeur masque la raison du jeton
+    expect(r.reasons).toContain("sale refused in the next block"); // the router masks the token's reason
   });
 });
 
@@ -211,8 +211,8 @@ describe("exit quote (the agent's floor comes from it)", () => {
   });
 });
 
-describe("devis poste avec le verdict", () => {
-  test("USDC, sans taxe : jetons recus par l'achat simule de 0,01 ETH = sortie du pool au bloc", async () => {
+describe("quote posted with the verdict", () => {
+  test("USDC, no tax: tokens received by the simulated buy of 0.01 ETH = pool output at the block", async () => {
     const r = await check(tokens.usdc);
     const out = await rpc<Hex>(RPC, "eth_call", [
       { to: ROUTER, data: encodeFunctionData({ abi: quoteAbi, args: [parseEther("0.01"), [WETH, tokens.usdc as Address]] }) },
@@ -224,8 +224,8 @@ describe("devis poste avec le verdict", () => {
   });
 });
 
-describe("preuve", () => {
-  test("porte l'empreinte du code de la cible au bloc du controle", async () => {
+describe("proof", () => {
+  test("carries the hash of the target's code at the check's block", async () => {
     const r = await check(tokens.safe);
     const res = await fetch(RPC, {
       method: "POST",
@@ -235,7 +235,7 @@ describe("preuve", () => {
     const { result: code } = (await res.json()) as { result: `0x${string}` };
     expect(r.evidence.code_hash).toBe(keccak256(code));
   });
-  test("la simulation reprend l'environnement du bloc reel (gaz, base fee, prevrandao, coinbase, numero)", async () => {
+  test("the simulation reuses the real block's environment (gas, base fee, prevrandao, coinbase, number)", async () => {
     const r = await check(tokens.safe);
     const res = await fetch(RPC, {
       method: "POST",
@@ -252,9 +252,9 @@ describe("preuve", () => {
         expect(c.gas).toBe("0x3d090"); // the guard's 250,000, not the block's limit
       }
     }
-    expect(BigInt(blocks[2].blockOverrides.number)).toBe(BigInt(r.evidence.block) + 256n); // vente +1 h : dernier bloc permis
+    expect(BigInt(blocks[2].blockOverrides.number)).toBe(BigInt(r.evidence.block) + 256n); // sale +1 h: last block allowed
   });
-  test("porte l'implementation d'un proxy (USDC)", async () => {
+  test("carries a proxy's implementation (USDC)", async () => {
     const r = await check(tokens.usdc);
     expect(r.evidence.implementation).toMatch(/^0x[0-9a-f]{40}$/);
   });

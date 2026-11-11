@@ -1,5 +1,5 @@
-// Sentinelle avant achat : controles par simulation en lecture seule (eth_simulateV1) sur une
-// chaine EVM, route Uniswap V2 WETH -> jeton. Rien n'est signe ni envoye sur la chaine EVM.
+// Pre-buy sentinel: checks by read-only simulation (eth_simulateV1) on an
+// EVM chain, Uniswap V2 route WETH -> token. Nothing is signed or sent on the EVM chain.
 import {
   decodeAbiParameters,
   decodeFunctionResult,
@@ -20,30 +20,30 @@ import { beforeBlock, reputationFindings, reputationOf, templateOf, type Index, 
 export const ROUTER: Address = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"; // Uniswap V2 Router02 (Base)
 export const WETH: Address = "0x4200000000000000000000000000000000000006";
 export const FACTORY: Address = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"; // Uniswap V2 factory (Base), ROUTER.factory()
-/** Achat simule ; le devis poste est en jetons pour ce montant (QUOTE_WEI dans src/lib.rs). */
+/** Simulated buy; the posted quote is in tokens for this amount (QUOTE_WEI in src/lib.rs). */
 const BUY = parseEther("0.01");
-/** Le premier bloc simule suit le bloc de la preuve, 2 s apres lui (rythme des blocs de Base) ;
- *  la premiere vente est simulee au bloc d'apres, encore 2 s plus tard. */
+/** The first simulated block follows the proof's block, 2 s after it (Base's block rate);
+ *  the first sale is simulated in the next block, 2 s later again. */
 export const NEXT_S = 2n;
 const LATER_S = 3600n; // timestamp of the late sale: one hour after the buy
-// Sans prix du gaz ni limite par appel, eth_simulateV1 donne tx.gasprice = 0, block.basefee = 0 et
-// gasleft() = limite du bloc : un jeton y reconnait la simulation et ne refuse que la vraie vente.
+// Without a gas price or a per-call limit, eth_simulateV1 gives tx.gasprice = 0, block.basefee = 0 and
+// gasleft() = block limit: a token recognizes the simulation there and refuses only the real sale.
 // Every call gets the gas limit the guard signs with (its evm_config, read per check): a token whose
 // sale needs more gas than that passes a looser simulation and traps the real exit.
-const TIP = 1_000_000n; // pourboire propose par mainnet.base.org (eth_maxPriorityFeePerGas)
-export const FUND = parseEther("1"); // solde des sondes neuves, de quoi acheter et payer le gaz
-// eth_simulateV1 refuse plus de 256 blocs au-dessus du bloc de base : the late sale is 256 blocks
+const TIP = 1_000_000n; // tip suggested by mainnet.base.org (eth_maxPriorityFeePerGas)
+export const FUND = parseEther("1"); // balance of the fresh probes, enough to buy and pay the gas
+// eth_simulateV1 refuses more than 256 blocks above the base block: the late sale is 256 blocks
 // ahead (about 8.5 min of 2 s Base blocks, 1800 blocks would be 1 h) with its timestamp 1 h ahead. A
 // token counting blocks sees 8.5 min, one reading the timestamp sees 1 h.
 const MAX_BLOCKS = 256n;
 /** The late sale in verdict reasons: what the simulation really does, not "1 h". */
 const LATE = "256 blocks (timestamp +1 h) after the buy";
-// Emplacements de l'adresse d'implementation d'un proxy : EIP-1967, puis ZeppelinOS (USDC).
+// Slots of a proxy's implementation address: EIP-1967, then ZeppelinOS (USDC).
 const IMPL_SLOTS = [
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc",
   "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3",
 ];
-const TAX_WARN = 0.1; // perte au-dela du devis du pool : avertir a 10 %, bloquer a 50 %
+const TAX_WARN = 0.1; // loss beyond the pool's quote: warn at 10 %, block at 50 %
 const TAX_BLOCK = 0.5;
 /** Liquidity window, 1 h of 2 s Base blocks. Liquidity is "old" when at least OLD_BPS of today's LP
  *  supply already existed WINDOW_BLOCKS ago (totalSupply read at both blocks: two eth_call, no logs),
@@ -92,19 +92,19 @@ export type Report = {
   /** post_verdict's `list_target`: a block resting on the token's own simulation or liquidity, which
    *  the guard turns into a `token:` listing (judge). */
   list_target: boolean;
-  /** Resume poste en chaine (<= 8000 caracteres). */
+  /** Digest posted on chain (<= 8000 characters). */
   evidence: {
     chain_id: number;
     block: number;
     method: "eth_simulateV1";
     request_sha256: Hex;
-    /** keccak256 du code de la cible au bloc du controle. */
+    /** keccak256 of the target's code at the check's block. */
     code_hash: Hex;
-    /** Implementation derriere un proxy (EIP-1967 ou ZeppelinOS), sinon null. */
+    /** Implementation behind a proxy (EIP-1967 or ZeppelinOS), otherwise null. */
     implementation: Address | null;
     calls: string[];
-    /** Devis : jetons recus par l'achat simule de 0,01 ETH (decimal, "0" sans achat) ; la garde en
-     *  tire le minimum de jetons du swap qu'elle fait signer. */
+    /** Quote: tokens received by the simulated buy of 0.01 ETH (decimal, "0" without a buy); the guard
+     *  derives from it the minimum tokens of the swap it has signed. */
     quote: string;
     /** Who can remove the pool's liquidity right now: facts read at `block` (liquidityFacts). */
     liquidity: Liquidity;
@@ -117,7 +117,7 @@ export type Report = {
     /** Gas limit of every simulated call: the guard's, which it also stores with the verdict. */
     gas_limit: number;
   };
-  /** Requete et reponse completes, pour rejouer la simulation au meme bloc. */
+  /** Full request and response, to replay the simulation at the same block. */
   request: { method: string; params: unknown[] };
   response: Result[];
 };
@@ -132,7 +132,7 @@ export async function rpc<T>(url: string, method: string, params: unknown[]): Pr
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    signal: AbortSignal.timeout(Number(process.env.RPC_TIMEOUT_MS ?? 20_000)), // jamais d'attente sans fin
+    signal: AbortSignal.timeout(Number(process.env.RPC_TIMEOUT_MS ?? 20_000)), // never wait forever
   });
   const body = (await res.json()) as { result?: T; error?: { message: string } };
   if (body.error || body.result === undefined) throw new Error(`${method} : ${body.error?.message ?? res.status}`);
@@ -140,11 +140,11 @@ export async function rpc<T>(url: string, method: string, params: unknown[]): Pr
 }
 
 export type Block = { number?: bigint; time: bigint; calls: Call[] };
-/** Bloc reel au-dessus duquel on simule : sa base fee, son prevrandao et son coinbase sont repris, le
- *  noeud les mettrait sinon a zero (prevrandao, base fee) dans les blocs simules. */
+/** Real block on top of which we simulate: its base fee, prevrandao and coinbase are reused, the
+ *  node would otherwise set them to zero (prevrandao, base fee) in the simulated blocks. */
 export type Header = { number: Hex; hash: Hex; timestamp: Hex; baseFeePerGas: Hex; mixHash: Hex; miner: Address };
 
-/** Requete eth_simulateV1 complete, telle qu'envoyee et sauvegardee dans la preuve. */
+/** Full eth_simulateV1 request, as sent and saved in the proof. */
 export function buildRequest(head: Header, balances: Record<string, bigint>, blocks: Block[], gas: bigint) {
   const baseFee = BigInt(head.baseFeePerGas);
   const env = { baseFeePerGas: toHex(baseFee), prevRandao: head.mixHash, feeRecipient: head.miner };
@@ -160,8 +160,8 @@ export function buildRequest(head: Header, balances: Record<string, bigint>, blo
   return { method: "eth_simulateV1", params: [request, toHex(BigInt(head.number))] };
 }
 
-/** Soldes poses par la simulation : sondes neuves financees ; owner() complete seulement s'il ne peut
- *  pas payer le gaz de son appel, sinon son solde reel reste (un vrai owner() paie aussi son gaz).
+/** Balances set by the simulation: fresh probes funded; owner() topped up only if it cannot
+ *  pay the gas of its call, otherwise its real balance stays (a real owner() pays its gas too).
  *  The guard's EVM address gets the same balance as the probe buyer, whatever it holds on chain. */
 export async function balances(url: string, head: Header, buyer: Address, guard: Address, gas: bigint, full?: { stranger: Address; owner: Address | null }) {
   const out: Record<string, bigint> = { [buyer]: FUND, [guard]: FUND };
@@ -174,7 +174,7 @@ export async function balances(url: string, head: Header, buyer: Address, guard:
   return out;
 }
 
-/** Simule des blocs successifs au-dessus de `head` ; renvoie la requete et un resultat par appel. */
+/** Simulates successive blocks on top of `head`; returns the request and one result per call. */
 async function simulate(url: string, head: Header, funds: Record<string, bigint>, blocks: Block[], gas: bigint) {
   const request = buildRequest(head, funds, blocks, gas);
   const out = await rpc<{ calls: Result[] }[]>(url, request.method, request.params);
@@ -185,11 +185,11 @@ async function simulate(url: string, head: Header, funds: Record<string, bigint>
  *  buyer's calls have none. A token that targets the guard's public address shows up on this side. */
 export const GUARD = "guard: ";
 
-/** Les blocs a simuler. Sans `full` : l'achat seul (1re simulation). Avec `full` (inconnu, quantites
- *  achetees et proprietaire, lus dans la 1re simulation) : la preuve complete en trois blocs, achat +
- *  reprises sans approbation + approve, vente de la moitie au bloc suivant, vente du reste 256 blocks (timestamp +1 h)
+/** The blocks to simulate. Without `full`: the buy alone (1st simulation). With `full` (unknown, amounts
+ *  bought and owner, read in the 1st simulation): the complete proof in three blocks, buy +
+ *  takebacks without approval + approve, sale of half in the next block, sale of the rest 256 blocks (timestamp +1 h)
  *  later. Every step runs twice in the same blocks: as the probe buyer, then as the guard's EVM
- *  address. Partage avec app/replay.ts, qui reconstruit ainsi la requete attendue. */
+ *  address. Shared with app/replay.ts, which rebuilds the expected request this way. */
 export function plan(
   token: Address,
   buyer: Address,
@@ -214,7 +214,7 @@ export function plan(
   if (!full) return [{ time: now, calls: buy }];
   const { stranger, amounts, owner } = full;
   const half = (i: number) => amounts[i] / 2n;
-  const rest = (i: number) => amounts[i] - half(i) - 2n; // 2 unites peut-etre reprises par les sondes transferFrom
+  const rest = (i: number) => amounts[i] - half(i) - 2n; // 2 units possibly taken back by the transferFrom probes
   const block1 = [
     ...buy,
     ...each((p, who) => [
@@ -244,21 +244,21 @@ export function plan(
 export const ok = (r: Result) => r.status === "0x1";
 const uint = (abi: Abi, fn: string, r: Result) => decodeFunctionResult({ abi, functionName: fn, data: r.returnData } as Parameters<typeof decodeFunctionResult>[0]);
 
-/** Raison d'un revert `Error(string)` (dans `error.data` ou `returnData` selon le noeud). */
+/** Reason of an `Error(string)` revert (in `error.data` or `returnData` depending on the node). */
 function revertReason(r: Result): string {
   const data = r.error?.data ?? r.returnData;
   if (data.startsWith("0x08c379a0")) return decodeAbiParameters([{ type: "string" }], `0x${data.slice(10)}`)[0];
   return data === "0x" ? "revert without reason" : data.slice(0, 18);
 }
 
-/** Vrai si un transferFrom sans approbation a deplace des jetons (succes et pas de `false` renvoye). */
+/** True if a transferFrom without approval moved tokens (success and no `false` returned). */
 function moved(r: Result): boolean {
   if (!ok(r)) return false;
   return r.returnData === "0x" || (uint(erc20, "transferFrom", r) as boolean);
 }
 
-/** Adresses de sonde et heure du premier bloc simule. Seuls les tests imposent l'heure (preuves
- *  falsifiees mais coherentes) ; la sentinelle derive les sondes (deriveProbes) et part du bloc + 2 s. */
+/** Probe addresses and time of the first simulated block. Only tests impose the time (forged
+ *  but consistent proofs); the sentinel derives the probes (deriveProbes) and starts at block + 2 s. */
 export type Probe = { buyer: Address; stranger: Address; time?: bigint };
 /** On-chain inputs of the probe derivation: the guard account, the check id and its request time
  *  (`requested_ns`, set by the guard contract), all readable by anyone from a NEAR RPC. */
@@ -360,7 +360,7 @@ export function liquidityFindings(l: Liquidity, block: number): Finding[] {
   return [{ level: "warn", text: `${age}: ${pct(sum(removable))} % of the LP removable now (${top.kind === "eoa" ? "EOA" : "contract"} ${short(top.address)} holds ${pct(BigInt(top.balance))} %)` }];
 }
 
-/** Implementation derriere un proxy (EIP-1967, puis ZeppelinOS) au bloc, sinon null. */
+/** Implementation behind a proxy (EIP-1967, then ZeppelinOS) at the block, otherwise null. */
 export async function implementationAt(url: string, token: Address, block: bigint): Promise<Address | null> {
   for (const slot of IMPL_SLOTS) {
     const word = await rpc<Hex>(url, "eth_getStorageAt", [token, slot, toHex(block)]);
@@ -407,7 +407,7 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const proof = { chain_id: chainId, block, code_hash: keccak256(code), implementation, liquidity, template, reputation, near, gas_limit: Number(ctx.gas) };
   const [first1] = plan(token, buyer, guard, block, now);
 
-  // 1re simulation : quantites achetees et proprietaire, pour construire la seconde.
+  // 1st simulation: amounts bought and owner, to build the second.
   const first = await simulate(url, head, await balances(url, head, buyer, guard, ctx.gas), [first1], ctx.gas);
   const buyLabels = first1.calls.map((c) => c.label);
   const st = buyStages(byLabel(buyLabels, first.results));
@@ -418,8 +418,8 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   return report(proof, sim, blocks.flatMap((b) => b.calls.map((c) => c.label)));
 }
 
-/** Phase achat d'un cote (prefixe "" ou GUARD) : quantite recue, proprietaire, premiers constats.
- *  `findings` vide = on peut poursuivre. */
+/** Buy phase of one side (prefix "" or GUARD): amount received, owner, first findings.
+ *  Empty `findings` = we can continue. */
 export function buyStage(f: Record<string, Result>, p = "") {
   const findings: Finding[] = [];
   if (!ok(f[`${p}buy quote`])) findings.push({ level: "warn", text: "no liquidity: no Uniswap V2 WETH pair, sale not verifiable" });
@@ -437,11 +437,11 @@ export function buyStages(f: Record<string, Result>) {
   return { stop: b.findings.length + g.findings.length > 0, amounts: [b.amount, g.amount] as [bigint, bigint], owner: b.owner };
 }
 
-// Une adresse sans code repond "0x" a balanceOf : solde nul, pas une erreur de decodage.
+// An address without code answers "0x" to balanceOf: zero balance, not a decoding error.
 const bal = (r: Result) => (ok(r) && r.returnData !== "0x" ? (uint(erc20, "balanceOf", r) as bigint) : 0n);
 const delta = (after: Result, before: Result) => (ok(after) && ok(before) ? bal(after) - bal(before) : 0n);
 
-/** Constats d'un cote (prefixe "" ou GUARD) : achat, reprises, ventes. */
+/** Findings of one side (prefix "" or GUARD): buy, takebacks, sales. */
 function sideFindings(r: Record<string, Result>, p: string, stop: boolean): Finding[] {
   const { findings, amount, owner } = buyStage(r, p);
   if (stop) return findings;
@@ -452,7 +452,7 @@ function sideFindings(r: Record<string, Result>, p: string, stop: boolean): Find
     findings.push({ level: "block", text: "anyone can take tokens back by transferFrom without approval" });
   }
   const quoted = (res: Result) => (ok(res) ? (uint(router, "getAmountsOut", res) as bigint[])[1] : 0n);
-  // Sans devis, la taxe n'est pas mesurable : perte totale supposee, donc block (echec ferme).
+  // Without a quote, the tax cannot be measured: total loss assumed, hence block (fail closed).
   const loss = (got: bigint, expected: bigint) => (expected > 0n ? 1 - Number(got) / Number(expected) : 1);
   const taxed = (tax: number, when: string) => {
     const text = tax >= 1 ? `tax not measurable ${when} (pool quote failed)` : `${Math.round(tax * 100)} % tax ${when}`;
@@ -473,8 +473,8 @@ function sideFindings(r: Record<string, Result>, p: string, stop: boolean): Find
   return findings;
 }
 
-/** Jugement pur : ne depend que des libelles des appels et de leurs resultats, donc rejouable
- *  par n'importe qui a partir d'une preuve (voir app/replay.ts). The guard side's findings that the
+/** Pure judgment: depends only on the call labels and their results, hence replayable
+ *  by anyone from a proof (see app/replay.ts). The guard side's findings that the
  *  probe buyer does not share are reported as "guard address only, not listed: ...". */
 export function judge(labels: string[], results: Result[], facts: Facts): { verdict: Verdict; reasons: string; list_target: boolean } {
   const r = byLabel(labels, results);
@@ -496,8 +496,8 @@ export function judge(labels: string[], results: Result[], facts: Facts): { verd
   return { verdict, reasons: reasons.slice(0, 280), list_target };
 }
 
-/** Devis poste avec le verdict : jetons recus par l'achat simule de 0,01 ETH (0 sans achat), tire de
- *  la reponse seule, donc rejouable (voir app/replay.ts). */
+/** Quote posted with the verdict: tokens received by the simulated buy of 0.01 ETH (0 without a buy), taken from
+ *  the response alone, hence replayable (see app/replay.ts). */
 export function quoteOf(labels: string[], results: Result[]): bigint {
   const { amount } = buyStage(byLabel(labels, results));
   return amount > 0n ? amount : 0n;
@@ -591,8 +591,8 @@ export async function checkExit(url: string, token: Address, guard: Address, amo
   return { verdict, reasons, evidence, request: sim.request, response: sim.results };
 }
 
-/** Fichier proofs/<id>.json : `evidence` y est la chaine exacte postee a post_verdict, dont le
- *  contrat stocke le sha256 ; app/replay.ts la relit telle quelle. */
+/** File proofs/<id>.json: `evidence` is the exact string posted to post_verdict, whose
+ *  sha256 the contract stores; app/replay.ts rereads it as is. */
 export type ProofFile = Omit<Report, "evidence" | "list_target"> & { id: number; target: string; evidence: string };
 
 export function toProof(id: number, target: string, r: Report | ExitReport): ProofFile {

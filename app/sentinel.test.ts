@@ -1,4 +1,4 @@
-// Decision de la sentinelle sur une demande lue : jamais sauter une demande seulement absente d'un noeud en retard.
+// The sentinel's decision on a request read: never skip a request merely absent from a lagging node.
 import { expect, test } from "bun:test";
 import type { Check } from "./near";
 import { step } from "./sentinel";
@@ -22,17 +22,17 @@ const check = (verdict: Check["verdict"]): Check => ({
   gas_limit: 0,
 });
 
-test("absente sur un noeud en retard sur last_check_id : relue au tour suivant, pas sautee", () => {
+test("absent on a node behind last_check_id: reread on the next round, not skipped", () => {
   expect(step(null, 99, 100)).toBe("retry");
 });
-test("absente au bloc de last_check_id ou apres : effacee par refund_check, sautee", () => {
+test("absent at last_check_id's block or after: erased by refund_check, skipped", () => {
   expect(step(null, 100, 100)).toBe("skip");
   expect(step(null, 101, 100)).toBe("skip");
 });
-test("sans verdict : jugee, quel que soit le noeud", () => {
+test("without a verdict: judged, whatever the node", () => {
   expect(step(check(null), 99, 100)).toBe("judge");
   expect(step(check(null), 100, 100)).toBe("judge");
 });
-test("deja jugee : sautee", () => {
+test("already judged: skipped", () => {
   for (const v of ["allow", "warn", "block"] as const) expect(step(check(v), 100, 100)).toBe("skip");
 });

@@ -1,5 +1,5 @@
-// Verification hors chaine de la transaction signee par NEAR, sans reseau. Memes vecteurs que les
-// tests Rust de src/lib.rs : viem les produit, le contrat produit les memes octets.
+// Off-chain verification of the transaction signed by NEAR, no network. Same vectors as the
+// Rust tests of src/lib.rs: viem produces them, the contract produces the same bytes.
 import { expect, test } from "bun:test";
 import { createPublicClient, encodeFunctionData, http, keccak256, parseAbi, serializeTransaction, type Address } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
@@ -8,7 +8,7 @@ import { ROUTER, WETH } from "./verifier";
 
 const signer = privateKeyToAccount("0x0000000000000000000000000000000000000000000000000000000000000001");
 const intruder = privateKeyToAccount("0x0000000000000000000000000000000000000000000000000000000000000002");
-const ADDR = signer.address; // tient lieu d'adresse derivee de la garde
+const ADDR = signer.address; // stands in for the guard's derived address
 const TARGET = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
 const OTHER = "0x000000000000000000000000000000000000dEaD";
 const HASH0 = "0x77f64e70df6935239916ccdd2ab75716323a4429d486e44e45d33123fafabce2";
@@ -19,7 +19,7 @@ const swap = parseAbi([
   "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256) payable",
 ]);
 
-/** Le swap des tests Rust (nonce 0, 1e13 wei, minimum 12345, echeance 600 s), champs modifiables. */
+/** The swap of the Rust tests (nonce 0, 1e13 wei, minimum 12345, deadline 600 s), fields overridable. */
 function tx(o: { to?: Address; token?: Address; recipient?: Address; chainId?: number } = {}) {
   const data = encodeFunctionData({ abi: swap, args: [12_345n, [WETH, o.token ?? TARGET], o.recipient ?? ADDR, 600n] });
   return {
@@ -36,12 +36,12 @@ function tx(o: { to?: Address; token?: Address; recipient?: Address; chainId?: n
   } as const;
 }
 
-test("viem produit les octets que le contrat fait signer puis assemble", async () => {
+test("viem produces the bytes the contract has signed then assembles", async () => {
   expect(keccak256(serializeTransaction(tx()))).toBe(HASH0);
   expect(await signer.signTransaction(tx())).toBe(RAW0);
 });
 
-test("la transaction du contrat se decode vers le routeur, la cible et l'adresse derivee", async () => {
+test("the contract's transaction decodes to the router, the target and the derived address", async () => {
   expect(await verifyBuy(RAW0, TARGET, ADDR)).toMatchObject({
     nonce: 0,
     value: 10_000_000_000_000n,
@@ -51,7 +51,7 @@ test("la transaction du contrat se decode vers le routeur, la cible et l'adresse
   });
 });
 
-test("refus : autre routeur, autre jeton, autre destinataire, autre signataire, autre chaine", async () => {
+test("refused: other router, other token, other recipient, other signer, other chain", async () => {
   await expect(verifyBuy(await signer.signTransaction(tx({ to: OTHER })), TARGET, ADDR)).rejects.toThrow("router");
   await expect(verifyBuy(RAW0, OTHER, ADDR)).rejects.toThrow("path");
   await expect(verifyBuy(await signer.signTransaction(tx({ recipient: OTHER })), TARGET, ADDR)).rejects.toThrow("recipient");
