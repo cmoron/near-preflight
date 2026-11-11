@@ -1,0 +1,9 @@
+{
+  "name": "goblin-near",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "near-api-js": "^7.5.2",
+    "viem": "^2.57.18"
+  }
+}

@@ -261,7 +261,7 @@ impl Guard {
         );
         self.checks.remove(&id);
         self.escrow -= price;
-        let credit = self.credit_of(&who);
+        let credit = self.credit_of(&who).0;
         self.credits.insert(who.clone(), credit + price);
         emit(
             "check_refunded",
@@ -277,7 +277,7 @@ impl Guard {
     /// Rembourse a l'appelant tout son credit inutilise (le stockage retenu a l'ouverture reste acquis).
     pub fn refund_credit(&mut self) -> Promise {
         let who = env::predecessor_account_id();
-        let credit = self.credit_of(&who);
+        let credit = self.credit_of(&who).0;
         require!(credit > 0, "aucun credit a rembourser");
         self.credits.insert(who.clone(), 0);
         Promise::new(who).transfer(NearToken::from_yoctonear(credit))
@@ -291,19 +291,25 @@ impl Guard {
         Promise::new(self.owner.clone()).transfer(NearToken::from_yoctonear(amount.0))
     }
 
+    /// Id de la derniere demande (0 si aucune) : la sentinelle lit jusque-la.
+    #[must_use]
+    pub fn last_check_id(&self) -> u64 {
+        self.next_id
+    }
+
     #[must_use]
     pub fn fees(&self) -> U128 {
         U128(self.fees)
     }
 
     #[must_use]
-    pub fn credit_of(&self, account: &AccountId) -> u128 {
-        self.credits.get(account).copied().unwrap_or(0)
+    pub fn credit_of(&self, account: &AccountId) -> U128 {
+        U128(self.credits.get(account).copied().unwrap_or(0))
     }
 
     #[must_use]
-    pub fn budget_left(&self, account: &AccountId) -> u128 {
-        self.budgets.get(account).map_or(0, |b| b.remaining)
+    pub fn budget_left(&self, account: &AccountId) -> U128 {
+        U128(self.budgets.get(account).map_or(0, |b| b.remaining))
     }
 
     /// Debite `amount` du budget arme (present, non echu, suffisant) et du credit de `who`.
@@ -313,7 +319,7 @@ impl Guard {
         };
         require!(env::block_timestamp() < budget.expires_ns, "budget expire");
         require!(amount <= budget.remaining, "budget depasse");
-        let credit = self.credit_of(who);
+        let credit = self.credit_of(who).0;
         require!(amount <= credit, "credit insuffisant");
         self.credits.insert(who.clone(), credit - amount);
         self.budgets.insert(
@@ -384,22 +390,22 @@ mod tests {
         let mut g = guard();
         ctx("agent.test", ONE_NEAR, 0);
         g.deposit_credit(None);
-        let first = g.credit_of(&id("agent.test"));
+        let first = g.credit_of(&id("agent.test")).0;
         assert!(first > 0 && first < ONE_NEAR); // depot moins le stockage du compte neuf
         ctx("agent.test", 25, 0);
         g.deposit_credit(None);
-        assert_eq!(g.credit_of(&id("agent.test")), first + 25);
-        assert_eq!(g.credit_of(&id("autre.test")), 0);
+        assert_eq!(g.credit_of(&id("agent.test")).0, first + 25);
+        assert_eq!(g.credit_of(&id("autre.test")).0, 0);
     }
 
     #[test]
     fn request_check_debite_le_prix_fixe() {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
-        let before = g.credit_of(&id("agent.test"));
+        let before = g.credit_of(&id("agent.test")).0;
         ctx("agent.test", 0, 500);
         assert_eq!(g.request_check(TARGET.into()), 1);
-        assert_eq!(g.credit_of(&id("agent.test")), before - PRICE);
-        assert_eq!(g.budget_left(&id("agent.test")), 90 * U);
+        assert_eq!(g.credit_of(&id("agent.test")).0, before - PRICE);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 90 * U);
     }
 
     #[test]
@@ -467,7 +473,7 @@ mod tests {
     fn cible_invalide_refusee_sans_debit() {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("agent.test", 0, 500);
-        let before = g.credit_of(&id("agent.test"));
+        let before = g.credit_of(&id("agent.test")).0;
         let bad = [
             "0xabc",
             "dAC17F958D2ee523a2206206994597C13D831ec7ab",
@@ -482,7 +488,7 @@ mod tests {
             }));
             assert!(r.is_err(), "doit refuser {t:?}");
         }
-        assert_eq!(g.credit_of(&id("agent.test")), before);
+        assert_eq!(g.credit_of(&id("agent.test")).0, before);
     }
 
     // 2. initialiseur reserve au compte du contrat
@@ -535,10 +541,10 @@ mod tests {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("agent.test", 0, 500);
         g.request_check(TARGET.into());
-        let left = g.credit_of(&id("agent.test"));
+        let left = g.credit_of(&id("agent.test")).0;
         assert!(left > 0);
         let _ = g.refund_credit();
-        assert_eq!(g.credit_of(&id("agent.test")), 0);
+        assert_eq!(g.credit_of(&id("agent.test")).0, 0);
         assert_eq!(g.fees(), U128(0)); // le prix de la demande reste sous sequestre
     }
 
@@ -610,10 +616,10 @@ mod tests {
     #[test]
     fn achat_autorise_debite_et_journalise_la_cible() {
         let (mut g, check) = judged(Verdict::Allow);
-        let credit = g.credit_of(&id("agent.test"));
+        let credit = g.credit_of(&id("agent.test")).0;
         let _ = g.spend(check, id("shop.test"), U128(30 * U));
-        assert_eq!(g.credit_of(&id("agent.test")), credit - 30 * U);
-        assert_eq!(g.budget_left(&id("agent.test")), 100 * U - PRICE - 30 * U);
+        assert_eq!(g.credit_of(&id("agent.test")).0, credit - 30 * U);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 100 * U - PRICE - 30 * U);
         let v = last_event();
         assert_eq!(v["event"], "spent");
         assert_eq!(v["data"][0]["target"], TARGET);
@@ -696,9 +702,9 @@ mod tests {
     #[test]
     fn le_proprietaire_credite_l_agent() {
         let g = funded(ONE_NEAR, 100 * U, 1);
-        let credit = g.credit_of(&id("agent.test"));
+        let credit = g.credit_of(&id("agent.test")).0;
         assert!(credit > 0 && credit < ONE_NEAR);
-        assert_eq!(g.credit_of(&id("owner.test")), 0);
+        assert_eq!(g.credit_of(&id("owner.test")).0, 0);
     }
 
     // 8. armement en duree, a partir de l'heure du bloc
@@ -746,11 +752,11 @@ mod tests {
     #[test]
     fn prix_rembourse_sans_verdict_apres_le_delai() {
         let (mut g, check) = pending();
-        let credit = g.credit_of(&id("agent.test"));
+        let credit = g.credit_of(&id("agent.test")).0;
         ctx("agent.test", 0, VERDICT_TIMEOUT_NS);
         g.refund_check(check);
-        assert_eq!(g.credit_of(&id("agent.test")), credit + PRICE);
-        assert_eq!(g.budget_left(&id("agent.test")), 100 * U - PRICE); // le budget ne revient pas
+        assert_eq!(g.credit_of(&id("agent.test")).0, credit + PRICE);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 100 * U - PRICE); // le budget ne revient pas
         assert_eq!(g.fees(), U128(0));
         assert!(g.get_check(check).is_none(), "stockage libere");
     }
@@ -832,6 +838,17 @@ mod tests {
         g.arm(id("agent.test"), U128(100 * U), 1000);
         ctx("agent.test", 0, VERDICT_TIMEOUT_NS);
         g.refund_check(check);
-        assert_eq!(g.budget_left(&id("agent.test")), 100 * U);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 100 * U);
+    }
+
+    // 13. la sentinelle sait jusqu'ou lire, meme si une demande remboursee a ete effacee
+    #[test]
+    fn last_check_id_suit_les_demandes() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1);
+        assert_eq!(g.last_check_id(), 0);
+        ctx("agent.test", 0, 500);
+        g.request_check(TARGET.into());
+        g.request_check(TARGET.into());
+        assert_eq!(g.last_check_id(), 2);
     }
 }
