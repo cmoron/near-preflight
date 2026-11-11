@@ -1,5 +1,7 @@
 //! Garde de depense : l'agent signe avec une cle function-call limitee a ce
 //! contrat ; le contrat tient son credit prepaye et son budget arme.
+//! Trois roles : l'humain (owner) fixe les bornes et garde l'arret d'urgence, l'armeur arme
+//! l'agent dans ces bornes, l'agent depense. Chaque armement est journalise.
 use near_sdk::json_types::{U128, U64};
 use near_sdk::store::{LookupMap, LookupSet};
 use near_sdk::{env, near, require, AccountId, NearToken, PanicOnDefault, Promise};
@@ -18,6 +20,17 @@ pub enum Verdict {
     Allow,
     Warn,
     Block,
+}
+
+/// Bornes fixees par l'humain pour tout armement. Nulles a l'init : aucun armement possible
+/// tant que l'humain ne les a pas fixees.
+#[near(serializers = [borsh, json])]
+#[derive(Default)]
+pub struct Bounds {
+    pub max_budget: U128,
+    pub max_duration_s: u64,
+    /// Cumul des budgets armes pour un agent sur 7 jours glissants.
+    pub max_7d: U128,
 }
 
 /// Une demande de verdict : la cible EVM, le verdict de la sentinelle et ses raisons.
@@ -45,15 +58,29 @@ const CHECK_STORAGE_BYTES: u128 = 600;
 /// un `allow` ancien ne paie donc plus ; l'agent redemande un controle.
 pub const VERDICT_TTL_NS: u64 = 120 * 1_000_000_000;
 pub const VERDICT_TIMEOUT_NS: u64 = 300 * 1_000_000_000;
+/// Fenetre du plafond glissant : un armement compte tant qu'il a moins de 7 jours.
+const WEEK_NS: u64 = 7 * 24 * 3600 * 1_000_000_000;
+/// Taille du journal glissant d'un agent. Une entree (heure du bloc u64, budget u128) occupe
+/// 24 o payes par le contrat, pas par l'armeur : 32 entrees = 768 o (~0,008 NEAR) par agent au
+/// plus, et un parcours de 32 elements par armement. Au-dela, l'armement est refuse : oublier une
+/// entree encore dans la fenetre sous-compterait le cumul, et ne rien borner laisserait l'armeur
+/// faire grossir le stockage du contrat sans fin (un budget de 1 yocto suffit a ajouter une entree).
+const MAX_ARMINGS_7D: usize = 32;
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Guard {
     owner: AccountId,
+    /// Arme l'agent dans les bornes de l'humain ; ne fixe pas ces bornes.
+    armer: AccountId,
     sentinel: AccountId,
+    bounds: Bounds,
     price: u128,
     credits: LookupMap<AccountId, u128>,
     budgets: LookupMap<AccountId, Budget>,
+    /// Armements de moins de 7 jours par agent : (heure du bloc, budget arme). Survit a `disarm`,
+    /// sinon desarmer puis rearmer remettrait le plafond a zero.
+    armings: LookupMap<AccountId, Vec<(u64, u128)>>,
     checks: LookupMap<u64, Check>,
     /// Destinataires permis, fixes par le proprietaire.
     recipients: LookupSet<AccountId>,
@@ -67,6 +94,11 @@ pub struct Guard {
 /// Adresse EVM stricte : `0x` + 40 hexadecimaux (42 caracteres, pas un de plus).
 fn is_evm_address(s: &str) -> bool {
     s.len() == 42 && s.starts_with("0x") && s.bytes().skip(2).all(|b| b.is_ascii_hexdigit())
+}
+
+/// Vrai tant qu'un armement fait a `armed_ns` reste dans la fenetre de 7 jours (heure du bloc).
+fn in_window(armed_ns: u64) -> bool {
+    env::block_timestamp().saturating_sub(armed_ns) < WEEK_NS
 }
 
 /// Evenement NEP-297 : `EVENT_JSON:` suivi d'un objet serialise (donc echappe).
@@ -84,9 +116,11 @@ fn emit(event: &str, data: &near_sdk::serde_json::Value) {
 impl Guard {
     /// A appeler dans la transaction de deploiement (`with-init-call`) : l'appelant
     /// est alors le compte du contrat, et personne ne peut reinitialiser apres.
+    /// `armer` peut etre `owner` : un humain seul tient alors les deux roles, au prix de la
+    /// separation (celui qui fixe les bornes arme aussi), mais les bornes s'appliquent toujours.
     #[init]
     #[must_use]
-    pub fn new(owner: AccountId, sentinel: AccountId, price: U128) -> Self {
+    pub fn new(owner: AccountId, armer: AccountId, sentinel: AccountId, price: U128) -> Self {
         require!(
             env::predecessor_account_id() == env::current_account_id(),
             "init reserved to the contract account"
@@ -97,10 +131,13 @@ impl Guard {
         );
         Self {
             owner,
+            armer,
             sentinel,
+            bounds: Bounds::default(),
             price: price.0,
             credits: LookupMap::new(b"c"),
             budgets: LookupMap::new(b"b"),
+            armings: LookupMap::new(b"a"),
             checks: LookupMap::new(b"k"),
             recipients: LookupSet::new(b"r"),
             fees: 0,
@@ -131,11 +168,65 @@ impl Guard {
             .insert(who, previous.unwrap_or(0) + amount - storage_cost);
     }
 
-    /// Reserve au proprietaire : arme `budget` pour `agent` pendant `duration_s` secondes.
-    pub fn arm(&mut self, agent: AccountId, budget: U128, duration_s: u64) {
+    /// Reserve au proprietaire : bornes de tout armement a venir. Un budget deja arme n'est
+    /// pas reduit : pour cela, `disarm`.
+    pub fn set_bounds(&mut self, max_budget: U128, max_duration_s: u64, max_7d: U128) {
         self.assert_owner();
-        let expires_ns =
-            env::block_timestamp().saturating_add(duration_s.saturating_mul(1_000_000_000));
+        self.bounds = Bounds {
+            max_budget,
+            max_duration_s,
+            max_7d,
+        };
+    }
+
+    #[must_use]
+    pub fn bounds(&self) -> &Bounds {
+        &self.bounds
+    }
+
+    /// Reserve a l'armeur : arme `budget` pour `agent` pendant `duration_s` secondes, dans les
+    /// bornes de l'humain et si le credit de l'agent vaut exactement `expected_credit` (controle
+    /// d'integrite : l'armeur arme l'etat qu'il a lu). Rearmer remplace le budget courant.
+    pub fn arm(&mut self, agent: AccountId, budget: U128, duration_s: u64, expected_credit: U128) {
+        require!(env::predecessor_account_id() == self.armer, "armer only");
+        require!(agent != self.armer, "the armer cannot arm itself");
+        require!(budget.0 > 0, "zero budget");
+        require!(
+            budget.0 <= self.bounds.max_budget.0,
+            "budget above the human's bound"
+        );
+        require!(
+            duration_s <= self.bounds.max_duration_s,
+            "duration above the human's bound"
+        );
+        // Un agent jamais credite n'a pas d'entree : refuse meme avec `expected_credit` nul,
+        // sinon l'armeur cree budget et journal pour n'importe quel compte, aux frais du contrat.
+        require!(
+            self.credits.get(&agent).copied() == Some(expected_credit.0),
+            "integrity check failed: unexpected credit"
+        );
+        // Le budget arme compte en entier, meme non depense ; rearmer s'ajoute au cumul.
+        let now = env::block_timestamp();
+        let mut log = self.armings.get(&agent).cloned().unwrap_or_default();
+        log.retain(|&(armed_ns, _)| in_window(armed_ns));
+        let armed: u128 = log.iter().map(|&(_, b)| b).sum();
+        let Some(armed_7d) = armed
+            .checked_add(budget.0)
+            .filter(|&total| total <= self.bounds.max_7d.0)
+        else {
+            env::panic_str("7-day cap exceeded")
+        };
+        require!(log.len() < MAX_ARMINGS_7D, "too many armings in 7 days");
+        log.push((now, budget.0));
+        self.armings.insert(agent.clone(), log);
+        let expires_ns = now.saturating_add(duration_s.saturating_mul(1_000_000_000));
+        emit(
+            "armed",
+            &near_sdk::serde_json::json!({
+                "agent": agent, "armer": self.armer, "budget": budget,
+                "expires_ns": U64(expires_ns), "armed_7d": U128(armed_7d),
+            }),
+        );
         self.budgets.insert(
             agent,
             Budget {
@@ -145,11 +236,17 @@ impl Guard {
         );
     }
 
-    /// Arret d'urgence, reserve au proprietaire : retire le budget arme de `agent`.
+    /// Retire le budget arme de `agent` : arret d'urgence du proprietaire, ou arret anormal
+    /// constate par l'armeur.
     #[allow(clippy::needless_pass_by_value)] // l'ABI JSON de near-sdk exige un type possede
     pub fn disarm(&mut self, agent: AccountId) {
-        self.assert_owner();
+        let by = env::predecessor_account_id();
+        require!(by == self.owner || by == self.armer, "owner or armer only");
         self.budgets.remove(&agent);
+        emit(
+            "disarmed",
+            &near_sdk::serde_json::json!({ "agent": agent, "by": by }),
+        );
     }
 
     /// Debite le prix fixe du credit de l'appelant et du budget arme ; renvoie l'id de la demande.
@@ -318,6 +415,17 @@ impl Guard {
         U128(self.credits.get(account).copied().unwrap_or(0))
     }
 
+    /// Cumul des budgets armes pour `account` encore dans la fenetre de 7 jours, a l'heure du bloc.
+    #[must_use]
+    pub fn armed_7d(&self, account: &AccountId) -> U128 {
+        U128(self.armings.get(account).map_or(0, |log| {
+            log.iter()
+                .filter(|&&(armed_ns, _)| in_window(armed_ns))
+                .map(|&(_, b)| b)
+                .sum()
+        }))
+    }
+
     #[must_use]
     pub fn budget_left(&self, account: &AccountId) -> U128 {
         U128(self.budgets.get(account).map_or(0, |b| b.remaining))
@@ -375,7 +483,12 @@ mod tests {
 
     fn guard() -> Guard {
         ctx("guard.test", 0, 0);
-        Guard::new(id("owner.test"), id("sentinel.test"), U128(PRICE))
+        Guard::new(
+            id("owner.test"),
+            id("armer.test"),
+            id("sentinel.test"),
+            U128(PRICE),
+        )
     }
 
     fn last_event() -> near_sdk::serde_json::Value {
@@ -384,13 +497,29 @@ mod tests {
         near_sdk::serde_json::from_str(json).unwrap()
     }
 
-    /// Credit depose par le proprietaire pour l'agent, budget arme pour `secs` secondes.
-    fn funded(credit: u128, budget: u128, secs: u64) -> Guard {
+    /// L'humain fixe les bornes puis depose `credit` pour l'agent ; rien n'est arme.
+    fn credited(credit: u128, max_budget: u128, max_duration_s: u64, max_7d: u128) -> Guard {
         let mut g = guard();
+        ctx("owner.test", 0, 0);
+        g.set_bounds(U128(max_budget), max_duration_s, U128(max_7d));
         ctx("owner.test", credit, 0);
         g.deposit_credit(Some(id("agent.test")));
-        g.arm(id("agent.test"), U128(budget), secs);
         g
+    }
+
+    /// Credit depose par le proprietaire pour l'agent, budget arme par l'armeur pour `secs`
+    /// secondes, dans des bornes larges (100 U par armement, 1000 s, 1000 U sur 7 jours).
+    fn funded(credit: u128, budget: u128, secs: u64) -> Guard {
+        let mut g = credited(credit, 100 * U, 1000, 1000 * U);
+        arm_at(&mut g, budget, secs, 0);
+        g
+    }
+
+    /// L'armeur arme `agent.test` a l'heure de bloc `now_ns`, en attendant le credit qu'il lit.
+    fn arm_at(g: &mut Guard, budget: u128, secs: u64, now_ns: u64) {
+        ctx("armer.test", 0, now_ns);
+        let credit = g.credit_of(&id("agent.test"));
+        g.arm(id("agent.test"), U128(budget), secs, credit);
     }
 
     #[test]
@@ -422,8 +551,7 @@ mod tests {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("agent.test", 0, 0);
         let _ = g.refund_credit(); // credit a zero
-        ctx("owner.test", 0, 0);
-        g.arm(id("agent.test"), U128(100 * U), 1);
+        arm_at(&mut g, 100 * U, 1, 0);
         ctx("agent.test", 0, 500);
         g.request_check(TARGET.into());
     }
@@ -455,11 +583,232 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "owner only")]
-    fn seul_le_proprietaire_arme() {
+    #[should_panic(expected = "armer only")]
+    fn l_agent_n_arme_pas() {
         let mut g = guard();
         ctx("agent.test", 0, 0);
-        g.arm(id("agent.test"), U128(100 * U), 1);
+        g.arm(id("agent.test"), U128(100 * U), 1, U128(0));
+    }
+
+    // bornes de l'humain : nulles a l'init, fixees par le proprietaire seul
+    #[test]
+    fn bornes_nulles_a_l_init_puis_fixees_par_le_proprietaire() {
+        let mut g = guard();
+        let b = g.bounds();
+        assert_eq!(
+            (b.max_budget, b.max_duration_s, b.max_7d),
+            (U128(0), 0, U128(0))
+        );
+        ctx("owner.test", 0, 0);
+        g.set_bounds(U128(50 * U), 60, U128(200 * U));
+        let b = g.bounds();
+        assert_eq!(
+            (b.max_budget, b.max_duration_s, b.max_7d),
+            (U128(50 * U), 60, U128(200 * U))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn l_armeur_ne_fixe_pas_les_bornes() {
+        let mut g = guard();
+        ctx("armer.test", 0, 0);
+        g.set_bounds(U128(ONE_NEAR), 1000, U128(ONE_NEAR));
+    }
+
+    #[test]
+    #[should_panic(expected = "budget above the human's bound")]
+    fn aucun_armement_sans_bornes() {
+        let mut g = guard();
+        ctx("owner.test", ONE_NEAR, 0);
+        g.deposit_credit(Some(id("agent.test")));
+        arm_at(&mut g, 1, 1, 0);
+    }
+
+    // sinon budget 0 et duree 0 passeraient les bornes nulles de l'init
+    #[test]
+    #[should_panic(expected = "zero budget")]
+    fn budget_nul_refuse() {
+        let mut g = guard();
+        ctx("owner.test", ONE_NEAR, 0);
+        g.deposit_credit(Some(id("agent.test")));
+        arm_at(&mut g, 0, 0, 0);
+    }
+
+    #[test]
+    fn budget_et_duree_acceptes_a_la_borne() {
+        let mut g = credited(ONE_NEAR, 50 * U, 60, 1000 * U);
+        arm_at(&mut g, 50 * U, 60, 0);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 50 * U);
+    }
+
+    #[test]
+    #[should_panic(expected = "budget above the human's bound")]
+    fn budget_au_dela_de_la_borne_refuse() {
+        let mut g = credited(ONE_NEAR, 50 * U, 60, 1000 * U);
+        arm_at(&mut g, 50 * U + 1, 60, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "duration above the human's bound")]
+    fn duree_au_dela_de_la_borne_refusee() {
+        let mut g = credited(ONE_NEAR, 50 * U, 60, 1000 * U);
+        arm_at(&mut g, 50 * U, 61, 0);
+    }
+
+    // controle d'integrite : l'armeur arme sur l'etat qu'il a lu, pas sur un autre
+    #[test]
+    #[should_panic(expected = "integrity check failed: unexpected credit")]
+    fn armement_refuse_si_le_credit_differe() {
+        let mut g = credited(ONE_NEAR, 50 * U, 60, 1000 * U);
+        ctx("armer.test", 0, 0);
+        let credit = g.credit_of(&id("agent.test")).0;
+        g.arm(id("agent.test"), U128(50 * U), 60, U128(credit + 1));
+    }
+
+    // sinon l'armeur cree budget et journal pour n'importe quel compte, aux frais du contrat
+    #[test]
+    #[should_panic(expected = "integrity check failed: unexpected credit")]
+    fn armement_refuse_pour_un_agent_jamais_credite() {
+        let mut g = guard();
+        ctx("owner.test", 0, 0);
+        g.set_bounds(U128(50 * U), 60, U128(1000 * U));
+        arm_at(&mut g, 50 * U, 60, 0);
+    }
+
+    // plafond glissant de 7 jours : le budget arme entier compte, meme non depense
+    #[test]
+    fn le_plafond_de_7_jours_admet_le_cumul_exact() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 100 * U);
+        assert_eq!(g.armed_7d(&id("agent.test")), U128(0));
+        arm_at(&mut g, 60 * U, 1000, 0);
+        arm_at(&mut g, 40 * U, 1000, SEC);
+        assert_eq!(g.armed_7d(&id("agent.test")), U128(100 * U));
+    }
+
+    #[test]
+    #[should_panic(expected = "7-day cap exceeded")]
+    fn le_plafond_de_7_jours_cumule_les_budgets_armes() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 100 * U);
+        arm_at(&mut g, 60 * U, 1000, 0);
+        arm_at(&mut g, 41 * U, 1000, SEC);
+    }
+
+    #[test]
+    #[should_panic(expected = "7-day cap exceeded")]
+    fn un_armement_compte_jusqu_a_7_jours() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 100 * U);
+        arm_at(&mut g, 60 * U, 1000, SEC);
+        arm_at(&mut g, 60 * U, 1000, SEC + WEEK_NS - 1);
+    }
+
+    #[test]
+    fn un_armement_sort_de_la_fenetre_apres_7_jours() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 100 * U);
+        arm_at(&mut g, 60 * U, 1000, SEC);
+        ctx("agent.test", 0, SEC + WEEK_NS);
+        assert_eq!(g.armed_7d(&id("agent.test")), U128(0)); // la vue suit l'heure du bloc
+        arm_at(&mut g, 60 * U, 1000, SEC + WEEK_NS);
+        assert_eq!(g.armed_7d(&id("agent.test")), U128(60 * U));
+    }
+
+    // sinon l'armeur contournerait le plafond en desarmant puis rearmant
+    #[test]
+    #[should_panic(expected = "7-day cap exceeded")]
+    fn le_desarmement_ne_remet_pas_le_plafond_a_zero() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 100 * U);
+        arm_at(&mut g, 60 * U, 1000, 0);
+        g.disarm(id("agent.test"));
+        arm_at(&mut g, 60 * U, 1000, SEC);
+    }
+
+    #[test]
+    fn rearmer_remplace_le_budget_courant() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        ctx("agent.test", 0, 0);
+        g.request_check(TARGET.into());
+        arm_at(&mut g, 30 * U, 1000, SEC);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 30 * U);
+        assert_eq!(g.armed_7d(&id("agent.test")), U128(130 * U));
+    }
+
+    #[test]
+    fn l_armement_est_journalise() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 1000 * U);
+        arm_at(&mut g, 60 * U, 1000, 0);
+        arm_at(&mut g, 30 * U, 10, 5 * SEC);
+        let v = last_event();
+        assert_eq!(v["event"], "armed");
+        let d = &v["data"][0];
+        assert_eq!(d["agent"], "agent.test");
+        assert_eq!(d["armer"], "armer.test");
+        assert_eq!(d["budget"], (30 * U).to_string());
+        assert_eq!(d["expires_ns"], (15 * SEC).to_string());
+        assert_eq!(d["armed_7d"], (90 * U).to_string());
+    }
+
+    // stockage paye par le contrat : nombre d'armements sur 7 jours borne, refus au-dela
+    #[test]
+    fn le_journal_est_borne_puis_purge_apres_7_jours() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 1000 * U);
+        for i in 0..MAX_ARMINGS_7D {
+            arm_at(&mut g, 1, 1000, u64::try_from(i).unwrap() * SEC);
+        }
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            arm_at(&mut g, 1, 1000, 100 * SEC);
+        }));
+        assert!(r.is_err(), "armement au-dela du journal refuse");
+        arm_at(&mut g, 1, 1000, 100 * SEC + WEEK_NS); // les anciennes entrees sont purgees
+        assert_eq!(g.armed_7d(&id("agent.test")), U128(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "too many armings in 7 days")]
+    fn armement_refuse_journal_plein() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 1000 * U);
+        for _ in 0..=MAX_ARMINGS_7D {
+            arm_at(&mut g, 1, 1000, 0);
+        }
+    }
+
+    // un humain seul peut tenir les deux roles ; les bornes s'appliquent toujours
+    #[test]
+    fn un_humain_seul_peut_etre_proprietaire_et_armeur() {
+        ctx("guard.test", 0, 0);
+        let mut g = Guard::new(
+            id("owner.test"),
+            id("owner.test"),
+            id("sentinel.test"),
+            U128(PRICE),
+        );
+        ctx("owner.test", 0, 0);
+        g.set_bounds(U128(50 * U), 60, U128(100 * U));
+        ctx("owner.test", ONE_NEAR, 0);
+        g.deposit_credit(Some(id("agent.test")));
+        ctx("owner.test", 0, 0);
+        let credit = g.credit_of(&id("agent.test"));
+        g.arm(id("agent.test"), U128(50 * U), 60, credit);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 50 * U);
+    }
+
+    // l'agent qui paie n'est jamais celui qui arme
+    #[test]
+    #[should_panic(expected = "the armer cannot arm itself")]
+    fn l_armeur_ne_s_arme_pas_lui_meme() {
+        let mut g = credited(ONE_NEAR, 50 * U, 60, 100 * U);
+        ctx("owner.test", ONE_NEAR, 0);
+        g.deposit_credit(Some(id("armer.test")));
+        ctx("armer.test", 0, 0);
+        let credit = g.credit_of(&id("armer.test"));
+        g.arm(id("armer.test"), U128(50 * U), 60, credit);
+    }
+
+    #[test]
+    #[should_panic(expected = "armer only")]
+    fn le_proprietaire_n_arme_plus() {
+        let mut g = guard();
+        ctx("owner.test", 0, 0);
+        g.arm(id("agent.test"), U128(100 * U), 1, U128(0));
     }
 
     // 1. journal : evenement JSON structure, cible validee
@@ -504,7 +853,12 @@ mod tests {
     #[should_panic(expected = "init reserved to the contract account")]
     fn new_refuse_un_tiers() {
         ctx("intrus.test", 0, 0);
-        let _ = Guard::new(id("intrus.test"), id("intrus.test"), U128(PRICE));
+        let _ = Guard::new(
+            id("intrus.test"),
+            id("intrus.test"),
+            id("intrus.test"),
+            U128(PRICE),
+        );
     }
 
     // 3. frais perçus et crédit récupérables
@@ -719,8 +1073,7 @@ mod tests {
     #[test]
     fn l_armement_court_a_partir_du_bloc() {
         let mut g = funded(ONE_NEAR, 100 * U, 0);
-        ctx("owner.test", 0, 10 * SEC);
-        g.arm(id("agent.test"), U128(100 * U), 60);
+        arm_at(&mut g, 100 * U, 60, 10 * SEC);
         ctx("agent.test", 0, 69 * SEC);
         g.request_check(TARGET.into());
         ctx("agent.test", 0, 70 * SEC);
@@ -742,11 +1095,33 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "owner only")]
-    fn seul_le_proprietaire_desarme() {
+    #[should_panic(expected = "owner or armer only")]
+    fn l_agent_ne_desarme_pas() {
         let mut g = funded(ONE_NEAR, 100 * U, 1);
         ctx("agent.test", 0, 0);
         g.disarm(id("agent.test"));
+    }
+
+    // arret anormal : l'armeur desarme aussi
+    #[test]
+    #[should_panic(expected = "budget not armed")]
+    fn l_armeur_desarme_aussi() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1);
+        ctx("armer.test", 0, 0);
+        g.disarm(id("agent.test"));
+        ctx("agent.test", 0, 500);
+        g.request_check(TARGET.into());
+    }
+
+    #[test]
+    fn le_desarmement_est_journalise() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1);
+        ctx("owner.test", 0, 0);
+        g.disarm(id("agent.test"));
+        let v = last_event();
+        assert_eq!(v["event"], "disarmed");
+        assert_eq!(v["data"][0]["agent"], "agent.test");
+        assert_eq!(v["data"][0]["by"], "owner.test");
     }
 
     // 10. remboursement du prix si la sentinelle ne repond pas dans le delai
@@ -836,14 +1211,18 @@ mod tests {
     #[should_panic(expected = "price below the storage cost of a check")]
     fn le_prix_couvre_le_stockage_d_une_demande() {
         ctx("guard.test", 0, 0);
-        let _ = Guard::new(id("owner.test"), id("sentinel.test"), U128(U));
+        let _ = Guard::new(
+            id("owner.test"),
+            id("armer.test"),
+            id("sentinel.test"),
+            U128(U),
+        );
     }
 
     #[test]
     fn un_remboursement_ne_depasse_pas_le_nouvel_armement() {
         let (mut g, check) = pending();
-        ctx("owner.test", 0, 0);
-        g.arm(id("agent.test"), U128(100 * U), 1000);
+        arm_at(&mut g, 100 * U, 1000, 0);
         ctx("agent.test", 0, VERDICT_TIMEOUT_NS);
         g.refund_check(check);
         assert_eq!(g.budget_left(&id("agent.test")).0, 100 * U);
