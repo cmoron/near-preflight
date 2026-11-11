@@ -82,8 +82,10 @@ export async function rpc<T>(url: string, method: string, params: unknown[]): Pr
   return body.result;
 }
 
-/** Simule des blocs successifs au-dessus de `block` ; renvoie la requete et un resultat par appel. */
-async function simulate(url: string, block: bigint, buyer: Address, blocks: { time: bigint; calls: Call[] }[]) {
+export type Block = { time: bigint; calls: Call[] };
+
+/** Requete eth_simulateV1 complete, telle qu'envoyee et sauvegardee dans la preuve. */
+export function buildRequest(block: bigint, buyer: Address, blocks: Block[]) {
   const request = {
     blockStateCalls: blocks.map((b, i) => ({
       blockOverrides: { time: toHex(b.time) },
@@ -92,11 +94,61 @@ async function simulate(url: string, block: bigint, buyer: Address, blocks: { ti
     })),
     validation: false,
   };
-  const out = await rpc<{ calls: Result[] }[]>(url, "eth_simulateV1", [request, toHex(block)]);
-  return { request: { method: "eth_simulateV1", params: [request, toHex(block)] }, results: out.flatMap((b) => b.calls) };
+  return { method: "eth_simulateV1", params: [request, toHex(block)] };
 }
 
-const ok = (r: Result) => r.status === "0x1";
+/** Simule des blocs successifs au-dessus de `block` ; renvoie la requete et un resultat par appel. */
+async function simulate(url: string, block: bigint, buyer: Address, blocks: Block[]) {
+  const request = buildRequest(block, buyer, blocks);
+  const out = await rpc<{ calls: Result[] }[]>(url, request.method, request.params);
+  return { request, results: out.flatMap((b) => b.calls) };
+}
+
+/** Les blocs a simuler. Sans `st` : l'achat seul (1re simulation). Avec `st` (quantite achetee et
+ *  proprietaire, lus dans la 1re simulation) : la preuve complete en trois blocs, achat + reprises
+ *  sans approbation + approve, vente de la moitie au bloc suivant, vente du reste une heure plus tard.
+ *  Partage avec app/replay.ts, qui reconstruit ainsi la requete attendue et donc les libelles. */
+export function plan(token: Address, buyer: Address, stranger: Address, now: bigint, st?: { amount: bigint; owner: Address | null }): Block[] {
+  const deadline = now + 10_000n;
+  const buyPath = [WETH, token];
+  const sellPath = [token, WETH];
+  const balance = (label: string, of: Address) => call(label, buyer, of, erc20, "balanceOf", [buyer]);
+  const buy = [
+    balance("tokens before buy", token),
+    call("buy quote", buyer, ROUTER, router, "getAmountsOut", [BUY, buyPath]),
+    call("buy 0.01 ETH", buyer, ROUTER, router, "swapExactETHForTokensSupportingFeeOnTransferTokens", [0n, buyPath, buyer, deadline], BUY),
+    balance("tokens after buy", token),
+    call("owner()", buyer, token, erc20, "owner", []),
+  ];
+  if (!st) return [{ time: now, calls: buy }];
+  const { amount, owner } = st;
+  const half = amount / 2n;
+  const rest = amount - half - 2n; // 2 unites peut-etre reprises par les sondes transferFrom
+  const block1 = [
+    ...buy,
+    ...(owner ? [call("transferFrom by owner()", owner, token, erc20, "transferFrom", [buyer, owner, 1n])] : []),
+    call("transferFrom by a stranger", stranger, token, erc20, "transferFrom", [buyer, stranger, 1n]),
+    call("approve router", buyer, token, erc20, "approve", [ROUTER, maxUint256]),
+  ];
+  const block2 = [
+    balance("WETH before sale", WETH),
+    call("sale quote", buyer, ROUTER, router, "getAmountsOut", [half, sellPath]),
+    call("sale in next block", buyer, ROUTER, router, "swapExactTokensForTokensSupportingFeeOnTransferTokens", [half, 0n, sellPath, buyer, deadline]),
+    balance("WETH after sale", WETH),
+  ];
+  const block3 = [
+    call("sale quote +1 h", buyer, ROUTER, router, "getAmountsOut", [rest, sellPath]),
+    call("sale +1 h", buyer, ROUTER, router, "swapExactTokensForTokensSupportingFeeOnTransferTokens", [rest, 0n, sellPath, buyer, deadline + LATER_S]),
+    balance("WETH after sale +1 h", WETH),
+  ];
+  return [
+    { time: now, calls: block1 },
+    { time: now + NEXT_S, calls: block2 },
+    { time: now + LATER_S, calls: block3 },
+  ];
+}
+
+export const ok = (r: Result) => r.status === "0x1";
 const uint = (abi: Abi, fn: string, r: Result) => decodeFunctionResult({ abi, functionName: fn, data: r.returnData } as Parameters<typeof decodeFunctionResult>[0]);
 
 /** Raison d'un revert `Error(string)` (dans `error.data` ou `returnData` selon le noeud). */
@@ -134,56 +186,21 @@ export async function checkToken(url: string, token: Address): Promise<Report> {
     }
   }
   const proof = { chain_id: chainId, block, code_hash: keccak256(code), implementation };
-  const deadline = now + 10_000n;
-  const buyPath = [WETH, token];
-  const sellPath = [token, WETH];
-  const balance = (label: string, of: Address) => call(label, buyer, of, erc20, "balanceOf", [buyer]);
-  const buy = [
-    balance("tokens before buy", token),
-    call("buy quote", buyer, ROUTER, router, "getAmountsOut", [BUY, buyPath]),
-    call("buy 0.01 ETH", buyer, ROUTER, router, "swapExactETHForTokensSupportingFeeOnTransferTokens", [0n, buyPath, buyer, deadline], BUY),
-    balance("tokens after buy", token),
-    call("owner()", buyer, token, erc20, "owner", []),
-  ];
+  const [first1] = plan(token, buyer, stranger, now);
 
   // 1re simulation : quantite achetee et proprietaire, pour construire la seconde.
-  const first = await simulate(url, block, buyer, [{ time: now, calls: buy }]);
-  const buyLabels = buy.map((c) => c.label);
+  const first = await simulate(url, block, buyer, [first1]);
+  const buyLabels = first1.calls.map((c) => c.label);
   const st = buyStage(byLabel(buyLabels, first.results));
   if (st.findings.length) return report(proof, first, buyLabels);
-  const { amount, owner } = st;
 
-  // 2e simulation, la preuve, en trois blocs : achat + reprises sans approbation + approve,
-  // vente de la moitie au bloc suivant, vente du reste une heure plus tard.
-  const half = amount / 2n;
-  const rest = amount - half - 2n; // 2 unites peut-etre reprises par les sondes transferFrom
-  const block1 = [
-    ...buy,
-    ...(owner ? [call("transferFrom by owner()", owner, token, erc20, "transferFrom", [buyer, owner, 1n])] : []),
-    call("transferFrom by a stranger", stranger, token, erc20, "transferFrom", [buyer, stranger, 1n]),
-    call("approve router", buyer, token, erc20, "approve", [ROUTER, maxUint256]),
-  ];
-  const block2 = [
-    balance("WETH before sale", WETH),
-    call("sale quote", buyer, ROUTER, router, "getAmountsOut", [half, sellPath]),
-    call("sale in next block", buyer, ROUTER, router, "swapExactTokensForTokensSupportingFeeOnTransferTokens", [half, 0n, sellPath, buyer, deadline]),
-    balance("WETH after sale", WETH),
-  ];
-  const block3 = [
-    call("sale quote +1 h", buyer, ROUTER, router, "getAmountsOut", [rest, sellPath]),
-    call("sale +1 h", buyer, ROUTER, router, "swapExactTokensForTokensSupportingFeeOnTransferTokens", [rest, 0n, sellPath, buyer, deadline + LATER_S]),
-    balance("WETH after sale +1 h", WETH),
-  ];
-  const sim = await simulate(url, block, buyer, [
-    { time: now, calls: block1 },
-    { time: now + NEXT_S, calls: block2 },
-    { time: now + LATER_S, calls: block3 },
-  ]);
-  return report(proof, sim, [...block1, ...block2, ...block3].map((c) => c.label));
+  const blocks = plan(token, buyer, stranger, now, st);
+  const sim = await simulate(url, block, buyer, blocks);
+  return report(proof, sim, blocks.flatMap((b) => b.calls.map((c) => c.label)));
 }
 
 /** Phase achat : quantite recue, proprietaire, premiers constats. `findings` vide = on peut poursuivre. */
-function buyStage(f: Record<string, Result>) {
+export function buyStage(f: Record<string, Result>) {
   const findings: Finding[] = [];
   if (!ok(f["buy quote"])) findings.push({ level: "warn", text: "no liquidity: no Uniswap V2 WETH pair, sale not verifiable" });
   else if (!ok(f["buy 0.01 ETH"])) findings.push({ level: "block", text: `simulated buy failed: ${revertReason(f["buy 0.01 ETH"])}` });
@@ -234,7 +251,7 @@ export function judge(labels: string[], results: Result[]): { verdict: Verdict; 
   return { verdict, reasons: reasons.slice(0, 280) };
 }
 
-const byLabel = (labels: string[], results: Result[]) => Object.fromEntries(labels.map((l, i) => [l, results[i]]));
+export const byLabel = (labels: string[], results: Result[]) => Object.fromEntries(labels.map((l, i) => [l, results[i]]));
 
 function report(
   proof: { chain_id: number; block: bigint; code_hash: Hex; implementation: Address | null },
