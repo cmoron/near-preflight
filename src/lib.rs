@@ -94,7 +94,8 @@ pub struct Check {
     pub target: String,
     pub requested_ns: U64,
     pub verdict: Option<Verdict>,
-    /// Block time at which the verdict was posted (0 while there is none).
+    /// Block time at which the verdict was set (0 while there is none): the vote that completed the
+    /// quorum or blocked, the call that decided votes already in, or the vote whose exit quote stands.
     pub judged_ns: U64,
     pub reasons: String,
     /// sha256 (lowercase hex) of the `evidence` string received with the verdict, computed by
@@ -130,7 +131,10 @@ pub struct Check {
     /// The sentinels' votes, in the order posted, one per sentinel. `verdict` is set once they decide:
     /// `quorum` identical votes for an `allow` or a `warn`, a single `block` vote or a disagreement
     /// for a `block`. `reasons` and `evidence_sha256` above are those of the vote that decided (the
-    /// first vote's while they agree).
+    /// first vote's while they agree). Only the votes of the current sentinels count: on a buy check
+    /// the next vote drops those of sentinels removed since (their `verdict_posted` events stay). On
+    /// an exit quote, `quote`, `tx_hashes`, `reasons` and `evidence_sha256` are those of the highest
+    /// `allow` posted.
     pub votes: Vec<Vote>,
 }
 
@@ -313,6 +317,10 @@ pub const VERDICT_TIMEOUT_NS: u64 = 300 * 1_000_000_000;
 /// reference block, 4 s after the request, however late its verdict comes (a flooded queue): the 120 s
 /// of `VERDICT_TTL_NS` count from the verdict, this bound from the state judged.
 pub const VERDICT_FRESH_NS: u64 = 180 * 1_000_000_000;
+/// How long an agent's exit waits for the quorum's quotes: after it, one sentinel's quote is enough,
+/// so a sentinel that is down delays an exit by this much and never refuses it. Until then a second
+/// sentinel's higher quote can still replace a low one.
+pub const EXIT_VOTES_WAIT_NS: u64 = 60 * 1_000_000_000;
 /// Bounds and default of the quarantine a `block` puts its token in: 10 min to 24 h, 30 min at init.
 /// Never zero: a token blocked on one draw could be asked again at once until a draw misses the trap.
 const MIN_QUARANTINE_S: u64 = 600;
@@ -323,11 +331,13 @@ const MIN_CAP_PERIOD_S: u64 = 3_600;
 const MAX_CAP_PERIOD_S: u64 = 7 * 24 * 3_600;
 const DEFAULT_CAP_PERIOD_S: u64 = 86_400;
 /// Size of a token's rolling log of buys (as an agent's log of armings): 24 bytes an entry, each paid by
-/// its check's price. Beyond
-/// it a buy is refused until an entry leaves the period: forgetting one would undercount the total.
+/// its check's price. A buy into a full log merges the two oldest entries into one, counted until the
+/// newer of them leaves the period: the total is never undercounted, and 32 small buys never close a
+/// token to every agent for the period.
 const MAX_TOKEN_BUYS: usize = 32;
 /// Most sentinels the owner names: each vote is stored with its check (at most 137 bytes), within
-/// the check's price.
+/// the check's price. A check never holds more votes than there are sentinels: a buy check drops the
+/// votes of sentinels removed since, an exit quote takes no more votes than there are sentinels.
 const MAX_SENTINELS: usize = 3;
 /// Reasons of a check its sentinels disagreed on.
 const DISAGREE: &str =
@@ -426,8 +436,9 @@ pub struct Guard {
     signing_since_ns: u64,
     /// The owner's limits on what one token can cost (`set_quarantine`, `set_token_cap`).
     limits: TokenLimits,
-    /// Per token (lowercase), the block time until which its last `block` verdict keeps it from being
-    /// checked or bought. Kept after it expires (overwritten by the next block; paid by that check).
+    /// Per token (lowercase), the block time until which its last `block` vote naming its code keeps
+    /// it from being checked or bought. Kept after it expires (one entry per token, overwritten by the
+    /// next such vote; paid by that check, which is then never bought).
     quarantine: LookupMap<String, u64>,
     /// Per token (lowercase), the buy check awaiting its verdict: one at a time for all agents, so that
     /// parallel requests are not as many draws. Removed by the verdict or the refund.
@@ -777,6 +788,56 @@ impl Guard {
             .map(|&until| U64(until))
     }
 
+    /// True while a vote of `sentinel` on check `id` can still count, so that a sentinel knows in one
+    /// call whether to judge it (after a restart, every old check answers false): `sentinel` is one of
+    /// the guard's, has not voted on it, the check is less than 300 s old and not signed, and
+    /// - a buy check without a verdict: always (the next vote may decide it);
+    /// - a buy check decided `allow` or `warn`: while a `block` can still stop its buy, 180 s from
+    ///   its request and before it is sent to signing (any other vote is refused);
+    /// - a buy check blocked, or an exit quote: while fewer votes than the quorum are in (listing
+    ///   takes the quorum's blocks, an exit waits for the quorum's quotes).
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)] // near-sdk's JSON ABI requires an owned type
+    pub fn vote_due(&self, id: u64, sentinel: AccountId) -> bool {
+        let Some(c) = self.checks.get(&id) else {
+            return false;
+        };
+        let within = |ns: u64| env::block_timestamp() < c.requested_ns.0.saturating_add(ns);
+        if !self.sentinels.contains(&sentinel)
+            || c.settled
+            || c.votes.iter().any(|v| v.sentinel == sentinel)
+            || !within(VERDICT_TIMEOUT_NS)
+        {
+            return false;
+        }
+        let exit = c.exit_amount.is_some();
+        match c.verdict {
+            None if !exit => true,
+            Some(Verdict::Allow | Verdict::Warn) if !exit => {
+                within(VERDICT_FRESH_NS) && !self.buying(id)
+            }
+            _ if exit => c.votes.len() < usize::from(self.quorum),
+            _ => self.counted(c) < usize::from(self.quorum),
+        }
+    }
+
+    /// True once exit quote `id` no longer waits for other sentinels' votes: the quorum's are in, or
+    /// one is and 60 s have passed since the request. `sell_quoted` is refused until then; whether
+    /// there is a quote to sell on is the check's verdict.
+    #[must_use]
+    pub fn exit_ready(&self, id: u64) -> bool {
+        self.checks
+            .get(&id)
+            .is_some_and(|c| c.exit_amount.is_some() && self.exit_votes_in(c))
+    }
+
+    /// True once exit quote `c` has the quorum's votes, or one vote 60 s after its request.
+    fn exit_votes_in(&self, c: &Check) -> bool {
+        c.votes.len() >= usize::from(self.quorum)
+            || (!c.votes.is_empty()
+                && env::block_timestamp() >= c.requested_ns.0.saturating_add(EXIT_VOTES_WAIT_NS))
+    }
+
     /// The buy check of `token` awaiting its verdict, if any: no other can be requested meanwhile.
     #[must_use]
     #[allow(clippy::needless_pass_by_value)] // near-sdk's JSON ABI requires an owned type
@@ -803,11 +864,13 @@ impl Guard {
 
     /// The buy check of `token` still awaiting its verdict: an entry counts until its check gets a
     /// verdict or a refund, and no longer than `VERDICT_TIMEOUT_NS` (an agent that never asks its
-    /// refund would otherwise close the token to every agent).
+    /// refund would otherwise close the token to every agent). A check whose votes already make a
+    /// quorum the owner lowered since no longer waits (`decide_waiting`).
     fn pending_of(&self, token: &str) -> Option<u64> {
         let id = *self.pending.get(token)?;
         let waiting = self.checks.get(&id).is_some_and(|c| {
             c.verdict.is_none()
+                && self.counted(c) < usize::from(self.quorum)
                 && env::block_timestamp() < c.requested_ns.0.saturating_add(VERDICT_TIMEOUT_NS)
         });
         waiting.then_some(id)
@@ -831,6 +894,22 @@ impl Guard {
         );
     }
 
+    /// Counts a buy of `amount_wei` of `token` (lowercase) within the owner's per-token cap, for all
+    /// agents together, or panics: counted when the buy is sent to signing, and kept if its signature
+    /// does not come back (the MPC may still publish it).
+    fn count_buy(&mut self, token: String, amount_wei: u128) {
+        let mut buys = self.buys_in_period(&token);
+        self.require_cap_room(&buys, amount_wei);
+        if buys.len() >= MAX_TOKEN_BUYS {
+            // A full log: the two oldest entries become one, counted until the newer of them leaves
+            // the period. Refusing the buy instead let 32 small buys close the token to every agent.
+            let (_, wei) = buys.remove(0);
+            buys[0].1 = buys[0].1.saturating_add(wei);
+        }
+        buys.push((env::block_timestamp(), amount_wei));
+        self.token_buys.insert(token, buys);
+    }
+
     /// Owner only: makes `agent` armable. Its storage is paid by the contract, at the
     /// owner's sole choice.
     pub fn register_agent(&mut self, agent: AccountId) {
@@ -840,8 +919,12 @@ impl Guard {
 
     /// Owner only: names the sentinels (1 to 3 distinct accounts) and how many of them must post the
     /// same `allow` or `warn` for it to count; any one of them blocks. One call replaces a compromised
-    /// key or changes the quorum. Votes already posted stay; a check still waiting is decided by the
-    /// new set and quorum.
+    /// key or changes the quorum, with no delay: from this call on, only the votes of these sentinels
+    /// count, on the checks already voted on too (`buy`, `approve_warn` and `sell_quoted` count them
+    /// again), and a check still waiting is decided by this set and quorum, at its next vote or at
+    /// its `buy`. The guard cannot walk its checks, so nothing is rewritten here: a vote is weighed
+    /// when it is used. An account removed and named again counts again on the checks it voted on
+    /// (those less than 180 s old still buy): name another account after a theft.
     pub fn set_sentinels(&mut self, sentinels: Vec<AccountId>, quorum: u8) {
         self.assert_owner();
         require!(
@@ -1042,7 +1125,7 @@ impl Guard {
         id
     }
 
-    /// Exit quote for an agent: asks the sentinel what selling `amount` of the token bought by the
+    /// Exit quote for an agent: asks the sentinels what selling `amount` of the token bought by the
     /// agent's signed check `buy_id` yields (ETH, in wei). Priced like a check, from the credit alone: a
     /// sale never needs buying budget. Only a token the guard bought for this agent; a listed or changed
     /// token may still be quoted: the exit is never blocked.
@@ -1147,13 +1230,19 @@ impl Guard {
     /// `allow`. `tx_hashes`: signing hashes of the transactions simulated from the guard's address,
     /// built by `preview_check`; only those are ever signed for this check.
     ///
-    /// The check's verdict is set once the votes decide. `quorum` votes identical on the verdict, the
-    /// quote, the transaction hashes, the code and `list_target` make an `allow` or a `warn`; each
-    /// sentinel simulates the same reference block with the same derived draws, so honest ones agree
-    /// (their evidence strings may differ, by the NEAR facts read at another moment: each sha256 is
-    /// stored, none is compared). A single `block` vote blocks at once, and so does any disagreement:
-    /// one key, stolen, can only block. Listing a token takes the quorum, of identical `block` votes.
-    /// An exit quote takes one vote: a sentinel that is down never keeps an agent from selling.
+    /// **A buy check.** Only the votes of the current sentinels count: a vote whose sentinel the owner
+    /// removed is dropped here, and the quorum is the one in force now. `quorum` votes identical on the
+    /// verdict, the quote, the transaction hashes, the code and `list_target` make an `allow` or a
+    /// `warn`; each sentinel simulates the same reference block with the same derived draws, so honest
+    /// ones agree (their evidence strings may differ, by the NEAR facts read at another moment: each
+    /// sha256 is stored, none is compared). A single `block` vote blocks at once, and so does any
+    /// disagreement. A `block` also overturns an `allow` or a `warn` already decided, until that buy is
+    /// sent to signing. Every `block` vote that carries the token's code quarantines the token,
+    /// whatever was decided before it. Listing a token takes the quorum, of identical `block` votes.
+    ///
+    /// **An exit quote.** Every sentinel may vote until the exit is sold. The quote that stands is the
+    /// highest `allow` posted: a `block` never cancels another sentinel's quote, and a low quote never
+    /// lowers the floor under another's. `sell_quoted` waits for the quorum's votes, or 60 s.
     // near-sdk's JSON ABI requires owned types; the votes' state machine reads top to bottom
     #[allow(
         clippy::needless_pass_by_value,
@@ -1185,19 +1274,33 @@ impl Guard {
             env::panic_str("unknown check")
         };
         let exit = check.exit_amount.is_some();
-        let needed = if exit { 1 } else { usize::from(self.quorum) };
-        // Decided as allow or warn, or every vote the quorum takes is in (a block keeps taking votes
-        // up to the quorum: listing needs them).
-        let vetoed = check.verdict == Some(Verdict::Block);
+        let needed = usize::from(self.quorum);
+        let before = check.verdict;
+        let vetoed = before == Some(Verdict::Block);
+        // The votes this one is weighed with: the current sentinels' (an exit quote keeps them all: a
+        // vote from a sentinel removed since voids it at the sale).
+        let counted = if exit {
+            check.votes.len()
+        } else {
+            self.counted(check)
+        };
+        // An exit quote takes votes until it is sold; a buy check until an allow or a warn is decided,
+        // and then only a block, while its buy is not yet sent to signing.
+        let open = if exit {
+            !check.settled
+        } else {
+            before.is_none()
+                || vetoed
+                || (verdict == Verdict::Block && !check.settled && !self.buying(id))
+        };
         require!(
-            (check.verdict.is_none() || vetoed) && check.votes.len() < needed,
+            open && counted < self.sentinels.len(),
             "verdict already posted"
         );
         require!(
             check.votes.iter().all(|v| v.sentinel != who),
             "sentinel already voted"
         );
-        require!(!check.settled, "check already settled");
         // An allow or a warn is only usable on the transactions simulated: they must be what the guard
         // would sign now (a preview read on a node behind the guard is refused here, not at the buy).
         require!(
@@ -1209,12 +1312,7 @@ impl Guard {
         let mut unchanged = false;
         if !exit {
             if let Some(code) = &code {
-                unchanged = self
-                    .seen
-                    .get(&target)
-                    .and_then(|last| self.checks.get(last))
-                    .and_then(|c| c.code.as_ref())
-                    .is_none_or(|p| p == code);
+                unchanged = self.same_code(&target, code);
                 require!(
                     verdict != Verdict::Allow || unchanged,
                     "code changed since the last check: at most warn"
@@ -1226,37 +1324,53 @@ impl Guard {
                 );
             }
         }
-        // This vote against the ones before it: `same` when every vote names this verdict and this
-        // quote, transactions, code and listing; `agreed` when that makes the quorum.
-        let first = check.votes.is_empty();
-        let same = check.votes.iter().all(|v| v.verdict == verdict)
+        // This vote against the ones that count: `same` when every one names this verdict and this
+        // quote, transactions, code and listing; `agreed` when that makes the quorum (or more: the
+        // owner lowered it while they waited).
+        let first = counted == 0;
+        let same = check
+            .votes
+            .iter()
+            .filter(|v| self.sentinels.contains(&v.sentinel))
+            .all(|v| v.verdict == verdict)
             && (first
                 || (check.quote == quote
                     && check.tx_hashes == tx_hashes
                     && check.code == code
                     && check.list_target == list_target));
-        let agreed = same && check.votes.len() + 1 == needed;
-        let decided = if vetoed || verdict == Verdict::Block || !same {
-            Some(Verdict::Block)
+        let agreed = !exit && same && counted + 1 >= needed;
+        // `rests`: the check now rests on this vote, its reasons and its evidence. `keeps`: its quote,
+        // transactions, code and listing are this vote's.
+        let (decided, rests, keeps) = if exit {
+            let better = verdict == Verdict::Allow
+                && (before != Some(Verdict::Allow) || quote.0 > check.quote.0);
+            let rests = first || better;
+            (if rests { Some(verdict) } else { before }, rests, rests)
+        } else if vetoed || verdict == Verdict::Block || !same {
+            // a veto (the first block vote), or a disagreement
+            let veto = !vetoed && verdict == Verdict::Block;
+            (Some(Verdict::Block), veto || (first && !vetoed), first)
         } else {
-            agreed.then_some(verdict)
+            (agreed.then_some(verdict), first, first)
         };
         let evidence_sha256 = hex(&env::sha256(evidence.as_bytes()));
+        let sentinels = &self.sentinels;
         let Some(check) = self.checks.get_mut(&id) else {
             env::panic_str("unknown check")
         };
-        if first {
-            check.reasons.clone_from(&reasons);
-            check.evidence_sha256.clone_from(&evidence_sha256);
+        if !exit {
+            check.votes.retain(|v| sentinels.contains(&v.sentinel));
+        }
+        if keeps {
             check.quote = quote;
             check.code.clone_from(&code);
             check.tx_hashes.clone_from(&tx_hashes);
             check.list_target = list_target;
-        } else if !vetoed && verdict == Verdict::Block {
-            // a veto: the check now rests on this vote
+        }
+        if rests {
             check.reasons.clone_from(&reasons);
             check.evidence_sha256.clone_from(&evidence_sha256);
-        } else if !vetoed && !same {
+        } else if !exit && !vetoed && !same {
             DISAGREE.clone_into(&mut check.reasons);
         }
         check.votes.push(Vote {
@@ -1265,10 +1379,14 @@ impl Guard {
             evidence_sha256: evidence_sha256.clone(),
         });
         let votes = check.votes.len();
-        let closes = !vetoed && decided.is_some();
-        if closes {
+        // The verdict's 120 s run from the vote that sets it, or that gives an exit its quote.
+        if decided != before || (exit && rests) {
             check.verdict = decided;
             check.judged_ns = U64(env::block_timestamp());
+        }
+        // The price is earned once, by the first decision.
+        let closes = before.is_none() && decided.is_some();
+        if closes {
             self.escrow -= self.price;
             self.fees += self.price;
         }
@@ -1281,7 +1399,7 @@ impl Guard {
             }),
         );
         if exit {
-            return;
+            return; // an exit quote holds no slot, quarantines and lists nothing
         }
         // The reference code moves only with the quorum's own verdict, to the same code (or to the
         // first code seen); on changed code, only the owner's `approve_warn` moves it.
@@ -1289,7 +1407,10 @@ impl Guard {
             self.seen.insert(target.clone(), id);
         }
         if closes {
-            self.judged(id, &target, verdict == Verdict::Block && code.is_some());
+            self.release(id, &target);
+        }
+        if verdict == Verdict::Block && code.is_some() {
+            self.quarantine_token(id, &target);
         }
         // Only the quorum's block of a buy check that rests on the target's code, and that every vote
         // asks to list, lists its target (never the fail-closed fallback, nor a reputation-only
@@ -1310,23 +1431,87 @@ impl Guard {
         }
     }
 
-    /// What deciding buy check `id` does to its `token` (lowercase): the token can be checked again,
-    /// and with `blocked` (a `block` vote that carries the token's code, whoever cast it) it is
-    /// quarantined, listed or not: a block that lists nothing (a sale refused at one drawn delay) is
-    /// the one an agent would otherwise ask again until a draw misses it. Two blocks quarantine
-    /// nothing, since no sentinel found a refusal: a disagreement between votes that are not blocks,
-    /// and the fail-closed fallback, posted without the code when a simulation could not run (a node
-    /// that times out must not close an honest token for every agent). Never called for an exit
-    /// quote: an exit is never blocked.
-    fn judged(&mut self, id: u64, token: &str, blocked: bool) {
+    /// Votes on `c` cast by sentinels of the current set, the only ones that count: a sentinel the
+    /// owner removed (a stolen key) stops counting at once, on the checks it already voted on too.
+    fn counted(&self, c: &Check) -> usize {
+        c.votes
+            .iter()
+            .filter(|v| self.sentinels.contains(&v.sentinel))
+            .count()
+    }
+
+    /// True while the guard has the buy of check `id` at the MPC: a signature requested is not recalled.
+    fn buying(&self, id: u64) -> bool {
+        matches!(&self.signing, Some(Job::Buy(p)) if p.id == id)
+    }
+
+    /// True if `code` is the one `target` (lowercase) had at its last verdict, or the first seen.
+    fn same_code(&self, target: &str, code: &Code) -> bool {
+        self.seen
+            .get(target)
+            .and_then(|last| self.checks.get(last))
+            .and_then(|c| c.code.as_ref())
+            .is_none_or(|p| p == code)
+    }
+
+    /// Decides buy check `id` when the votes in already make the quorum as it stands and no vote is
+    /// left to come: the owner lowered the quorum, or removed the sentinel still awaited, while the
+    /// check waited. Called by `buy` and `approve_warn` (the next vote would decide it as well); the
+    /// verdict's 120 s run from this call. Event `verdict_decided`.
+    fn decide_waiting(&mut self, id: u64) {
+        let sentinels = &self.sentinels;
+        let Some(check) = self
+            .checks
+            .get_mut(&id)
+            .filter(|c| c.verdict.is_none() && c.exit_amount.is_none())
+        else {
+            return;
+        };
+        let live = |v: &&Vote| sentinels.contains(&v.sentinel);
+        // A block or a difference decides at once: the votes of a check still waiting are identical.
+        let Some(verdict) = check.votes.iter().find(live).map(|v| v.verdict) else {
+            return;
+        };
+        if check.votes.iter().filter(live).count() < usize::from(self.quorum) {
+            return;
+        }
+        check.votes.retain(|v| sentinels.contains(&v.sentinel));
+        check.verdict = Some(verdict);
+        check.judged_ns = U64(env::block_timestamp());
+        let (votes, code) = (check.votes.len(), check.code.clone());
+        let target = check.target.to_ascii_lowercase();
+        self.escrow -= self.price;
+        self.fees += self.price;
+        emit(
+            "verdict_decided",
+            &near_sdk::serde_json::json!({
+                "id": id, "verdict": verdict, "votes": votes, "quorum": self.quorum,
+            }),
+        );
+        if code.is_some_and(|c| self.same_code(&target, &c)) {
+            self.seen.insert(target.clone(), id);
+        }
+        self.release(id, &target);
+    }
+
+    /// The verdict of buy check `id` frees its `token` (lowercase) for the next check.
+    fn release(&mut self, id: u64, token: &str) {
         if self.pending.get(token) == Some(&id) {
             self.pending.remove(token);
         }
-        if !blocked {
-            return;
-        }
+    }
+
+    /// A `block` vote that carries the code of `token` (lowercase), on buy check `id`, quarantines it,
+    /// listed or not, decided or not: a block that lists nothing (a sale refused at one drawn delay)
+    /// is the one an agent would otherwise ask again until a draw misses it. Two blocks quarantine
+    /// nothing, since no sentinel found a refusal: a disagreement between votes that are not blocks,
+    /// and the fail-closed fallback, posted without the code when a simulation could not run (a node
+    /// that times out must not close an honest token for every agent). A quarantine already running
+    /// is never shortened. Never called for an exit quote: an exit is never blocked.
+    fn quarantine_token(&mut self, id: u64, token: &str) {
         let until = env::block_timestamp()
-            .saturating_add(self.limits.quarantine_s.saturating_mul(1_000_000_000));
+            .saturating_add(self.limits.quarantine_s.saturating_mul(1_000_000_000))
+            .max(self.quarantine.get(token).copied().unwrap_or(0));
         self.quarantine.insert(token.to_owned(), until);
         emit(
             "quarantined",
@@ -1348,6 +1533,9 @@ impl Guard {
         let decision = decision_digest(decision_sha256);
         require!(self.signing.is_none(), "a signature is already in progress");
         let who = env::predecessor_account_id();
+        // Votes that already make a quorum lowered since decide the check now (a refusal below
+        // undoes it with the rest of the call).
+        self.decide_waiting(id);
         let Some(check) = self.checks.get(&id) else {
             env::panic_str("unknown check")
         };
@@ -1360,9 +1548,10 @@ impl Guard {
             Some(Verdict::Warn) => env::panic_str("warn verdict not approved by the owner"),
             Some(Verdict::Block) => env::panic_str("verdict does not allow the purchase"),
         }
-        // The quorum as it stands now: a verdict decided under a lower one no longer buys.
+        // The sentinels and the quorum as they stand now: a verdict decided under a lower quorum, or
+        // resting on the vote of a sentinel removed since, no longer buys.
         require!(
-            check.votes.len() >= usize::from(self.quorum),
+            self.counted(check) >= usize::from(self.quorum),
             "verdict below the sentinels' quorum: request a new check"
         );
         require!(
@@ -1405,16 +1594,7 @@ impl Guard {
         let min_out = floor(check.quote.0, self.evm.max_slippage_bps);
         require!(min_out > 0, "minimum output rounds to zero");
         require!(self.previewed(check), SIMULATED_ONLY);
-        // The per-token cap, for all agents together: counted here, when the buy is sent to signing,
-        // and kept if its signature does not come back (the MPC may still publish it).
-        let mut buys = self.buys_in_period(&key);
-        self.require_cap_room(&buys, amount_wei.0);
-        require!(
-            buys.len() < MAX_TOKEN_BUYS,
-            "too many buys of this token in the cap's period"
-        );
-        buys.push((env::block_timestamp(), amount_wei.0));
-        self.token_buys.insert(key, buys);
+        self.count_buy(key, amount_wei.0);
         let cost = self.cost(amount_wei.0, 1);
         self.debit(&who, cost);
         self.escrow += cost;
@@ -1490,8 +1670,11 @@ impl Guard {
         self.start_exit(exit, None)
     }
 
-    /// An agent's exit on the sentinel's exit quote `id` (`request_exit`), within 120 s of it, once:
+    /// An agent's exit on the sentinels' exit quote `id` (`request_exit`), within 120 s of it, once:
     /// the floor is the quoted ETH out minus the owner's slippage bound, never the agent's choice. The
+    /// quote is the highest one posted, by current sentinels only, and it sells once the quorum's
+    /// votes are in or 60 s after the request (`exit_ready`): a sentinel that is down delays an exit,
+    /// one key alone neither refuses it nor sets its floor while another sentinel answers. The
     /// guard signs only the approve and swap the sentinel simulated (`tx_hashes`). Two transactions at
     /// the gas cap are charged to the credit alone (a sale never needs buying budget); never refused
     /// because the token was listed or its code changed, nor because the budget is spent or expired.
@@ -1513,6 +1696,17 @@ impl Guard {
         require!(
             check.verdict == Some(Verdict::Allow),
             "no exit quote: the sentinel found no sale"
+        );
+        // Every vote on the quote must be a current sentinel's: the quote that stands may be the one
+        // a removed sentinel posted.
+        require!(
+            self.counted(check) == check.votes.len(),
+            "a sentinel that voted on this exit quote was replaced: request a new quote"
+        );
+        // One key does not set the floor while another sentinel may still quote higher.
+        require!(
+            self.exit_votes_in(check),
+            "exit quote awaits the other sentinels: it sells once the quorum voted, or 60 s after the request"
         );
         require!(
             env::block_timestamp() < check.judged_ns.0.saturating_add(VERDICT_TTL_NS),
@@ -1768,14 +1962,17 @@ impl Guard {
     /// verdict, because what the human approves is that simulation, and it ages the same.
     pub fn approve_warn(&mut self, id: u64) {
         self.assert_owner();
+        self.decide_waiting(id); // votes that already make a quorum lowered since
+        let backed = self
+            .checks
+            .get(&id)
+            .is_some_and(|c| self.counted(c) >= usize::from(self.quorum));
         let Some(check) = self.checks.get_mut(&id) else {
             env::panic_str("unknown check")
         };
         require!(check.verdict == Some(Verdict::Warn), "not a warn verdict");
-        require!(
-            check.votes.len() >= usize::from(self.quorum),
-            "verdict below the sentinels' quorum"
-        );
+        // counted again now: not on the vote of a sentinel removed since, nor under a lower quorum
+        require!(backed, "verdict below the sentinels' quorum");
         require!(!check.settled, "check already settled");
         require!(
             env::block_timestamp() < check.judged_ns.0.saturating_add(VERDICT_TTL_NS),
@@ -3284,11 +3481,16 @@ mod tests {
 
     /// A callback's context: the guard calls itself with the `sign` results.
     fn callback_env(results: Vec<PromiseResult>) {
+        callback_at(800, results);
+    }
+
+    /// The same at block time `now_ns`.
+    fn callback_at(now_ns: u64, results: Vec<PromiseResult>) {
         testing_env!(
             VMContextBuilder::new()
                 .current_account_id(id("guard.test"))
                 .predecessor_account_id(id("guard.test"))
-                .block_timestamp(800)
+                .block_timestamp(now_ns)
                 .build(),
             near_sdk::test_vm_config(),
             near_sdk::RuntimeFeesConfig::test(),
@@ -6694,13 +6896,20 @@ mod tests {
         assert_eq!(g.token_bought(TARGET.into()), U128(VALUE)); // the MPC may still publish it
     }
 
+    // A full log never closes the token: the 33rd buy merges the two oldest entries, counted until the
+    // newer of the two leaves the period (never less than what was bought).
     #[test]
-    #[should_panic(expected = "too many buys of this token in the cap's period")]
-    fn a_tokens_log_of_buys_is_bounded() {
+    fn a_33rd_buy_of_a_token_merges_the_two_oldest_and_never_wedges_it() {
         let (mut g, check) = judged(Verdict::Allow);
+        let key = TARGET.to_ascii_lowercase();
         g.token_buys
-            .insert(TARGET.to_ascii_lowercase(), vec![(600, 1); MAX_TOKEN_BUYS]);
+            .insert(key.clone(), (0..32).map(|i| (600 + i, 1)).collect());
         buy(&mut g, check);
+        let log = g.token_buys.get(&key).unwrap();
+        assert_eq!(log.len(), MAX_TOKEN_BUYS);
+        assert_eq!(log[0], (601, 2));
+        assert_eq!(log[MAX_TOKEN_BUYS - 1], (700, VALUE));
+        assert_eq!(g.token_bought(TARGET.into()), U128(32 + VALUE));
     }
 
     #[test]
@@ -6744,7 +6953,7 @@ mod tests {
     }
 
     // 22. Sentinel quorum: an allow or a warn takes `quorum` identical votes, any one sentinel blocks,
-    // a disagreement blocks, listing takes the quorum, an exit quote takes one vote.
+    // a disagreement blocks, listing takes the quorum (exit quotes: section 23).
     /// A guard whose owner named two sentinels, both needed; `agent.test` armed for 1,000 s.
     fn two_sentinels() -> Guard {
         let mut g = funded(ONE_NEAR, 100 * U, 1000);
@@ -6955,17 +7164,12 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "verdict already posted")]
-    fn a_third_sentinel_does_not_vote_once_two_of_three_decided() {
-        let mut g = funded(ONE_NEAR, 100 * U, 1000);
-        ctx("owner.test", 0, 0);
-        let three = ["sentinel.test", "sentinel2.test", "sentinel3.test"];
-        g.set_sentinels(three.map(id).to_vec(), 2);
-        ctx("agent.test", 0, 500);
-        let check = g.request_check(TARGET.into(), U128(VALUE), None);
+    fn a_third_sentinels_allow_is_not_taken_once_two_of_three_decided() {
+        let (mut g, check) = asked_of_three(2);
         vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
         vote(&mut g, "sentinel3.test", check, Verdict::Allow, false, 700);
         assert_eq!(g.get_check(check).unwrap().verdict, Some(Verdict::Allow));
-        vote(&mut g, "sentinel2.test", check, Verdict::Block, false, 800);
+        vote(&mut g, "sentinel2.test", check, Verdict::Allow, false, 800);
     }
 
     #[test]
@@ -6993,49 +7197,6 @@ mod tests {
         g.set_sentinels(vec![id("sentinel.test"), id("sentinel2.test")], 2);
         ctx("agent.test", 0, 700);
         buy(&mut g, check);
-    }
-
-    // An exit is never held by a sentinel that is down: its quote takes one vote, from any sentinel.
-    #[test]
-    fn an_exit_quote_takes_one_vote() {
-        let (mut g, bought) = judged(Verdict::Allow);
-        buy(&mut g, bought);
-        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
-        ctx("owner.test", 0, 750);
-        g.set_sentinels(vec![id("sentinel.test"), id("sentinel2.test")], 2);
-        ctx("agent.test", 0, 800);
-        let exit = g.request_exit(bought, U128(MIN_OUT));
-        ctx("sentinel2.test", 0, 900);
-        let hashes = previewed(&g, exit, EXIT_QUOTE);
-        g.post_verdict(
-            exit,
-            Verdict::Allow,
-            String::new(),
-            String::new(),
-            U128(EXIT_QUOTE),
-            None,
-            false,
-            hashes.clone(),
-        );
-        assert_eq!(last_event()["data"][0]["quorum"], 1);
-        assert_eq!(g.get_check(exit).unwrap().verdict, Some(Verdict::Allow));
-        ctx("sentinel.test", 0, 950);
-        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            g.post_verdict(
-                exit,
-                Verdict::Allow,
-                String::new(),
-                String::new(),
-                U128(EXIT_QUOTE),
-                None,
-                false,
-                hashes,
-            );
-        }));
-        assert!(second.is_err(), "a second vote on an exit quote");
-        ctx("agent.test", 0, 1000);
-        let _ = g.sell_quoted(exit);
-        assert!(g.signing_since().is_some());
     }
 
     #[test]
@@ -7081,5 +7242,748 @@ mod tests {
         g.deposit_credit(Some(id("sentinel.test")));
         ctx("sentinel.test", 0, 1);
         g.report(TARGET.into(), "a".repeat(64), String::new());
+    }
+
+    // 23. Review of the quorum and the token limits. A vote counts while its sentinel is one of the
+    // guard's; a quorum changed while votes wait is the one they are weighed with; a block vote that
+    // names the token's code quarantines in every order and stops a buy not yet sent to signing; an
+    // exit quote is no longer one key's to give or to refuse.
+    const THREE: [&str; 3] = ["sentinel.test", "sentinel2.test", "sentinel3.test"];
+
+    /// The owner names `sentinels` and `quorum` at `now_ns`.
+    fn name(g: &mut Guard, sentinels: &[&str], quorum: u8, now_ns: u64) {
+        ctx("owner.test", 0, now_ns);
+        g.set_sentinels(sentinels.iter().map(|s| id(s)).collect(), quorum);
+    }
+
+    /// A buy check of TARGET requested at 500 on a guard with three sentinels, `quorum` needed.
+    fn asked_of_three(quorum: u8) -> (Guard, u64) {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        name(&mut g, &THREE, quorum, 0);
+        ctx("agent.test", 0, 500);
+        let check = g.request_check(TARGET.into(), U128(VALUE), None);
+        (g, check)
+    }
+
+    /// `who` posts the fail-closed fallback on `check`: a block without the token's code.
+    fn fallback(g: &mut Guard, who: &str, check: u64, now_ns: u64) {
+        ctx(who, 0, now_ns);
+        g.post_verdict(
+            check,
+            Verdict::Block,
+            "simulation impossible after 3 tries".into(),
+            String::new(),
+            U128(0),
+            None,
+            false,
+            vec![],
+        );
+    }
+
+    fn verdict_of(g: &Guard, check: u64) -> Option<Verdict> {
+        g.get_check(check).unwrap().verdict
+    }
+
+    // A sentinel removed because its key was stolen no longer counts, on checks it already voted on too.
+    #[test]
+    #[should_panic(expected = "verdict below the sentinels' quorum")]
+    fn an_allow_resting_on_a_removed_sentinels_vote_no_longer_buys() {
+        let (mut g, check) = asked_of_two();
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        vote(&mut g, "sentinel2.test", check, Verdict::Allow, false, 700);
+        name(&mut g, &["sentinel2.test", "sentinel3.test"], 2, 750);
+        ctx("agent.test", 0, 800);
+        buy(&mut g, check);
+    }
+
+    #[test]
+    #[should_panic(expected = "verdict below the sentinels' quorum")]
+    fn a_warn_resting_on_a_removed_sentinels_vote_is_not_approved() {
+        let (mut g, check) = asked_of_two();
+        vote(&mut g, "sentinel.test", check, Verdict::Warn, false, 600);
+        vote(&mut g, "sentinel2.test", check, Verdict::Warn, false, 700);
+        name(&mut g, &["sentinel2.test", "sentinel3.test"], 2, 750);
+        ctx("owner.test", 0, 800);
+        g.approve_warn(check);
+    }
+
+    #[test]
+    fn a_removed_sentinels_vote_does_not_complete_the_quorum() {
+        let (mut g, check) = asked_of_two();
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        name(&mut g, &["sentinel2.test", "sentinel3.test"], 2, 650);
+        vote(&mut g, "sentinel2.test", check, Verdict::Allow, false, 700);
+        let c = g.get_check(check).unwrap();
+        assert_eq!(c.verdict, None, "a removed sentinel's vote made the quorum");
+        // its vote is dropped (its `verdict_posted` event stays), the check rests on the others'
+        assert_eq!(c.votes.len(), 1);
+        assert_eq!(c.votes[0].sentinel, id("sentinel2.test"));
+        assert_eq!(c.reasons, "reasons of sentinel2.test");
+        assert_eq!(last_event()["data"][0]["votes"], 1);
+        vote(&mut g, "sentinel3.test", check, Verdict::Allow, false, 800);
+        assert_eq!(verdict_of(&g, check), Some(Verdict::Allow));
+        ctx("agent.test", 0, 900);
+        buy(&mut g, check);
+        assert!(g.signing_since().is_some());
+    }
+
+    // The stolen key voted first, with a quote of its own: once removed, the honest votes are not
+    // compared with it (they would disagree and block).
+    #[test]
+    fn what_a_removed_sentinel_posted_is_not_what_the_others_are_compared_with() {
+        let (mut g, check) = asked_of_two();
+        ctx("sentinel.test", 0, 600);
+        let hashes = previewed(&g, check, QUOTE + 1);
+        g.post_verdict(
+            check,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(QUOTE + 1),
+            code("aa"),
+            true,
+            hashes,
+        );
+        name(&mut g, &["sentinel2.test", "sentinel3.test"], 2, 650);
+        vote(&mut g, "sentinel2.test", check, Verdict::Allow, false, 700);
+        vote(&mut g, "sentinel3.test", check, Verdict::Allow, false, 800);
+        let c = g.get_check(check).unwrap();
+        assert_eq!(c.verdict, Some(Verdict::Allow));
+        assert_eq!((c.quote, c.list_target), (U128(QUOTE), false));
+    }
+
+    // Votes in are never more than the sentinels: a change of the whole set drops the old ones.
+    #[test]
+    fn a_check_never_holds_more_votes_than_there_are_sentinels() {
+        let (mut g, check) = asked_of_three(3);
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        vote(&mut g, "sentinel2.test", check, Verdict::Allow, false, 610);
+        name(&mut g, &["a.test", "b.test", "c.test"], 3, 650);
+        vote(&mut g, "a.test", check, Verdict::Allow, false, 700);
+        assert_eq!(
+            verdict_of(&g, check),
+            None,
+            "two removed sentinels made a quorum of three"
+        );
+        vote(&mut g, "b.test", check, Verdict::Allow, false, 710);
+        vote(&mut g, "c.test", check, Verdict::Allow, false, 720);
+        let c = g.get_check(check).unwrap();
+        assert_eq!(c.verdict, Some(Verdict::Allow));
+        assert_eq!(c.votes.len(), MAX_SENTINELS);
+    }
+
+    // The owner lowers the quorum while a check waits: the next vote decides it...
+    #[test]
+    fn the_next_vote_decides_under_a_lowered_quorum() {
+        let (mut g, check) = asked_of_three(3);
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        vote(&mut g, "sentinel2.test", check, Verdict::Allow, false, 610);
+        name(&mut g, &THREE, 2, 650);
+        vote(&mut g, "sentinel3.test", check, Verdict::Allow, false, 700);
+        assert_eq!(verdict_of(&g, check), Some(Verdict::Allow));
+        assert_eq!(g.get_check(check).unwrap().judged_ns, U64(700));
+    }
+
+    // ...and when no sentinel is left to vote, the buy itself: the votes in already make the quorum.
+    #[test]
+    fn votes_that_make_a_lowered_quorum_decide_at_the_buy() {
+        let (mut g, check) = asked_of_two();
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        name(&mut g, &["sentinel.test"], 1, 650);
+        ctx("agent.test", 0, 700);
+        assert_eq!(g.pending_check(TARGET.into()), None); // the token is no longer held
+        buy(&mut g, check);
+        let v = &events()[0];
+        assert_eq!(v["event"], "verdict_decided");
+        assert_eq!(v["data"][0]["id"], check);
+        assert_eq!(v["data"][0]["verdict"], "allow");
+        assert_eq!(v["data"][0]["votes"], 1);
+        assert_eq!(v["data"][0]["quorum"], 1);
+        let c = g.get_check(check).unwrap();
+        assert_eq!((c.verdict, c.judged_ns), (Some(Verdict::Allow), U64(700)));
+        assert_eq!(g.fees(), U128(PRICE)); // the price left the escrow, once
+        assert_eq!(g.escrow(), U128(COST));
+        assert_eq!(g.last_code(TARGET.into()).unwrap().id, check);
+        assert!(g.signing_since().is_some());
+    }
+
+    #[test]
+    fn a_warn_whose_votes_make_a_lowered_quorum_is_approved() {
+        let (mut g, check) = asked_of_two();
+        vote(&mut g, "sentinel.test", check, Verdict::Warn, false, 600);
+        name(&mut g, &["sentinel.test", "sentinel2.test"], 1, 650);
+        ctx("owner.test", 0, 700);
+        g.approve_warn(check);
+        let c = g.get_check(check).unwrap();
+        assert_eq!((c.verdict, c.approved), (Some(Verdict::Warn), true));
+        assert_eq!(g.fees(), U128(PRICE));
+    }
+
+    #[test]
+    #[should_panic(expected = "no verdict yet")]
+    fn votes_below_the_quorum_decide_nothing_at_the_buy() {
+        let (mut g, check) = asked_of_three(3);
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        name(&mut g, &THREE, 2, 650);
+        ctx("agent.test", 0, 700);
+        buy(&mut g, check);
+    }
+
+    #[test]
+    fn a_raised_quorum_takes_one_more_vote() {
+        let (mut g, check) = asked_of_three(2);
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        name(&mut g, &THREE, 3, 650);
+        vote(&mut g, "sentinel2.test", check, Verdict::Allow, false, 700);
+        assert_eq!(verdict_of(&g, check), None);
+        vote(&mut g, "sentinel3.test", check, Verdict::Allow, false, 800);
+        assert_eq!(verdict_of(&g, check), Some(Verdict::Allow));
+    }
+
+    // A block vote that names the token's code quarantines it in every order.
+    #[test]
+    fn a_block_naming_the_code_quarantines_after_a_fallback_block_decided() {
+        let (mut g, check) = asked_of_two();
+        fallback(&mut g, "sentinel.test", check, 600);
+        assert_eq!(verdict_of(&g, check), Some(Verdict::Block));
+        assert_eq!(g.quarantined_until(TARGET.into()), None);
+        vote(&mut g, "sentinel2.test", check, Verdict::Block, false, 700);
+        assert_eq!(last_event()["event"], "quarantined");
+        assert_eq!(
+            g.quarantined_until(TARGET.into()),
+            Some(U64(700 + DEFAULT_QUARANTINE_S * SEC))
+        );
+        assert_eq!(g.fees(), U128(PRICE)); // the price moved once, at the decision
+    }
+
+    #[test]
+    fn a_block_naming_the_code_quarantines_after_one_vote_was_the_quorum() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        name(&mut g, &["sentinel.test", "sentinel2.test"], 1, 0);
+        ctx("agent.test", 0, 500);
+        let check = g.request_check(TARGET.into(), U128(VALUE), None);
+        fallback(&mut g, "sentinel.test", check, 600);
+        vote(&mut g, "sentinel2.test", check, Verdict::Block, false, 700);
+        assert!(g.quarantined_until(TARGET.into()).is_some());
+    }
+
+    #[test]
+    fn a_block_naming_the_code_quarantines_after_a_disagreement() {
+        let (mut g, check) = asked_of_three(3);
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        vote(&mut g, "sentinel2.test", check, Verdict::Warn, false, 700);
+        assert_eq!(g.quarantined_until(TARGET.into()), None);
+        vote(&mut g, "sentinel3.test", check, Verdict::Block, false, 800);
+        assert!(g.quarantined_until(TARGET.into()).is_some());
+        assert_eq!(g.get_check(check).unwrap().reasons, DISAGREE); // decided by the disagreement
+    }
+
+    #[test]
+    fn a_later_block_never_shortens_a_quarantine() {
+        let (mut g, check) = asked_of_two();
+        ctx("owner.test", 0, 550);
+        g.set_quarantine(MAX_QUARANTINE_S);
+        vote(&mut g, "sentinel.test", check, Verdict::Block, false, 600);
+        ctx("owner.test", 0, 650);
+        g.set_quarantine(MIN_QUARANTINE_S);
+        vote(&mut g, "sentinel2.test", check, Verdict::Block, false, 700);
+        assert_eq!(
+            g.quarantined_until(TARGET.into()),
+            Some(U64(600 + MAX_QUARANTINE_S * SEC))
+        );
+    }
+
+    // Two of three decided an allow; the third finds a refusal before the agent buys.
+    #[test]
+    fn a_block_vote_after_the_quorums_allow_stops_the_buy() {
+        let (mut g, check) = asked_of_three(2);
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        vote(&mut g, "sentinel3.test", check, Verdict::Allow, false, 700);
+        assert_eq!(g.fees(), U128(PRICE));
+        vote(&mut g, "sentinel2.test", check, Verdict::Block, true, 800);
+        let posted = &events()[0];
+        assert_eq!(posted["data"][0]["decided"], "block");
+        assert_eq!(posted["data"][0]["votes"], 3);
+        let c = g.get_check(check).unwrap();
+        assert_eq!(c.verdict, Some(Verdict::Block));
+        assert_eq!(c.judged_ns, U64(800));
+        assert_eq!(c.reasons, "reasons of sentinel2.test");
+        assert_eq!(g.fees(), U128(PRICE)); // once
+        assert!(g.quarantined_until(TARGET.into()).is_some());
+        assert!(g.get_entry(TARGET.into()).is_none()); // one key lists nothing
+        ctx("agent.test", 0, 900);
+        let bought = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            buy(&mut g, check);
+        }));
+        assert!(
+            bought.is_err(),
+            "bought on an allow a sentinel blocked since"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "verdict does not allow the purchase")]
+    fn the_buy_after_a_late_block_vote_is_refused_as_a_block() {
+        let (mut g, check) = asked_of_three(2);
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        vote(&mut g, "sentinel3.test", check, Verdict::Allow, false, 700);
+        fallback(&mut g, "sentinel2.test", check, 800); // even without the code: no quarantine, no buy
+        assert_eq!(g.quarantined_until(TARGET.into()), None);
+        ctx("agent.test", 0, 900);
+        buy(&mut g, check);
+    }
+
+    // A signature already requested is not recalled (as with the owner's stop): the vote is refused,
+    // so no check ever shows a block and a signed buy.
+    #[test]
+    #[should_panic(expected = "verdict already posted")]
+    fn a_block_vote_does_not_recall_a_buy_being_signed() {
+        let (mut g, check) = asked_of_three(2);
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        vote(&mut g, "sentinel3.test", check, Verdict::Allow, false, 700);
+        ctx("agent.test", 0, 750);
+        buy(&mut g, check);
+        vote(&mut g, "sentinel2.test", check, Verdict::Block, false, 800);
+    }
+
+    #[test]
+    #[should_panic(expected = "verdict already posted")]
+    fn a_block_vote_after_the_buy_was_signed_is_refused() {
+        let (mut g, check) = asked_of_three(2);
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        vote(&mut g, "sentinel3.test", check, Verdict::Allow, false, 700);
+        ctx("agent.test", 0, 750);
+        buy(&mut g, check);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        vote(&mut g, "sentinel2.test", check, Verdict::Block, false, 900);
+    }
+
+    #[test]
+    #[should_panic(expected = "sentinel already voted")]
+    fn a_sentinel_does_not_change_its_allow_into_a_block() {
+        let (mut g, check) = asked_of_three(2);
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        vote(&mut g, "sentinel3.test", check, Verdict::Allow, false, 700);
+        vote(&mut g, "sentinel.test", check, Verdict::Block, false, 800);
+    }
+
+    // Exit quotes under a quorum: one key neither refuses an exit another sentinel quotes, nor sets
+    // its floor below that sentinel's quote.
+    /// `who` posts `verdict` with `quote` on exit quote `exit` at `now_ns`.
+    fn exit_vote(g: &mut Guard, who: &str, exit: u64, verdict: Verdict, quote: u128, now_ns: u64) {
+        ctx(who, 0, now_ns);
+        let hashes = if verdict == Verdict::Block {
+            vec![]
+        } else {
+            previewed(g, exit, quote)
+        };
+        g.post_verdict(
+            exit,
+            verdict,
+            format!("reasons of {who}"),
+            format!("evidence of {who}"),
+            U128(quote),
+            code("aa"),
+            true,
+            hashes,
+        );
+    }
+
+    /// `agent.test` holds `SELL_AMOUNT` of TARGET; the owner names two sentinels, both needed; the
+    /// agent asks an exit quote at 1000 ns.
+    fn exit_asked_of_two() -> (Guard, u64) {
+        let (mut g, bought) = judged(Verdict::Allow);
+        buy(&mut g, bought);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        give_holding(&mut g, SELL_AMOUNT);
+        name(&mut g, &["sentinel.test", "sentinel2.test"], 2, 900);
+        ctx("agent.test", 0, 1000);
+        let exit = g.request_exit(bought, U128(SELL_AMOUNT));
+        (g, exit)
+    }
+
+    #[test]
+    fn one_block_vote_does_not_refuse_an_exit_another_sentinel_quotes() {
+        // the block first
+        let (mut g, exit) = exit_asked_of_two();
+        let fees = g.fees().0;
+        exit_vote(&mut g, "sentinel.test", exit, Verdict::Block, 0, 1001);
+        assert_eq!(verdict_of(&g, exit), Some(Verdict::Block));
+        assert_eq!(g.fees(), U128(fees + PRICE));
+        exit_vote(
+            &mut g,
+            "sentinel2.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1002,
+        );
+        assert_eq!(last_event()["data"][0]["decided"], "allow");
+        let c = g.get_check(exit).unwrap();
+        assert_eq!(
+            (c.verdict, c.quote),
+            (Some(Verdict::Allow), U128(EXIT_QUOTE))
+        );
+        assert_eq!((c.judged_ns, c.votes.len()), (U64(1002), 2));
+        assert_eq!(c.reasons, "reasons of sentinel2.test");
+        assert_eq!(g.fees(), U128(fees + PRICE)); // the price moved once
+        assert_eq!(g.quarantined_until(TARGET.into()), None); // an exit quote quarantines nothing
+        sell_quoted_at(&mut g, exit, 1100);
+        assert_eq!(last_event()["data"][0]["min_out"], SELL_MIN.to_string());
+        // the block second
+        let (mut g, exit) = exit_asked_of_two();
+        exit_vote(
+            &mut g,
+            "sentinel2.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1001,
+        );
+        exit_vote(&mut g, "sentinel.test", exit, Verdict::Block, 0, 1002);
+        let c = g.get_check(exit).unwrap();
+        assert_eq!(
+            (c.verdict, c.quote),
+            (Some(Verdict::Allow), U128(EXIT_QUOTE))
+        );
+        assert_eq!(c.judged_ns, U64(1001));
+        sell_quoted_at(&mut g, exit, 1100);
+        assert!(g.signing_since().is_some());
+    }
+
+    #[test]
+    fn an_exit_floor_is_the_highest_quote_posted() {
+        // the low quote first: the higher one replaces it
+        let (mut g, exit) = exit_asked_of_two();
+        let low = EXIT_QUOTE / 100;
+        exit_vote(&mut g, "sentinel.test", exit, Verdict::Allow, low, 1001);
+        exit_vote(
+            &mut g,
+            "sentinel2.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1002,
+        );
+        let c = g.get_check(exit).unwrap();
+        assert_eq!(c.quote, U128(EXIT_QUOTE));
+        assert_eq!(c.tx_hashes, previewed(&g, exit, EXIT_QUOTE));
+        assert_eq!(
+            c.evidence_sha256,
+            hex(&env::sha256(b"evidence of sentinel2.test"))
+        );
+        sell_quoted_at(&mut g, exit, 1100);
+        assert_eq!(last_event()["data"][0]["min_out"], SELL_MIN.to_string());
+        // the low quote second: it changes nothing
+        let (mut g, exit) = exit_asked_of_two();
+        exit_vote(
+            &mut g,
+            "sentinel2.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1001,
+        );
+        exit_vote(&mut g, "sentinel.test", exit, Verdict::Allow, low, 1002);
+        let c = g.get_check(exit).unwrap();
+        assert_eq!((c.quote, c.judged_ns), (U128(EXIT_QUOTE), U64(1001)));
+        assert_eq!(c.reasons, "reasons of sentinel2.test");
+        sell_quoted_at(&mut g, exit, 1100);
+        assert_eq!(last_event()["data"][0]["min_out"], SELL_MIN.to_string());
+    }
+
+    #[test]
+    #[should_panic(expected = "exit quote awaits the other sentinels")]
+    fn an_exit_quote_waits_for_the_quorums_votes() {
+        let (mut g, exit) = exit_asked_of_two();
+        exit_vote(
+            &mut g,
+            "sentinel.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE / 100,
+            1001,
+        );
+        sell_quoted_at(&mut g, exit, 1000 + EXIT_VOTES_WAIT_NS - 1);
+    }
+
+    // A sentinel that is down delays an exit by 60 s, never more: one quote is then enough.
+    #[test]
+    fn one_exit_quote_is_enough_60_s_after_the_request() {
+        let (mut g, exit) = exit_asked_of_two();
+        exit_vote(
+            &mut g,
+            "sentinel.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1001,
+        );
+        ctx("agent.test", 0, 1000 + EXIT_VOTES_WAIT_NS - 1);
+        assert!(!g.exit_ready(exit));
+        ctx("agent.test", 0, 1000 + EXIT_VOTES_WAIT_NS);
+        assert!(g.exit_ready(exit));
+        sell_quoted_at(&mut g, exit, 1000 + EXIT_VOTES_WAIT_NS);
+        assert!(g.signing_since().is_some());
+    }
+
+    #[test]
+    fn an_exit_quote_is_ready_once_the_quorum_voted() {
+        let (mut g, exit) = exit_asked_of_two();
+        assert!(!g.exit_ready(exit));
+        exit_vote(
+            &mut g,
+            "sentinel.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1001,
+        );
+        assert!(!g.exit_ready(exit));
+        exit_vote(&mut g, "sentinel2.test", exit, Verdict::Block, 0, 1002);
+        assert!(g.exit_ready(exit));
+        assert!(!g.exit_ready(exit + 1)); // unknown
+    }
+
+    #[test]
+    #[should_panic(expected = "a sentinel that voted on this exit quote was replaced")]
+    fn an_exit_quote_a_removed_sentinel_posted_no_longer_sells() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        name(&mut g, &["sentinel2.test"], 1, 1050);
+        sell_quoted_at(&mut g, exit, 1100);
+    }
+
+    #[test]
+    #[should_panic(expected = "verdict already posted")]
+    fn no_vote_on_an_exit_quote_already_sold() {
+        let (mut g, exit) = exit_asked_of_two();
+        exit_vote(
+            &mut g,
+            "sentinel.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1001,
+        );
+        sell_quoted_at(&mut g, exit, 1000 + EXIT_VOTES_WAIT_NS);
+        exit_signed(&mut g, vec![ok_sig(SIG_A), ok_sig(SIG_B)]);
+        exit_vote(&mut g, "sentinel2.test", exit, Verdict::Block, 0, 2000);
+    }
+
+    // One call tells a sentinel whether its vote on a check can still count.
+    #[test]
+    fn vote_due_tells_a_sentinel_whether_its_vote_still_counts() {
+        let due = |g: &Guard, who: &str, check: u64| g.vote_due(check, id(who));
+        let (mut g, check) = asked_of_three(2);
+        assert!(due(&g, "sentinel.test", check));
+        assert!(!due(&g, "agent.test", check)); // not a sentinel
+        assert!(!due(&g, "sentinel.test", check + 1)); // unknown
+        vote(&mut g, "sentinel.test", check, Verdict::Allow, false, 600);
+        assert!(!due(&g, "sentinel.test", check)); // voted
+        assert!(due(&g, "sentinel2.test", check));
+        vote(&mut g, "sentinel3.test", check, Verdict::Allow, false, 700);
+        // decided: the third may still block it while it can buy, 180 s from the request
+        ctx("sentinel2.test", 0, 500 + VERDICT_FRESH_NS - 1);
+        assert!(due(&g, "sentinel2.test", check));
+        ctx("sentinel2.test", 0, 500 + VERDICT_FRESH_NS);
+        assert!(!due(&g, "sentinel2.test", check));
+        // a block takes votes up to the quorum (listing needs them)
+        let (mut g, check) = asked_of_three(2);
+        vote(&mut g, "sentinel.test", check, Verdict::Block, true, 600);
+        assert!(due(&g, "sentinel2.test", check));
+        vote(&mut g, "sentinel2.test", check, Verdict::Block, true, 700);
+        assert!(!due(&g, "sentinel3.test", check));
+        // a check left waiting is no longer judged 300 s after its request: a restarted sentinel
+        // skips every old one
+        let (g, check) = asked_of_three(2);
+        ctx("sentinel.test", 0, 500 + VERDICT_TIMEOUT_NS - 1);
+        assert!(due(&g, "sentinel.test", check));
+        ctx("sentinel.test", 0, 500 + VERDICT_TIMEOUT_NS);
+        assert!(!due(&g, "sentinel.test", check));
+        // an exit quote: every sentinel up to the quorum
+        let (mut g, exit) = exit_asked_of_two();
+        assert!(due(&g, "sentinel2.test", exit));
+        exit_vote(
+            &mut g,
+            "sentinel.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1001,
+        );
+        assert!(due(&g, "sentinel2.test", exit));
+        exit_vote(
+            &mut g,
+            "sentinel2.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1002,
+        );
+        assert!(!due(&g, "sentinel2.test", exit));
+    }
+
+    // The freshness bound is the buy's, not the callback's: a signature is public once the MPC
+    // answers, so the callback settles it whenever it comes and never panics with the slot taken.
+    #[test]
+    fn a_signature_that_returns_after_the_swap_deadline_still_settles() {
+        let (mut g, check) = judged(Verdict::Allow); // requested at 500, bought at 700
+        buy(&mut g, check);
+        callback_at(
+            500 + (SWAP_DEADLINE_S + 60) * SEC,
+            vec![PromiseResult::Successful(mpc_response(R0, S0, 1))],
+        );
+        let since = g.signing_since_ns;
+        assert!(g.on_signed(since).is_some());
+        let c = g.get_check(check).unwrap();
+        assert!(c.settled && c.signed_tx.is_some());
+        assert_eq!(g.signing_since(), None); // the slot is free
+        assert_eq!(g.escrow(), U128(0));
+    }
+
+    // 24. Refusals a coverage measurement found without a test.
+    /// The message of the panic `f` ends in.
+    fn panic_of(f: impl FnOnce()) -> String {
+        let e = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err("no panic");
+        e.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+            .unwrap_or_default()
+    }
+
+    // The owner cannot approve a warn the quorum does not back: here, decided by one sentinel before
+    // the owner asked for two.
+    #[test]
+    #[should_panic(expected = "verdict below the sentinels' quorum")]
+    fn a_warn_decided_under_a_lower_quorum_is_not_approved() {
+        let (mut g, check) = judged(Verdict::Warn); // one sentinel, quorum 1
+        name(&mut g, &["sentinel.test", "sentinel2.test"], 2, 650);
+        approve(&mut g, check, 660);
+    }
+
+    #[test]
+    #[should_panic(expected = "check already settled")]
+    fn a_warn_already_bought_is_not_approved_again() {
+        let (mut g, check) = judged(Verdict::Warn);
+        approve(&mut g, check, 650);
+        ctx("agent.test", 0, 700);
+        buy(&mut g, check);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        approve(&mut g, check, 900);
+    }
+
+    // Each callback settles its own kind of job only (the whole message, quoted: the one of a callback
+    // that names no job in progress starts the same).
+    #[test]
+    fn the_buy_callback_does_not_settle_an_exit_nor_the_exit_callback_a_buy() {
+        let mut g = sell_as("owner.test");
+        let said = panic_of(|| {
+            signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        });
+        assert!(said.contains(r#""no signature in progress""#), "{said}");
+        let (mut g, check) = judged(Verdict::Allow);
+        buy(&mut g, check);
+        let said = panic_of(|| {
+            exit_signed(&mut g, vec![ok_sig(SIG_A), ok_sig(SIG_B)]);
+        });
+        assert!(
+            said.contains(r#""no exit signature in progress""#),
+            "{said}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "check belongs to another agent")]
+    fn an_agent_does_not_sell_on_another_agents_exit_quote() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        enroll(&mut g, "agent2.test", 1050);
+        ctx("agent2.test", 0, 1100);
+        let _ = g.sell_quoted(exit);
+    }
+
+    #[test]
+    #[should_panic(expected = "a signature is already in progress")]
+    fn no_quoted_sale_while_another_signature_is_in_progress() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        ctx("owner.test", 0, 1050);
+        let _ = g.withdraw_eth(U128(1));
+        sell_quoted_at(&mut g, exit, 1100);
+    }
+
+    #[test]
+    #[should_panic(expected = "unfrozen registered agent only")]
+    fn a_frozen_agent_cannot_request_an_exit_quote() {
+        let (mut g, bought) = judged(Verdict::Allow);
+        buy(&mut g, bought);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        ctx("owner.test", 0, 900);
+        g.disarm(id("agent.test"));
+        ctx("agent.test", 0, 1000);
+        let _ = g.request_exit(bought, U128(MIN_OUT));
+    }
+
+    #[test]
+    #[should_panic(expected = "unfrozen registered agent only")]
+    fn an_unregistered_account_cannot_request_an_exit_quote() {
+        let (mut g, bought) = judged(Verdict::Allow);
+        buy(&mut g, bought);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        ctx("stranger.test", 0, 1000);
+        let _ = g.request_exit(bought, U128(MIN_OUT));
+    }
+
+    // Unreachable through the contract's own calls (a settled check has a verdict, refused first):
+    // the state is forced here, to pin the refusal should the order above it ever change.
+    #[test]
+    #[should_panic(expected = "check already settled")]
+    fn a_settled_check_is_never_refunded() {
+        let (mut g, check) = pending();
+        g.checks.get_mut(&check).unwrap().settled = true;
+        ctx("agent.test", 0, VERDICT_TIMEOUT_NS);
+        g.refund_check(check);
+    }
+
+    #[test]
+    fn a_refund_leaves_the_slot_a_later_check_of_the_token_holds() {
+        let (mut g, first) = pending(); // requested at 0, never judged
+        ctx("agent.test", 0, VERDICT_TIMEOUT_NS);
+        let second = g.request_check(TARGET.into(), U128(VALUE), None);
+        g.refund_check(first);
+        assert_eq!(g.pending_check(TARGET.into()), Some(second));
+        assert!(g.get_check(first).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "reasons too long")]
+    fn reasons_above_280_bytes_are_refused() {
+        let (mut g, check) = pending();
+        ctx("sentinel.test", 0, 1);
+        g.post_verdict(
+            check,
+            Verdict::Block,
+            "r".repeat(MAX_REASONS + 1),
+            String::new(),
+            U128(0),
+            None,
+            false,
+            vec![],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "evidence too long")]
+    fn evidence_above_8000_bytes_is_refused() {
+        let (mut g, check) = pending();
+        ctx("sentinel.test", 0, 1);
+        g.post_verdict(
+            check,
+            Verdict::Block,
+            String::new(),
+            "e".repeat(MAX_EVIDENCE + 1),
+            U128(0),
+            None,
+            false,
+            vec![],
+        );
     }
 }
