@@ -202,6 +202,16 @@ AMOUNT_TRAP=$(side src/AmountTrap.sol:AmountTrap)
 WETH_KEY=$(side src/WethKey.sol:WethKey)
 COOLDOWN_60=$(side src/Cooldown60.sol:Cooldown60)
 
+# Deployed last, every address above stays: judge pass 8's ApproveKey (WethKey's test moved into the
+# approve, which the busy side did not precede) and BusyTell (a sale also let through when a pair was
+# created between the seller's approve and its swap, as the busy side did), unchanged from the review.
+APPROVE_KEY=$(side src/ApproveKey.sol:ApproveKey)
+BUSY_TELL=$(side src/BusyTell.sol:BusyTell)
+
+# Users without a key whose WETH and ETH transfers fill the blocks the tests and demo.sh mine
+# (app/testkit.ts USERS): 1,000 ETH each.
+for i in 1 2 3 4 5; do cast rpc -r $RPC anvil_setBalance "0x0000000000000000000000000000000000b10c0$i" 0x3635C9ADC5DEA00000 >/dev/null; done
+
 jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked "$BLOCKED" \
   --arg later "$LATER" --arg tax "$TAX" --arg taxlater "$TAX_LATER" --arg hold "$HOLD" --arg sim "$SIM" \
   --arg frozen "$FROZEN" --arg tax20 "$TAX20" --arg late "$LATE" --arg lpburned "$LP_BURNED" --arg lpheld "$LP_HELD" --arg fresh "$FARM_FRESH" --arg gashungry "$GAS_HUNGRY" \
@@ -209,13 +219,15 @@ jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked
   --arg judgetrap "$JUDGE_TRAP" --arg untouched "$UNTOUCHED" --arg strangerkey "$STRANGER_KEY" --arg pairpull "$PAIR_PULL" \
   --arg redl1 "$RED_L1" --arg basefee "$BASEFEE_TRAP" --arg helper "$HELPER_TRAP" \
   --arg nbk "$NEXT_BLOCK_KEY" --arg amount "$AMOUNT_TRAP" --arg wethkey "$WETH_KEY" --arg cooldown "$COOLDOWN_60" \
+  --arg approvekey "$APPROVE_KEY" --arg busytell "$BUSY_TELL" \
   '{fork_block: $block, usdc: $usdc, safe: $safe, owner_reclaim: $reclaim, sell_blocked: $blocked,
     sell_blocked_later: $later, sell_tax: $tax, sell_tax_later: $taxlater, hold_one_block: $hold, sim_detector: $sim,
     guard_frozen: $frozen, sell_tax_20: $tax20, late_liquidity: $late, lp_burned: $lpburned, lp_held: $lpheld,
     farm_fresh: $fresh, gas_hungry: $gashungry, approve_max_only: $approvemax, buy_001_only: $buy001,
     usdc_copies: $copies, judge_trap: $judgetrap, untouched_buyer: $untouched, stranger_key: $strangerkey,
     pair_pull_tax: $pairpull, red_l1_trap: $redl1, basefee_trap: $basefee, helper_trap: $helper,
-    next_block_key: $nbk, amount_trap: $amount, weth_key: $wethkey, cooldown_60: $cooldown}' > tokens.json
+    next_block_key: $nbk, amount_trap: $amount, weth_key: $wethkey, cooldown_60: $cooldown,
+    approve_key: $approvekey, busy_tell: $busytell}' > tokens.json
 cp tokens.json ../docs/tokens.json
 echo "guard_frozen freezes $GUARD_EVM"
 echo "Base fork at block $FORK_BLOCK ready on $RPC; tokens in evm/tokens.json:"

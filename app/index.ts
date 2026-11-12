@@ -150,16 +150,16 @@ export async function buildIndex(url: string, from: number, to: number, pace: ()
 
 export const indexSha256 = (i: Index): Hex => sha256(stringToHex(JSON.stringify(i)));
 
-/** An index judges a check only if its window starts at least INDEX_SPAN_BLOCKS before the check's block
- *  and ends at most INDEX_LAG_BLOCKS before it (never after): a sentinel cannot pick a window that misses
- *  a farm's earlier pools. 2,000 blocks (67 min) is what the fork's index spans (evm/fork.sh mines 2,000
- *  blocks between its first pools and its last); the real-Base index of docs/sentinel.md spans 43,201. */
+/** An index judges a check only if its window starts at least INDEX_SPAN_BLOCKS before the check's
+ *  reference block and ends at that very block: a sentinel can neither pick a window that misses a farm's
+ *  earlier pools nor drop its newest ones. The sentinel builds it for each check (buildIndex up to the
+ *  block). 2,000 blocks (67 min) is what the fork's setup spans (evm/fork.sh mines 2,000 blocks between
+ *  its first pools and its last); the real-Base index of docs/sentinel.md spans 43,201. */
 export const INDEX_SPAN_BLOCKS = 2_000;
-export const INDEX_LAG_BLOCKS = 300;
 /** Why an index of blocks `from`..`to` may not judge a check at `block`, or null. Pure: replay rechecks it. */
 export function windowProblem(block: number, from: number, to: number): string | null {
-  if (from <= block - INDEX_SPAN_BLOCKS && to <= block && to >= block - INDEX_LAG_BLOCKS) return null;
-  return `template index window ${from}..${to} is not bound to block ${block}: it must start at least ${INDEX_SPAN_BLOCKS} blocks before it and end at most ${INDEX_LAG_BLOCKS} before it`;
+  if (from <= block - INDEX_SPAN_BLOCKS && to === block) return null;
+  return `template index window ${from}..${to} is not bound to block ${block}: it must start at least ${INDEX_SPAN_BLOCKS} blocks before it and end at it`;
 }
 
 /** Template reputation judges a target only against pools funded before its own (`ownPair`, its V2

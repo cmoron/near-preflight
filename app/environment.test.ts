@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { encodeFunctionData, parseAbi, parseEther, toHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
 import { envOpcodes, environmentFindings } from "./environment";
-import { implementationAt, ROUTER, rpc, WETH } from "./verifier";
+import { FACTORY, implementationAt, ROUTER, rpc, WETH } from "./verifier";
 
 const RPC = process.env.EVM_RPC ?? "http://127.0.0.1:8545";
 const codeOf = (a: string) => rpc<Hex>(RPC, "eth_getCode", [a, "latest"]);
@@ -55,7 +55,7 @@ describe("addresses the guard's transactions touch (pure)", () => {
   const w = { token: "0x00000000000000000000000000000000000000a1" as Address, guard: "0x00000000000000000000000000000000000000a2" as Address };
   const pair = "0x00000000000000000000000000000000000000a3" as Address;
   const liquidity = { pair, supply: "1", supply_before: "1", created: null, candidates: 0, holders: null };
-  const facts = (touched: string[] | null, opcodes: string[] = []) => ({ opcodes, touched, implementation: null, liquidity });
+  const facts = (touched: string[] | null, opcodes: string[] = [], token_calls: string[] | null = []) => ({ opcodes, touched, token_calls, implementation: null, liquidity });
   test("token, pool, router, WETH, guard and precompiles: no finding", () => {
     expect(environmentFindings(facts([w.token, pair, ROUTER.toLowerCase(), WETH.toLowerCase(), w.guard, "0x0000000000000000000000000000000000000001", "0x0000000000000000000000000000000000000100"]), w)).toEqual([]);
   });
@@ -69,6 +69,15 @@ describe("addresses the guard's transactions touch (pure)", () => {
     expect(environmentFindings(facts([], ["BASEFEE", "ORIGIN"]), w)).toEqual([{ level: "warn", text: "code reads BASEFEE, ORIGIN: values no simulation can match" }]);
   });
   test("a pool but no trace: warn, never a pass", () => expect(environmentFindings(facts(null), w)[0]?.level).toBe("warn"));
+  // Judge pass 8: WETH and the factory are on the list for the router's sake; the token's own code
+  // calling either reads state all of Base moves, which a check's window may not see move.
+  test("the token's code calls WETH, or the factory: block, naming them", () => {
+    expect(environmentFindings(facts([w.token, WETH.toLowerCase()], [], [WETH.toLowerCase()]), w)).toEqual([{ level: "block", text: "token calls WETH during a transfer: state all of Base moves" }]);
+    expect(environmentFindings(facts([w.token], [], [WETH.toLowerCase(), FACTORY.toLowerCase()]), w)[0]?.text).toBe("token calls WETH and the V2 factory during a transfer: state all of Base moves");
+  });
+  test("the token's code calls its pool or its implementation: no finding", () => {
+    expect(environmentFindings(facts([w.token, pair], [], [pair]), w)).toEqual([]);
+  });
 });
 
 // What the simulation cannot see, on the fork's real chain: an EOA buys and sells as a user would.
@@ -124,14 +133,28 @@ describe("the real sale fails where the simulation's passes", () => {
     expect(await buyThenSell(tokens.basefee_trap as Address, async () => {}, pin(1_000_000n))).toBe(true);
     expect(await buyThenSell(tokens.basefee_trap as Address, pin(1_000_001n), pin(1_000_000n))).toBe(false);
   });
+  /** Another user wraps 1 wei: on Base, WETH's supply moved in 160 of 600 blocks (2 min) measured on 2026-11-12. */
+  const wraps = async () => {
+    const other = `0x${Buffer.from(crypto.getRandomValues(new Uint8Array(20))).toString("hex")}` as Address;
+    await rpc(RPC, "anvil_setBalance", [other, toHex(parseEther("1"))]);
+    await rpc(RPC, "anvil_impersonateAccount", [other]);
+    expect(await send(other, WETH, "0xd0e30db0", 1n)).toBe(true);
+  };
   test("WethKey: the sale goes through while nobody else touches WETH, as in any simulation, and fails after one other deposit", async () => {
-    const wraps = async () => {
-      const other = `0x${Buffer.from(crypto.getRandomValues(new Uint8Array(20))).toString("hex")}` as Address;
-      await rpc(RPC, "anvil_setBalance", [other, toHex(parseEther("1"))]);
-      await rpc(RPC, "anvil_impersonateAccount", [other]);
-      expect(await send(other, WETH, "0xd0e30db0", 1n)).toBe(true); // deposit(): every real Base block has some
-    };
     expect(await buyThenSell(tokens.weth_key as Address, async () => {})).toBe(true);
     expect(await buyThenSell(tokens.weth_key as Address, wraps)).toBe(false);
+  });
+  test("BusyTell: the same after a deposit between the approve and the sale", async () => {
+    expect(await buyThenSell(tokens.busy_tell as Address, async () => {})).toBe(true);
+    expect(await buyThenSell(tokens.busy_tell as Address, wraps)).toBe(false);
+  });
+  test("ApproveKey: the approve itself fails after another user's deposit", async () => {
+    const token = tokens.approve_key as Address;
+    const eoa = `0x${Buffer.from(crypto.getRandomValues(new Uint8Array(20))).toString("hex")}` as Address;
+    await rpc(RPC, "anvil_setBalance", [eoa, toHex(parseEther("1"))]);
+    await rpc(RPC, "anvil_impersonateAccount", [eoa]);
+    expect(await send(eoa, ROUTER, encodeFunctionData({ abi: routerAbi, functionName: "swapExactETHForTokensSupportingFeeOnTransferTokens", args: [0n, [WETH, token], eoa, 9_999_999_999n] }), parseEther("0.001"))).toBe(true);
+    await wraps();
+    expect(await send(eoa, token, encodeFunctionData({ abi: erc20, functionName: "approve", args: [ROUTER, 1n] }))).toBe(false);
   });
 });

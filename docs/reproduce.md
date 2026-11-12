@@ -29,12 +29,12 @@ No NEAR account, no key: `GUARD` only names the contract to read.
 git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun install
 export GUARD=guard.goblin-guard-13713.testnet
 bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
-#   30 OK lines, then: REPLAY OK: verdict warn confirmed, same as on chain
+#   33 OK lines, then: REPLAY OK: verdict warn confirmed, same as on chain
 bun app/attest.ts app/fixtures/decision.json --check 1
 #   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)
 ```
 
-- `replay` resends check #5 (USDC on Base mainnet) to `mainnet.base.org`, traces it on a throwaway anvil
+- `replay` resends check #64 (USDC on Base mainnet) to `mainnet.base.org`, traces it on a throwaway anvil
   fork, rejudges it and compares everything with the guard ([what it checks](replay.md#what-replay-recomputes)).
 - `attest` verifies the model's decision behind check #1; it calls Intel and NVIDIA
   ([what it checks](replay.md#what-attest-verifies)).
@@ -43,25 +43,29 @@ Then every trap on a local Base fork, as CI runs it:
 
 ```sh
 echo GUARD=$GUARD > .env && evm/fork.sh    # Base fork at block 55836672 ready on http://127.0.0.1:8545 (about 1 min)
-bun test --timeout 30000                   # in another terminal: 260 pass, 0 fail (about 2.5 min)
+bun test --timeout 30000                   # in another terminal: 273 pass, 0 fail (about 13 min)
 ```
 
 `evm/fork.sh` starts anvil on a copy of Base at block 55,836,672 and deploys the demo tokens at fixed
 addresses ([`evm/tokens.json`](../evm/tokens.json)); `guard_frozen` freezes the guard's derived address,
 read from `GUARD`. The sentinel and replay also start throwaway anvil forks of their own.
 
+The fork mines nothing on its own, while a check waits for real blocks (its reference block, then the
+later side's). Each test mines them, 2 s apart with other users' WETH and ETH transfers, then reverts the
+fork; `demo.sh` mines one every 2 s (`bun app/testkit.ts live`).
+
 ## Full demo
 
-1. **Build and test the contract.** `cargo test` gives `247 passed`; then `bun install`.
+1. **Build and test the contract.** `cargo test` gives `249 passed`; then `bun install`.
 2. **Get a testnet account** holding about 7 NEAR (setup moves 6.35 NEAR). The faucet gives 10:
    `near account create-account sponsor-by-faucet-service <you>.testnet autogenerate-new-keypair save-to-keychain network-config testnet create`.
    If it fails, see [troubleshooting](#troubleshooting).
 3. **Deploy.** `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard
    and creates `agent.`, `agent2.`, `sentinel.` and `armer.`, each with a function-call key limited to the
    guard. The armer, a key apart from the agent's, opens the agent's armed budget.
-4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`260 pass`) and
+4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`273 pass`) and
    `bunx tsc --noEmit` (exit 0).
-5. **Run the demo.** `./demo.sh` exits 0 in 1 to 2 min (99 s here), in four moments:
+5. **Run the demo.** `./demo.sh` exits 0 in about 3 min (180 s here; each check waits for Base blocks), in four moments:
    - a poisoned inbox message pushes the agent to a trap: `BLOCK (sale refused N blocks after the buy …)`,
      and the contract refuses the buy (`verdict does not allow the purchase`);
    - a farm token whose simulation is clean: `BLOCK (template 0x9c69..94c8: 5 of 5 earlier pools drained …)`;

@@ -177,6 +177,19 @@ A refund is refused until a replacement was signed at that nonce, and only a res
 replaced: a buy signed and charged is never voided. Later transactions wait behind the gap. A reservation
 takes no more storage than the signed transaction.
 
+**A refund that meets another agent's holding.** An exit reserves two nonces, its approve's and its
+swap's; the swap's carries the tokens. Agent A's exit debits A's holding when it starts, so if neither
+signature comes back, the token is free and agent B may buy it. Then `clear <swap nonce> refund` panics:
+`token held for another agent: set_holding first`. One agent holds a token at a time, and a refund never
+takes B's holding:
+
+1. Sign and broadcast both replacements (`replace <nonce>`, step 1 above).
+2. `clear <approve nonce> refund` returns the approve's charge now: it carries no tokens.
+3. Once B holds none of the token (B sold it all), `clear <swap nonce> refund` returns A's charge and
+   tokens (`cargo test a_refund_blocked_by_another_holder`).
+4. Or settle at once: `clear <swap nonce> spent`, sell A's tokens with the owner's `sell`, and credit A
+   with `deposit_credit`. `holding <token> A <amount>` is no way out: it takes the token from B.
+
 **A callback that never runs.** If `on_signed` or `on_exit_signed` failed (out of gas, say), the owner
 frees the slot 600 s after the request (`app/human.ts release`, event `signing_released`). What it was
 signing is reserved as above.
@@ -239,6 +252,13 @@ The owner role is separate: an account named at init, whose key changes bounds a
 - **Storage after a fee withdrawal.** Storage the guard pays for afterwards (an agent registered, an
   arming, a stop) comes out of what is left: a withdrawal to the limit can leave the last credit refund a
   little short until the owner deposits.
+- **Fees withdrawn before a buy.** A check's price moves to the fees at its verdict, while the storage it
+  pays for at worst (the signed transaction, the holding, the decision anchors, a reservation) is written
+  by the buy and its callback. A withdrawal in between can take that price. A signed buy's own charge
+  then moves to the fees and covers its storage when it is the larger (the demo's 0.0225 NEAR against
+  at most 1,900 bytes, 0.019 NEAR); a buy whose signature does not come back reserves its nonce out of
+  what the credits and the escrow are owed (`cargo test fees_withdrawn_before_a_buy`), until the owner
+  deposits. Leaving one price in the fees per verdict less than 120 s old avoids it.
 - **Base mainnet.** A transaction signed for chain 8453 is valid on Base mainnet: never send funds to the
   guard's address. The demo's withdrawal address, `0x…dEaD`, is a burn-address placeholder: pass your own
   to `setup.ts`.

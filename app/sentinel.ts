@@ -1,16 +1,18 @@
 // Sentinel role: reads the guard's verdict requests, simulates the buy on the EVM chain,
 // posts verdict, reasons and proof digest with its function-call key (post_verdict only).
-// It also reads the guard's shared blocklist and the code seen at the target's last verdict, consults
-// the template index in INDEX (app/index.ts), and quotes agents' exits (request_exit) by simulating the
+// It also reads the guard's shared blocklist and the code seen at the target's last verdict, builds the
+// template index from block INDEX_FROM up to each check's reference block (app/index.ts), and quotes
+// agents' exits (request_exit) by simulating the
 // sale from the guard's EVM address. The guard side runs the guard's own transactions, read from the
 // guard (preview_check, preview_sale): same calldata, value, nonce, gas and fees as it signs. The
 // verdict carries their hashes, and the guard signs nothing else for that check.
 // The full proof (eth_simulateV1 request, response and posted evidence string, byte for byte)
 // goes to proofs/<id>.json; the contract stores the sha256 of that string with the verdict.
 // A check that fails 3 times gets a block (fail closed): a token cannot stall the queue nor be bought.
-// Usage: [INDEX=<index.json>] bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts   (EVM_RPC: the node)
+// A buy check waits for the real Base block its later side runs on: the first block 16 to 24 s after
+// the reference block, itself the first block 4 s after the request.
+// Usage: [INDEX_FROM=<block>] bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts   (EVM_RPC: the node)
 import { formatEther, type Address, type Hex } from "viem";
-import type { Index } from "./index";
 import type { Check, Entry } from "./near";
 import type { NearFacts, Previews } from "./verifier";
 
@@ -27,6 +29,7 @@ if (import.meta.main) {
   // near.ts installs a global fetch and reads NEAR_RPC at import: loaded here only, not by the tests.
   const { account, call, env, view, viewAt } = await import("./near");
   const { checkExit, checkToken, deriveProbes, toProof } = await import("./verifier");
+  const { buildIndex, INDEX_SPAN_BLOCKS } = await import("./index");
   const { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH } = await import("./derive");
   const { mkdir } = await import("node:fs/promises");
 
@@ -36,10 +39,10 @@ if (import.meta.main) {
   const GUARD_EVM = deriveEvmAddress(await fetchMasterPublicKey(), env("GUARD"), GUARD_PATH);
   const log = (s: string) => console.log(`    [sentinel] ${s}`);
   await mkdir("proofs", { recursive: true });
-  const INDEX = process.env.INDEX;
-  const index = INDEX ? ((await Bun.file(INDEX).json()) as Index) : null;
-  const pools = index ? Object.values(index.templates).flat().length : 0;
-  log(index ? `template index ${INDEX}: chain ${index.chain_id}, blocks ${index.from}..${index.to}, ${pools} WETH pools` : "no template index (INDEX unset): reputation unknown, so every buy verdict is at least warn");
+  // The index must end at each check's reference block (windowProblem): it is built for each check.
+  const from = process.env.INDEX_FROM ? Number(process.env.INDEX_FROM) : null;
+  const index = from === null ? null : (block: number) => buildIndex(EVM, from, block);
+  log(from === null ? "no template index (INDEX_FROM unset): reputation unknown, so every buy verdict is at least warn" : `template index from block ${from} to each check's block (at least ${INDEX_SPAN_BLOCKS} blocks)`);
 
   /** The guard's blocklist entry on the target, and the code of its last verdict. */
   const nearFacts = async (target: Address): Promise<NearFacts> => {
@@ -77,7 +80,7 @@ if (import.meta.main) {
     log(`#${id} : ${check.agent} wants to buy ${formatEther(BigInt(check.amount_wei))} ETH of ${target}: the guard's own buy and sales simulated, liquidity, template reputation, blocklist...`);
     // Probes derived from on-chain data, not chosen here: replay --check recomputes them.
     const ticket = { guard: env("GUARD"), id, requested_ns: check.requested_ns };
-    const r = await checkToken(EVM, target, GUARD_EVM, (head) => deriveProbes(ticket, head.hash), { index, near: nearFacts, amount: BigInt(check.amount_wei), preview });
+    const r = await checkToken(EVM, target, GUARD_EVM, (head) => deriveProbes(ticket, head.hash), { requested_ns: check.requested_ns, index, near: nearFacts, amount: BigInt(check.amount_wei), preview });
     const proof = toProof(id, target, r);
     await Bun.write(`proofs/${id}.json`, JSON.stringify(proof, null, 2));
     const code = { code_hash: r.evidence.code_hash, implementation: r.evidence.implementation };
@@ -85,7 +88,8 @@ if (import.meta.main) {
     // succeeded, never on what the agent's amount decides (judge).
     const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code, list_target: r.list_target, tx_hashes: unprefixed(r.evidence.tx_hashes) });
     const failed = r.evidence.calls.filter((c) => c.endsWith("revert")).length;
-    log(`#${id} : ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.calls.length} simulated calls (${failed} reverted, takeback probes included), quote ${r.evidence.quote} for ${r.evidence.amount_wei} wei, guard tx ${r.evidence.tx_hashes[0].slice(0, 10)}..., block ${r.evidence.block}, proof proofs/${id}.json  ${tx}`);
+    const later = r.evidence.later ? `, sales again on block ${r.evidence.later.block}` : "";
+    log(`#${id} : ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.calls.length} simulated calls (${failed} reverted, takeback probes included), quote ${r.evidence.quote} for ${r.evidence.amount_wei} wei, guard tx ${r.evidence.tx_hashes[0].slice(0, 10)}..., block ${r.evidence.block}${later}, proof proofs/${id}.json  ${tx}`);
     // An entry is never overwritten: a token already listed keeps its first entry.
     if (r.list_target && !r.evidence.near.listed.length) log(`#${id} : ${target} listed on the guard's shared blocklist by this block verdict (evidence sha256 = the proof's)`);
   };

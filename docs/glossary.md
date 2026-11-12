@@ -9,7 +9,6 @@ One line per term, in alphabetical order. Links go to the page that explains it.
 | **anvil**              | Foundry's local EVM node; here a copy (fork) of Base, never the real chain                                                 |
 | **armed budget**       | what an agent may spend before a deadline, opened by the armer within the owner's bounds                                   |
 | **armer**              | the role that arms an agent; a key apart from the agent's ([contract](contract.md#roles-and-keys))                         |
-| **busy side**          | the guard's sales simulated again after others' WETH, factory and ETH activity ([sentinel](sentinel.md#the-four-requests)) |
 | **Chain Signatures**   | NEAR's threshold signing network (the MPC): it signs Base transactions for a NEAR account's derived address                |
 | **check**              | one request for a verdict on buying an amount of a token; it costs 0.019 NEAR                                              |
 | **credit**             | NEAR an account prepaid to the guard; checks and gas are paid from it                                                      |
@@ -28,13 +27,15 @@ One line per term, in alphabetical order. Links go to the page that explains it.
 | **guard**              | the NEAR contract that holds the rules, the money and the verdicts, and builds every Base transaction                      |
 | **holding**            | tokens at the guard's address that one agent may sell                                                                      |
 | **index**              | the list of Uniswap V2 WETH pools by code template over a block window ([sentinel](sentinel.md#template-reputation))       |
-| **index window**       | the blocks an index covers: from at least 2,000 before the check to at most 300 before it                                  |
+| **index window**       | the blocks an index covers: from at least 2,000 before the check's block to that block                                     |
 | **late sale**          | the check's last simulated sale, of the rest: 200 to 255 blocks (400 to 510 s) after the buy                               |
+| **later side**         | the guard's sales again on a real block 16 to 24 s after the reference block, the buy's state applied ([sentinel](sentinel.md#the-four-requests)) |
 | **listed**             | on the guard's shared blocklist: refused to every agent until the owner unlists it                                         |
 | **MPC**                | multi-party computation: Chain Signatures' nodes sign together, none holds the whole key                                   |
 | **owner**              | the human named at init: bounds, roles, emergency stop, approvals, recovery                                                |
 | **probe**              | a fresh address derived per check, from which the sentinel repeats the buy and sales                                       |
 | **proof file**         | `proofs/<id>.json`: the requests, the responses and the evidence of one check ([replay](replay.md#the-proof-file))         |
+| **reference block**    | the first Base block at least 4 s after a check's request on NEAR: the check simulates on it                               |
 | **relay**              | a program with no key that broadcasts a transaction NEAR signed; here only to anvil                                        |
 | **replay**             | `app/replay.ts`: re-derives a verdict from its proof file and a Base node                                                  |
 | **sentinel**           | the off-chain program that simulates each check and posts the verdict, with a key limited to that                          |

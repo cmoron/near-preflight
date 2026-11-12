@@ -1,11 +1,12 @@
-// Replay of a proof against the local copy of Base (run evm/fork.sh first).
-import { describe, expect, test } from "bun:test";
+// Replay of a proof against the local copy of Base (run evm/fork.sh first). Each check mines the blocks
+// it waits for (app/testkit.ts mine); each test then reverts the fork to where it started.
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { encodeFunctionData, maxUint256, parseAbi, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
 import { buildIndex } from "./index";
 import { replay, summary, type OnChain, type Proof } from "./replay";
-import { localPreviews } from "./testkit";
-import { checkExit, checkToken, deriveProbes, rpc, ROUTER, specialOf, toProof, WETH, type NearFacts, type Probe } from "./verifier";
+import { CHECK_BLOCKS, localPreviews, mine } from "./testkit";
+import { checkExit, checkToken, deriveProbes, LATER_S, rpc, ROUTER, SALE_BLOCKS, specialOf, toProof, WETH, type NearFacts, type Probe } from "./verifier";
 
 const RPC = process.env.EVM_RPC ?? "http://127.0.0.1:8545";
 const DEPLOYER: Address = "0x60B1100000000000000000000000000000000001"; // owner() of the demo tokens (evm/fork.sh)
@@ -16,29 +17,36 @@ const toHexAddr = (b: Uint8Array) => `0x${Buffer.from(b).toString("hex")}` as Ad
 /** The guard's EVM address the guard_frozen trap freezes (evm/fork.sh). */
 const GUARD_EVM = await specialOf(RPC, tokens.guard_frozen as Address);
 const GUARD_INFO = { account: "guard.test", evm: GUARD_EVM };
-/** Proof of check #1 whose probes are derived as the sentinel does, from a request at `requested_ns`. */
-/** The template index the sentinel would load: every pool of the fork setup. */
-const INDEX = await buildIndex(RPC, tokens.fork_block + 1, Number(BigInt(await rpc<Hex>(RPC, "eth_blockNumber", []))));
+/** The template index the sentinel builds for a check: every pool of the fork setup, up to its block. */
+const INDEX = (block: number) => buildIndex(RPC, tokens.fork_block + 1, block);
 const NO_NEAR: NearFacts = { listed: [], previous: null };
 /** The amount the agent states at request_check in the demo: 0.00001 ETH. */
 const AMOUNT = 10_000_000_000_000n;
 /** Time of the fork's latest block: a check requested now (its swap deadline is 300 s later). */
 const headTime = async () => BigInt((await rpc<{ timestamp: Hex }>(RPC, "eth_getBlockByNumber", ["latest", false])).timestamp);
-/** `probe` replaces part of what deriveProbes gives (a function gets the derived one). */
-const proofOf = async (token: Address = TRAP, probe?: Partial<Probe> | ((derived: Probe) => Partial<Probe>), guard: Address = GUARD_EVM, requested_ns = "0", near = NO_NEAR): Promise<Proof> =>
-  toProof(
-    1,
-    token,
-    await checkToken(RPC, token, guard, (head) => {
-      const derived = deriveProbes({ guard: GUARD_INFO.account, id: 1, requested_ns }, head.hash);
-      return { ...derived, ...(typeof probe === "function" ? probe(derived) : probe) };
-    }, {
-      index: INDEX,
-      near: async () => near,
-      amount: AMOUNT,
-      preview: localPreviews({ guard, target: token, amount: AMOUNT, requestedS: await headTime() }),
-    }),
-  );
+/** A proof and the request time on NEAR its check was bound to (what get_check returns). */
+type Requested = Proof & { requested_ns: string };
+/** Proof of check #1 requested at the fork's latest block, once the blocks it waits for are mined; its
+ *  probes are derived as the sentinel does, `probe` replaces part of them (a function gets the derived one). */
+const proofOf = async (token: Address = TRAP, probe?: Partial<Probe> | ((derived: Probe) => Partial<Probe>), guard: Address = GUARD_EVM, near = NO_NEAR): Promise<Requested> => {
+  const requested = await headTime();
+  const requested_ns = (requested * 1_000_000_000n).toString();
+  await mine(RPC, CHECK_BLOCKS);
+  const r = await checkToken(RPC, token, guard, (head) => {
+    const derived = deriveProbes({ guard: GUARD_INFO.account, id: 1, requested_ns }, head.hash);
+    return { ...derived, ...(typeof probe === "function" ? probe(derived) : probe) };
+  }, {
+    requested_ns,
+    index: INDEX,
+    near: async () => near,
+    amount: AMOUNT,
+    preview: localPreviews({ guard, target: token, amount: AMOUNT, requestedS: requested }),
+  });
+  return { ...toProof(1, token, r), requested_ns };
+};
+let snapshot: Hex;
+beforeEach(async () => void (snapshot = await rpc<Hex>(RPC, "evm_snapshot", [])));
+afterEach(async () => void (await rpc(RPC, "evm_revert", [snapshot])));
 /** The calls of block `i` of request `side` (0 the guard side, 1 the probe side, 2 the synthetic calls), editable. */
 const callsIn = (p: Proof, side: number, i: number) => (p.request as any)[side].params[0].blockStateCalls[i].calls as Record<string, string>[];
 const failed = (lines: { ok: boolean; line: string }[]) => lines.filter((l) => !l.ok).map((l) => l.line);
@@ -61,7 +69,7 @@ const onChain = (p: Proof, over: Partial<NonNullable<OnChain>> = {}) => async ()
   reasons: p.reasons,
   evidence_sha256: hashOf(p.evidence),
   quote: evidenceOf(p).quote,
-  requested_ns: "0",
+  requested_ns: (p as Partial<Requested>).requested_ns ?? "0",
   judged_ns: "0",
   code: "code_hash" in evidenceOf(p) ? { code_hash: evidenceOf(p).code_hash, implementation: evidenceOf(p).implementation } : null,
   exit_amount: evidenceOf(p).amount ?? null,
@@ -156,8 +164,7 @@ describe("replay: the evidence string is the one posted on chain", () => {
     const proof = structuredClone(await proofOf());
     const [buy] = callsIn(proof, 0, 0);
     buy.nonce = "0x7";
-    callsIn(proof, 2, 0)[2].nonce = "0x7"; // its copies before the takebacks and on the busy side too: a consistent forgery
-    callsIn(proof, 3, 0)[0].nonce = "0x7";
+    callsIn(proof, 2, 0)[2].nonce = "0x7"; // its copy before the takebacks too: a consistent forgery
     expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("the guard's buy simulated hashes to"))).toBe(true);
   });
   test("a guard sale simulated with an approve of 2^256 - 1 instead of the exact amount is refused (request shape)", async () => {
@@ -244,12 +251,13 @@ describe("replay of the environment facts", () => {
     expect(failed(lines).length).toBe(1);
     expect(failed(lines)[0]).toContain("addresses touched: evidence");
   });
-  test("evidence that omits BASEFEE from the opcodes, verdict rejudged allow: detected", async () => {
-    const forged = withEvidence(await proofOf(tokens.basefee_trap as Address), (e) => (e.opcodes = []));
-    expect(forged.verdict).toBe("warn");
-    const lines = await replay({ ...forged, verdict: "allow", reasons: "buy, takeback probes and sales simulated without anomaly" }, RPC);
-    expect(failed(lines).length).toBe(1);
-    expect(failed(lines)[0]).toContain("opcodes in the code: BASEFEE, evidence says none");
+  test("evidence that omits BASEFEE from the opcodes, reasons rejudged without it: detected", async () => {
+    const proof = await proofOf(tokens.basefee_trap as Address);
+    expect(proof.reasons).toContain("code reads BASEFEE");
+    const forged = withEvidence(proof, (e) => (e.opcodes = []));
+    const reasons = proof.reasons.split(" ; ").filter((f) => !f.startsWith("code reads BASEFEE")).join(" ; ");
+    const lines = await replay({ ...forged, reasons }, RPC);
+    expect(failed(lines)).toEqual([expect.stringContaining("opcodes in the code: BASEFEE, evidence says none")]);
   });
   test("an opcode name that is not one of the rule's: refused before anything is sent", async () => {
     const forged = withEvidence(await proofOf(tokens.basefee_trap as Address), (e) => (e.opcodes = ["SSTORE"]));
@@ -329,18 +337,18 @@ describe("replay --check: NEAR facts the verdict rests on", () => {
   const SHA = "ab".repeat(32);
   const entry = (reporter: string) => async () => ({ reporter, evidence_sha256: SHA });
   test("a listing claimed in the evidence is found on the guard: confirmed", async () => {
-    const proof = await proofOf(tokens.usdc as Address, {}, GUARD_EVM, "0", { listed: [{ key: tokens.usdc.toLowerCase(), reporter: "b.testnet", evidence_sha256: SHA }], previous: null });
+    const proof = await proofOf(tokens.usdc as Address, {}, GUARD_EVM, { listed: [{ key: tokens.usdc.toLowerCase(), reporter: "b.testnet", evidence_sha256: SHA }], previous: null });
     expect(proof.verdict).toBe("block");
     const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof), entry: entry("b.testnet") });
     expect(failed(lines)).toEqual([]);
     expect(lines.some((l) => l.ok && l.line.includes("blocklist entry of"))).toBe(true);
   });
   test("a listing invented by the sentinel (another reporter on the guard) is refused", async () => {
-    const proof = await proofOf(tokens.usdc as Address, {}, GUARD_EVM, "0", { listed: [{ key: tokens.usdc.toLowerCase(), reporter: "b.testnet", evidence_sha256: SHA }], previous: null });
+    const proof = await proofOf(tokens.usdc as Address, {}, GUARD_EVM, { listed: [{ key: tokens.usdc.toLowerCase(), reporter: "b.testnet", evidence_sha256: SHA }], previous: null });
     expect(failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof), entry: entry("c.testnet") })).some((l) => l.includes("blocklist entry"))).toBe(true);
   });
   test("a previous code that is not the one the guard stored for that check is refused", async () => {
-    const proof = await proofOf(tokens.lp_burned as Address, {}, GUARD_EVM, "0", { listed: [], previous: { id: 9, code_hash: `0x${"00".repeat(32)}`, implementation: null } });
+    const proof = await proofOf(tokens.lp_burned as Address, {}, GUARD_EVM, { listed: [], previous: { id: 9, code_hash: `0x${"00".repeat(32)}`, implementation: null } });
     expect(proof.verdict).toBe("warn");
     const chain = async (id: number) => (id === 9 ? { ...(await onChain(proof)())!, code: { code_hash: `0x${"11".repeat(32)}`, implementation: null } } : onChain(proof)());
     expect(failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain })).some((l) => l.includes("last check #9"))).toBe(true);
@@ -466,26 +474,22 @@ describe("replay: time of the first simulated block", () => {
     const bad = failed(await replay(rehashed(proof), RPC));
     expect(bad.some((l) => l.includes("first simulated block time"))).toBe(true); // the node refuses it too: not in order
   });
-  test("--check on a node whose clock is not real time: check reported as not verifiable", async () => {
+});
+
+// Judge pass 8: the sentinel could simulate on any block from 60 s before the request to 60 s after its
+// verdict, and pick one whose hash draws friendly sales. The reference block is bound to the request.
+describe("replay --check: the reference block is the request's", () => {
+  test("the proof's block is the first block 4 s after the request on NEAR: confirmed", async () => {
     const proof = await proofOf();
-    const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof), clock: () => 4_000_000_000 });
+    const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) });
     expect(failed(lines)).toEqual([]);
-    expect(lines.some((l) => l.skipped && l.line.includes("not verifiable"))).toBe(true);
-    expect(summary(lines, true, proof.verdict)).toContain("not verified");
+    expect(lines.some((l) => l.ok && l.line.includes(`block ${evidenceOf(proof).block} is the reference block of the request`))).toBe(true);
   });
-  test("--check on a node on time: EVM block between the NEAR request and verdict", async () => {
-    const ts = await blockTime(Number(BigInt((await rpc<{ number: Hex }>(RPC, "eth_getBlockByNumber", ["latest", false])).number)));
-    const ns = (s: number) => (BigInt(s) * 1_000_000_000n).toString();
-    const live = { check: true, guard: GUARD_INFO, clock: () => ts };
-    const proof = await proofOf(TRAP, {}, GUARD_EVM, ns(ts - 5));
-    expect(await blockTime(evidenceOf(proof).block)).toBe(ts);
-    const good = await replay(proof, RPC, { ...live, chain: onChain(proof, { requested_ns: ns(ts - 5), judged_ns: ns(ts + 5) }) });
-    expect(failed(good)).toEqual([]);
-    expect(good.some((l) => l.skipped)).toBe(false);
-    const late = await proofOf(TRAP, {}, GUARD_EVM, ns(ts + 3600));
-    const stale = failed(await replay(late, RPC, { ...live, chain: onChain(late, { requested_ns: ns(ts + 3600), judged_ns: ns(ts + 3610) }) }));
-    expect(stale.length).toBe(1);
-    expect(stale[0]).toContain("EVM block time");
+  test("a proof simulated on a later block than the request's reference block: MISMATCH", async () => {
+    const proof = await proofOf();
+    const earlier = (BigInt(proof.requested_ns) - 6_000_000_000n).toString(); // the request 6 s (3 blocks) earlier
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { requested_ns: earlier }) }));
+    expect(bad.some((l) => l.includes(`the reference block of the request at ${earlier} ns on NEAR is`))).toBe(true);
   });
 });
 
@@ -534,7 +538,7 @@ describe("replay rejects altered evidence on a clean token", () => {
 // its proof clears.
 describe("replay: the sales and list_target", () => {
   test("a first sale chosen by the sentinel replays, but --check refuses it: not derived from on-chain data", async () => {
-    const proof = await proofOf(tokens.safe as Address, (d) => ({ sale: { ...d.sale, first: 5, bps: 5001 } }));
+    const proof = await proofOf(tokens.safe as Address, (d) => ({ sale: { ...d.sale, first: d.sale.first === SALE_BLOCKS[0] ? SALE_BLOCKS[0] + 1 : SALE_BLOCKS[0], bps: 5001 } }));
     expect(failed(await replay(proof, RPC))).toEqual([]);
     const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) }));
     expect(bad).toEqual([expect.stringContaining("sales not derived from on-chain data")]);
@@ -547,7 +551,7 @@ describe("replay: the sales and list_target", () => {
   });
   test("an evidence.sales other than the one simulated: refused", async () => {
     const proof = await proofOf(tokens.safe as Address);
-    const first = withEvidence(proof, (e) => (e.sales.first = e.sales.first === 5 ? 6 : 5));
+    const first = withEvidence(proof, (e) => (e.sales.first = e.sales.first === SALE_BLOCKS[0] ? SALE_BLOCKS[0] + 1 : SALE_BLOCKS[0]));
     expect(failed(await replay(first, RPC)).some((l) => l.includes("the guard's sales are not where evidence.sales puts them"))).toBe(true);
     const late = withEvidence(proof, (e) => (e.sales.late = e.sales.late === 200 ? 201 : 200));
     expect(failed(await replay(late, RPC)).some((l) => l.includes("the guard's sales are not where evidence.sales puts them"))).toBe(true);
@@ -578,29 +582,49 @@ describe("replay: the sales and list_target", () => {
   });
 });
 
-// Judge pass 7: the guard's sales run again after others' activity (a fourth request), and the template
-// index window is bound to the check's block.
-describe("replay: others' activity and the index window", () => {
-  test("WethKey's block replays identically, with --check: the activity's sender derived like the probes", async () => {
-    const proof = await proofOf(tokens.weth_key as Address);
-    expect(proof.verdict).toBe("block");
-    expect(proof.request.length).toBe(4);
-    const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) });
-    expect(failed(lines)).toEqual([]);
-    expect(lines.some((l) => l.ok && l.line.includes("verdict block rejudged identically"))).toBe(true);
-  });
-  test("others' activity sent from an address the sentinel chose: --check refuses it", async () => {
-    const proof = await proofOf(tokens.safe as Address, { bystander: rand() });
+// Judges 7 and 8: the guard's sales run again on a real block mined after the reference block (a fourth
+// request, on its own base block), and the template index window is bound to the check's block.
+describe("replay: the later side and the index window", () => {
+  for (const [name, token] of [["WethKey", tokens.weth_key], ["ApproveKey", tokens.approve_key]] as const) {
+    test(`${name}'s block replays identically, with --check: the later side's block derived like the probes`, async () => {
+      const proof = await proofOf(token as Address);
+      expect(proof.verdict).toBe("block");
+      expect(proof.request.length).toBe(4);
+      const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) });
+      expect(failed(lines)).toEqual([]);
+      expect(lines.some((l) => l.ok && l.line.includes("later side rebuilt on block"))).toBe(true);
+      expect(lines.some((l) => l.ok && l.line.includes("after the reference block, as derived"))).toBe(true);
+    });
+  }
+  test("a later side on a block the sentinel chose: replays, but --check refuses it", async () => {
+    const proof = await proofOf(tokens.safe as Address, (d) => ({ later: d.later === LATER_S[1] ? LATER_S[0] : LATER_S[1] }));
     expect(failed(await replay(proof, RPC))).toEqual([]);
-    expect(failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) }))).toEqual([expect.stringContaining("not derived")]);
+    expect(failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) }))).toEqual([expect.stringContaining("later side's block not derived from on-chain data")]);
   });
-  test("others' activity left out of the fourth request (WethKey then sells): refused", async () => {
+  test("a later side without the buy's state change (WethKey then sells): refused", async () => {
     const proof = structuredClone(await proofOf(tokens.weth_key as Address));
-    for (const b of (proof.request as any)[3].params[0].blockStateCalls) b.calls = b.calls.filter((c: Record<string, string>) => c.from.toLowerCase() === GUARD_EVM.toLowerCase());
-    expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("request shape"))).toBe(true);
+    const [first] = (proof.request as any)[3].params[0].blockStateCalls;
+    for (const o of Object.values(first.stateOverrides) as { stateDiff?: unknown }[]) delete o.stateDiff;
+    expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("request shape: the later side is not the guard's sales on block"))).toBe(true);
+  });
+  test("a later side on the reference block itself, not after it: refused before anything is sent", async () => {
+    const proof = withEvidence(await proofOf(tokens.safe as Address), (e) => (e.later.block = e.block));
+    expect(failed(await replay(proof, RPC))).toEqual(["MISMATCH evidence fields have unexpected types (nothing sent to the node)"]);
+  });
+  test("a node that does not serve the later block's state: an ERROR line and REPLAY FAILED, never OK", async () => {
+    const proof = structuredClone(await proofOf(tokens.safe as Address));
+    const missing = evidenceOf(proof).later.block + 1_000_000; // a block this node does not have, as a pruned one would answer
+    (proof.request as any)[3].params[1] = toHex(missing);
+    const lines = await replay(rehashed(withEvidence(proof, (e) => (e.later.block = missing))), RPC);
+    expect(lines.some((l) => l.line.startsWith(`ERROR    resending the requests at block ${evidenceOf(proof).block} and block ${missing}`))).toBe(true);
+    expect(summary(lines, false, proof.verdict)).toStartWith("REPLAY FAILED");
   });
   test("a proof judged on an index window that does not cover the 2,000 blocks before its block: MISMATCH", async () => {
     const proof = withEvidence(await proofOf(tokens.farm_fresh as Address), (e) => (e.reputation.from = e.block - 100));
     expect(failed(await replay(proof, RPC)).some((l) => l.includes("template index window"))).toBe(true);
+  });
+  test("a proof judged on an index window ending before its block (a farm's newest pools dropped): MISMATCH", async () => {
+    const proof = withEvidence(await proofOf(tokens.farm_fresh as Address), (e) => (e.reputation.to = e.block - 1));
+    expect(failed(await replay(proof, RPC)).some((l) => l.includes(`is not bound to block`))).toBe(true);
   });
 });

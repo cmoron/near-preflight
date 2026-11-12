@@ -1,10 +1,40 @@
-// The sentinel's checks against the local copy of Base (run evm/fork.sh first).
-import { describe, expect, test } from "bun:test";
+// The sentinel's checks against the local copy of Base (run evm/fork.sh first). Each check mines the
+// blocks it waits for (app/testkit.ts mine); each test then reverts the fork to where it started.
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { concat, decodeAbiParameters, encodeAbiParameters, encodeFunctionData, keccak256, pad, parseAbi, parseEther, parseTransaction, stringToHex, toHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
 import { buildIndex, type Index } from "./index";
-import { localPreviews, SETUP_FEES } from "./testkit";
-import { checkExit, checkToken, deriveProbes, ETH_LOGS, FACTORY, GUARD, judge, judgeExit, labelsOf, liquidityFindings, plan, ROUTER, rpc, specialOf, WETH, type Fees, type Header, type Holder, type Liquidity, type NearFacts, type Result } from "./verifier";
+import { CHECK_BLOCKS, localPreviews, mine, SETUP_FEES, USERS } from "./testkit";
+import {
+  checkExit,
+  checkToken,
+  deriveProbes,
+  ETH_LOGS,
+  FACTORY,
+  GUARD,
+  judge,
+  judgeExit,
+  labelsOf,
+  LATER,
+  LATER_S,
+  laterBlocks,
+  liquidityFindings,
+  plan,
+  ROUTER,
+  rpc,
+  SALE_BLOCKS,
+  specialOf,
+  WETH,
+  type Block,
+  type Context,
+  type Fees,
+  type Header,
+  type Holder,
+  type Liquidity,
+  type NearFacts,
+  type Probe,
+  type Result,
+} from "./verifier";
 
 const TRANSFER = keccak256(stringToHex("Transfer(address,address,uint256)"));
 
@@ -17,8 +47,8 @@ const rand = (): Address => `0x${Buffer.from(crypto.getRandomValues(new Uint8Arr
 let tickets = 0;
 /** Probes and first sale derived as the sentinel does, for a fresh check of a guard. */
 const probes = (head: Header) => deriveProbes({ guard: "guard.test", id: ++tickets, requested_ns: "0" }, head.hash);
-/** Index of every pool the fork setup launched (evm/fork.sh), as the sentinel would load it. */
-const INDEX = await buildIndex(RPC, tokens.fork_block + 1, Number(BigInt(await rpc<Hex>(RPC, "eth_blockNumber", []))));
+/** The index the sentinel builds for a check: every pool the fork setup launched (evm/fork.sh), up to the check's block. */
+const INDEX = (block: number) => buildIndex(RPC, tokens.fork_block + 1, block);
 const NO_NEAR: NearFacts = { listed: [], previous: null };
 /** The amount the agent states at request_check in the demo: 0.00001 ETH. */
 const AMOUNT = 10_000_000_000_000n;
@@ -27,8 +57,23 @@ const headTime = async () => BigInt((await rpc<{ timestamp: Hex }>(RPC, "eth_get
 /** What the guard would sign for a check of `token` by `guard`, requested now. */
 const previews = async (token: string, guard: Address, fees: Fees = SETUP_FEES, amount = AMOUNT) =>
   localPreviews({ guard, target: token as Address, amount, requestedS: await headTime(), fees });
-const check = async (token: string, guard: Address = GUARD_EVM, index: Index | null = INDEX, near: NearFacts = NO_NEAR, fees: Fees = SETUP_FEES, amount = AMOUNT) =>
-  checkToken(RPC, token as Address, guard, probes, { index, near: async () => near, amount, preview: await previews(token, guard, fees, amount) });
+/** A check requested at the fork's latest block, once the blocks it waits for are mined with others'
+ *  activity (`between`, if given, runs after the reference block). */
+const checkNow = async (token: string, guard: Address, chosen: (head: Header) => Probe, ctx: Omit<Context, "requested_ns">, between?: () => Promise<void>) => {
+  const requested_ns = ((await headTime()) * 1_000_000_000n).toString();
+  if (between) {
+    await mine(RPC, CHECK_BLOCKS - LATER_S[1] / 2 + 1); // the reference block and the one after it
+    await rpc(RPC, "evm_setNextBlockTimestamp", [toHex((await headTime()) + 2n)]);
+    await between();
+  }
+  await mine(RPC, CHECK_BLOCKS);
+  return checkToken(RPC, token as Address, guard, chosen, { ...ctx, requested_ns });
+};
+const check = async (token: string, guard: Address = GUARD_EVM, index: Context["index"] = INDEX, near: NearFacts = NO_NEAR, fees: Fees = SETUP_FEES, amount = AMOUNT) =>
+  checkNow(token, guard, probes, { index, near: async () => near, amount, preview: await previews(token, guard, fees, amount) });
+let snapshot: Hex;
+beforeEach(async () => void (snapshot = await rpc<Hex>(RPC, "evm_snapshot", [])));
+afterEach(async () => void (await rpc(RPC, "evm_revert", [snapshot])));
 
 describe("sentinel verdict", () => {
   test("USDC, healthy witness already on Base: allow", async () => expect((await check(tokens.usdc)).verdict).toBe("allow"));
@@ -117,7 +162,7 @@ describe("the guard side simulates exactly what the guard signs", () => {
   });
   test("the guard's buy is simulated as the very transaction it signs: calldata, value, nonce, gas, fees; its hash is in the evidence", async () => {
     const p = await previews(tokens.usdc, GUARD_EVM);
-    const r = await checkToken(RPC, tokens.usdc as Address, GUARD_EVM, probes, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: p });
+    const r = await checkNow(tokens.usdc, GUARD_EVM, probes, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: p });
     const [signed] = await p.check(BigInt(r.evidence.quote)); // what buy would sign on this verdict
     expect(r.evidence.tx_hashes).toEqual([keccak256(signed)]);
     const t = parseTransaction(signed);
@@ -160,7 +205,7 @@ describe("nothing but the guard's own transactions before each one it signs", ()
     expect(calls.every((c) => c.from.toLowerCase() === GUARD_EVM.toLowerCase() && c.nonce !== undefined)).toBe(true);
     expect(calls.map((c) => c.data.slice(0, 10))).toEqual(["0xb6f9de95", "0x095ea7b3", "0x791ac947", "0x095ea7b3", "0x791ac947"]);
     expect(Object.keys(guardSide[0].stateOverrides ?? {}).every((a) => a.toLowerCase() === GUARD_EVM.toLowerCase())).toBe(true);
-    expect(r.request.length).toBe(4); // the probe's twins, the synthetic calls and the busy side run apart
+    expect(r.request.length).toBe(4); // the probe's twins, the synthetic calls and the later side run apart
   });
 });
 
@@ -183,12 +228,14 @@ describe("a token whose transfers read what the simulation cannot reproduce", ()
     expect(r.reasons).toContain("0x4200..0015");
     expect(r.evidence.touched).toContain((await helperOf(tokens.helper_trap)).toLowerCase());
   });
-  test("its sibling keyed on the base fee, which the simulation keeps constant: warn naming BASEFEE, never allow", async () => {
+  test("its sibling keyed on the base fee: warn naming BASEFEE, a block once the base fee moved before the later side's block", async () => {
     const r = await check(tokens.basefee_trap);
-    expect(r.evidence.calls.filter((c) => c.includes("sale")).every((c) => c.endsWith(": ok"))).toBe(true);
-    expect(r.verdict).toBe("warn");
+    expect(r.evidence.calls.filter((c) => c.startsWith(`${GUARD}sale`)).every((c) => c.endsWith(": ok"))).toBe(true);
     expect(r.reasons).toContain("code reads BASEFEE");
     expect(r.evidence.opcodes).toEqual(["BASEFEE"]);
+    // the fork's base fee falls by about 2 wei a block; on Base it sits at its floor in most blocks (a warn)
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toStartWith(`sale refused ${r.evidence.sales.first} blocks after the buy on Base's state of block ${r.evidence.later!.block}`);
   });
   test("USDC touches its proxy, its implementation, its pool, the router and WETH only: allow", async () => {
     const r = await check(tokens.usdc);
@@ -215,10 +262,12 @@ describe("the check's sales are where and what a token cannot expect", () => {
     expect(r.reasons).toMatch(/^sale refused \d+ blocks after the buy/);
     expect(r.list_target).toBe(true);
   });
-  test("the sales derive from the ticket and the block hash: the first 5 to 150 blocks after the buy, 13 % to 87 %, never a whole percent; the rest 200 to 255 blocks after the buy (pure)", () => {
-    const sales = Array.from({ length: 3000 }, (_, id) => deriveProbes({ guard: "guard.test", id, requested_ns: "0" }, keccak256(toHex(id))).sale);
+  test("the sales derive from the ticket and the block hash: the first 5 to 150 blocks after the buy, 13 % to 87 %, never a whole percent; the rest 200 to 255 blocks after the buy; the later side 16 to 24 s after the reference block (pure)", () => {
+    const drawn = Array.from({ length: 3000 }, (_, id) => deriveProbes({ guard: "guard.test", id, requested_ns: "0" }, keccak256(toHex(id))));
+    const sales = drawn.map((d) => d.sale);
     expect(Math.min(...sales.map((s) => s.first))).toBe(5);
     expect(Math.max(...sales.map((s) => s.first))).toBe(150);
+    expect([...new Set(drawn.map((d) => d.later))].sort((a, b) => a - b)).toEqual([16, 17, 18, 19, 20, 21, 22, 23, 24]);
     expect(Math.min(...sales.map((s) => s.late))).toBe(200);
     expect(Math.max(...sales.map((s) => s.late))).toBe(255); // eth_simulateV1 refuses a block 256 past the proof's: the buy is in the 1st
     expect(new Set(sales.map((s) => s.late)).size).toBe(56);
@@ -226,6 +275,22 @@ describe("the check's sales are where and what a token cannot expect", () => {
     expect(new Set(sales.map((s) => s.bps)).size).toBeGreaterThan(1000);
     const ticket = { guard: "guard.test", id: 1, requested_ns: "0" };
     expect(deriveProbes(ticket, keccak256("0x01")).sale).not.toEqual(deriveProbes(ticket, keccak256("0x02")).sale); // the hash of a block not mined yet
+  });
+  test("the later side holds the guard side's blocks after its real block, a sale whose approve is not after it left out whole (pure)", () => {
+    const at = (n: number): Block => ({ number: 100n + BigInt(n), calls: n === 20 || n === 230 ? [{ label: "approve", from: GUARD_EVM, to: WETH, data: "0x" }] : n === 21 || n === 231 ? [{ label: "swap", from: GUARD_EVM, to: WETH, data: "0x" }] : [] });
+    const guardSide = Array.from({ length: 231 }, (_, i) => at(i + 1));
+    const sale = { first: 20, bps: 5001, late: 230 };
+    /** The later side's first block and the blocks holding a call, after real block `real`. */
+    const after = (real: number) => {
+      const blocks = laterBlocks(guardSide, 100n, sale, BigInt(real));
+      expect(blocks.map((b) => Number(b.number))).toEqual(Array.from({ length: 331 - real }, (_, i) => real + 1 + i)); // no gap from the real block on
+      return blocks.filter((b) => b.calls.length).map((b) => Number(b.number));
+    };
+    expect(after(110)).toEqual([120, 121, 330, 331]); // both sales after it
+    expect(after(119)).toEqual([120, 121, 330, 331]);
+    expect(after(120)).toEqual([330, 331]); // the first approve on the real block: the first sale left out, its swap's block empty
+    expect(after(150)).toEqual([330, 331]); // well past the first sale (Base: about 100 blocks a check)
+    expect(laterBlocks(guardSide, 100n, sale, 150n).flatMap((b) => b.calls.map((c) => c.label))).toEqual([`${LATER}approve`, `${LATER}swap`]);
   });
   test("the guard side sells the derived share first, then the rest", async () => {
     const r = await check(tokens.safe);
@@ -236,21 +301,48 @@ describe("the check's sales are where and what a token cannot expect", () => {
   });
 });
 
-// Judge pass 7: WethKey sells only while WETH's total supply is what its own trades left. WETH is an
-// expected address and nobody else moves it in a simulation; on Base deposits and withdrawals move it
-// every block. The guard's sales run again after others' activity: a sale that differs is a block.
-describe("a token keyed on state others move every block", () => {
-  test("WethKey, every sale passes alone: block once others used WETH, the factory and paid the guard; not listed", async () => {
-    const r = await check(tokens.weth_key);
-    expect(r.evidence.calls.filter((c) => c.startsWith(`${GUARD}sale`)).every((c) => c.endsWith(": ok"))).toBe(true);
-    expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(/^sale refused \d+ blocks after the buy after others' WETH, factory and ETH activity/);
-    expect(r.list_target).toBe(false);
+// Judge passes 7 and 8: tokens that sell only while WETH's supply is what their own trades left. In a
+// lone simulation nobody else moves WETH; on Base others move it in most blocks. WethKey tests at the
+// sale, ApproveKey at the approve, BusyTell at the sale unless a pair was created after the approve (the
+// busy side's recipe). The later side runs the guard's sales on a real block mined after the reference
+// block, with the buy's state change applied: whatever Base did in between, before the approve too.
+describe("a token keyed on state Base moves", () => {
+  for (const [name, token] of [["WethKey", tokens.weth_key], ["ApproveKey", tokens.approve_key], ["BusyTell", tokens.busy_tell]] as const) {
+    test(`${name}, every sale passes on the reference block: block on Base's later state, not listed`, async () => {
+      const r = await check(token);
+      expect(r.evidence.calls.filter((c) => c.startsWith(`${GUARD}sale`)).every((c) => c.endsWith(": ok"))).toBe(true);
+      expect(r.verdict).toBe("block");
+      expect(r.reasons).toMatch(new RegExp(`^sale refused \\d+ blocks after the buy on Base's state of block ${r.evidence.later!.block} `));
+      expect(r.evidence.later!.block - r.evidence.block).toBeGreaterThanOrEqual(LATER_S[0] / 2); // 2 s blocks on the fork
+      expect(r.list_target).toBe(false);
+    });
+  }
+  test("each one's code calls WETH (BusyTell the factory too): block whatever moved", async () => {
+    expect((await check(tokens.weth_key)).reasons).toContain("token calls WETH during a transfer");
+    expect((await check(tokens.busy_tell)).reasons).toContain("token calls WETH and the V2 factory during a transfer");
   });
-  test("USDC sells the same after others' activity: both sales run again, allow", async () => {
+  test("USDC sells the same on Base's later state: both sales run again, allow", async () => {
     const r = await check(tokens.usdc);
-    expect(r.evidence.calls.filter((c) => c.startsWith(`busy: ${GUARD}sale`))).toEqual([`busy: ${GUARD}sale first: ok`, `busy: ${GUARD}sale late: ok`]);
+    const again = r.evidence.calls.filter((c) => c.startsWith(`${LATER}${GUARD}sale`)); // the first sale too, when its approve comes after the later block
+    expect(again).toContain(`${LATER}${GUARD}sale late: ok`);
+    expect(again.every((c) => c.endsWith(": ok"))).toBe(true);
+    expect(r.evidence.later!.moved).toEqual([]);
     expect(r.verdict).toBe("allow");
+  });
+  test("someone else trades USDC's pool before the later block: the sales run on the pool as Base left it, a warn", async () => {
+    const swap = parseAbi(["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256) payable"]);
+    const trade = async () => {
+      await rpc(RPC, "anvil_impersonateAccount", [USERS[0]]);
+      const data = encodeFunctionData({ abi: swap, args: [0n, [WETH, tokens.usdc as Address], USERS[0], 9_999_999_999n] });
+      await rpc(RPC, "eth_sendTransaction", [{ from: USERS[0], to: ROUTER, data, value: toHex(parseEther("0.5")) }]);
+    };
+    const r = await checkNow(tokens.usdc, GUARD_EVM, probes, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(tokens.usdc, GUARD_EVM) }, trade);
+    expect(r.evidence.later!.moved.length).toBeGreaterThan(0);
+    expect(r.reasons).toMatch(/^\d+ slot\(s\) the buy wrote moved on Base before block \d+ \(.*0x8335\.\.2913/);
+    const again = r.evidence.calls.filter((c) => c.startsWith(`${LATER}${GUARD}sale`)); // the first sale too, when its approve comes after the later block
+    expect(again).toContain(`${LATER}${GUARD}sale late: ok`);
+    expect(again.every((c) => c.endsWith(": ok"))).toBe(true);
+    expect(r.verdict).toBe("warn"); // the pool moved by 0.5 ETH: each sale still pays its quote there
   });
 });
 
@@ -258,14 +350,14 @@ describe("a token keyed on state others move every block", () => {
 // within it. A refusal the late sale does not share clears with time: it blocks the check, never lists.
 describe("a sale refused only early never lists", () => {
   const checkFirst = async (token: string, first: number) =>
-    checkToken(RPC, token as Address, GUARD_EVM, (h) => {
+    checkNow(token, GUARD_EVM, (h) => {
       const p = probes(h);
       return { ...p, sale: { ...p.sale, first } };
     }, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(token, GUARD_EVM) });
   test("Cooldown60, first sale 10 blocks after the buy: block, not listed (the late sale goes through)", async () => {
     const r = await checkFirst(tokens.cooldown_60, 10);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toStartWith("sale refused 10 blocks after the buy");
+    expect(r.reasons).toBe("sale refused 10 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)"); // nothing from the later side
     expect(r.list_target).toBe(false);
   });
   test("Cooldown60, first sale 40 blocks after the buy: allow", async () => {
@@ -328,8 +420,8 @@ describe("what the agent's amount decides never lists the token", () => {
 // Judge pass 6: dust was judged on the tokens the buy delivered, which the token decides, so a token that
 // delivers almost nothing was never listed. Dust is now the pool's quote for the agent's amount.
 describe("dust is the pool's quote for the amount, not what the token delivers (pure)", () => {
-  const [token, buyer, stranger, pair, bystander] = ["0xa1", "0xa2", "0xa3", "0xa4", "0xa5"].map((a) => pad(a as Hex, { size: 20 })) as Address[];
-  const w = { token, guard: GUARD_EVM, buyer, stranger, bystander };
+  const [token, buyer, stranger, pair] = ["0xa1", "0xa2", "0xa3", "0xa4"].map((a) => pad(a as Hex, { size: 20 })) as Address[];
+  const w = { token, guard: GUARD_EVM, buyer, stranger };
   const transfer = (to: Address, value: bigint) => ({ address: token, topics: [TRANSFER, pad(pair), pad(to)], data: pad(toHex(value)) });
   const okWith = (logs: Result["logs"] = [], returnData: Hex = "0x"): Result => ({ status: "0x1", returnData, logs });
   /** judge on a check where the pool quotes `quoted` tokens for the amount and each buy delivers `got`;
@@ -337,7 +429,7 @@ describe("dust is the pool's quote for the amount, not what the token delivers (
   const judged = async (quoted: bigint, got: bigint) => {
     const p = localPreviews({ guard: w.guard, target: token, amount: AMOUNT });
     const txs = { buy: (await p.check(0n))[0], sales: [await p.sale(1n, 0n), await p.sale(1n, 0n)] as [Hex[], Hex[]] };
-    const sales = { first: 5, bps: 5001, late: 230 };
+    const sales = { first: SALE_BLOCKS[0], bps: 5001, late: 230 };
     const full = got >= 10n ? { amounts: { guard: got, probe: got }, owner: null, sale: sales } : undefined; // under 10 units the check stops at the buy
     const labels = labelsOf(plan(token, w, 100n, AMOUNT, txs, full));
     const results = labels.map((l): Result => {
@@ -347,7 +439,7 @@ describe("dust is the pool's quote for the amount, not what the token delivers (
       return l.includes("transferFrom") ? { status: "0x0", returnData: "0x" } : okWith();
     });
     const liquidity = { pair, supply: "1", supply_before: "1", created: null, candidates: 0, holders: null }; // old: no finding
-    return judge(labels, results, { block: 100, code_hash: `0x${"00".repeat(32)}`, implementation: null, liquidity, reputation: null, near: NO_NEAR, opcodes: [], touched: [], sales }, w);
+    return judge(labels, results, { block: 100, code_hash: `0x${"00".repeat(32)}`, implementation: null, liquidity, reputation: null, near: NO_NEAR, opcodes: [], touched: [], token_calls: [], sales, later: null }, w);
   };
   test("a buy that delivers 500 units where the pool quotes 10^18: block, listed", async () => {
     const r = await judged(10n ** 18n, 500n);
@@ -449,13 +541,13 @@ describe("template reputation", () => {
     expect(r.verdict).toBe("allow");
     expect(r.reasons).toContain("template reputation not applied: the token's own pool was funded before the index window");
     expect(r.evidence.reputation?.before_block).toBeNull();
-    expect(INDEX.templates[r.evidence.template].filter((p) => p.drained !== null).length).toBe(3);
+    expect((await INDEX(r.evidence.block)).templates[r.evidence.template].filter((p) => p.drained !== null).length).toBe(3);
   });
-  // Judge pass 7: a sentinel judged a farm copy on a window that missed its earlier pools.
-  test("an index window that misses the farm's earlier pools, or ends long before the check: refused, no verdict", async () => {
-    const head = Number(BigInt(await rpc<Hex>(RPC, "eth_blockNumber", [])));
-    await expect(check(tokens.farm_fresh, GUARD_EVM, await buildIndex(RPC, head - 3, head))).rejects.toThrow("template index window");
-    await expect(check(tokens.farm_fresh, GUARD_EVM, await buildIndex(RPC, tokens.fork_block + 1, head - 301))).rejects.toThrow("template index window");
+  // Judge passes 7 and 8: a sentinel judged a farm copy on a window that missed its earlier pools, or
+  // ended up to 300 blocks before the check, which drops a farm's newest pools.
+  test("an index window that misses the farm's earlier pools, or ends before the check's block: refused, no verdict", async () => {
+    await expect(check(tokens.farm_fresh, GUARD_EVM, (b) => buildIndex(RPC, b - 3, b))).rejects.toThrow("template index window");
+    await expect(check(tokens.farm_fresh, GUARD_EVM, (b) => buildIndex(RPC, tokens.fork_block + 1, b - 1))).rejects.toThrow("is not bound to block");
   });
   test("without an index the reputation is unknown: warn, never allow", async () => {
     const r = await check(tokens.safe, GUARD_EVM, null);
@@ -486,7 +578,7 @@ describe("shared blocklist and code changes read from NEAR", () => {
   });
   test("the sentinel asks NEAR about the target only (the guard lists tokens, never templates)", async () => {
     const asked: string[] = [];
-    await checkToken(RPC, tokens.farm_fresh as Address, GUARD_EVM, probes, {
+    await checkNow(tokens.farm_fresh, GUARD_EVM, probes, {
       index: INDEX,
       near: async (target) => (asked.push(target), NO_NEAR),
       amount: AMOUNT,
@@ -552,30 +644,34 @@ describe("proof", () => {
   });
   test("simulated blocks follow Base's cadence: 2 s per block, the real base fee and coinbase, one prevrandao per L1 epoch of 6 blocks", async () => {
     const r = await check(tokens.safe);
-    const res = await fetch(RPC, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getBlockByNumber", params: [`0x${r.evidence.block.toString(16)}`, false] }),
-    });
-    const { result: h } = (await res.json()) as { result: { baseFeePerGas: string; mixHash: Hex; miner: string; timestamp: string } };
-    const block = BigInt(r.evidence.block);
-    const seq = BigInt(await rpc<Hex>(RPC, "eth_call", [{ to: "0x4200000000000000000000000000000000000015", data: "0x64ca23ef" }, toHex(block)])); // L1Block.sequenceNumber()
-    const epochOf = (n: bigint) => (seq + n - block) / 6n;
-    for (const q of r.request) {
+    /** Each request's base block: the reference block, the later side's real block for the 4th. */
+    const bases = [r.evidence.block, r.evidence.block, r.evidence.block, r.evidence.later!.block];
+    for (const [i, q] of r.request.entries()) {
+      const block = BigInt(bases[i]);
+      expect(q.params[1]).toBe(toHex(block));
+      const h = await rpc<{ baseFeePerGas: string; mixHash: Hex; miner: string; timestamp: string }>(RPC, "eth_getBlockByNumber", [toHex(block), false]);
+      const seq = BigInt(await rpc<Hex>(RPC, "eth_call", [{ to: "0x4200000000000000000000000000000000000015", data: "0x64ca23ef" }, toHex(block)])); // L1Block.sequenceNumber()
+      const epochOf = (n: bigint) => (seq + n - block) / 6n;
       const blocks = (q.params[0] as { blockStateCalls: { blockOverrides: Record<string, string>; calls: Record<string, string>[] }[] }).blockStateCalls;
       for (const b of blocks) {
         const n = BigInt(b.blockOverrides.number);
         expect(BigInt(b.blockOverrides.time) - BigInt(h.timestamp)).toBe(2n * (n - block)); // number and time agree
         expect(b.blockOverrides).toMatchObject({ baseFeePerGas: h.baseFeePerGas, feeRecipient: h.miner });
-        // as on Base, the L1 origin's for the rest of the proof block's epoch, then one per later epoch
+        // as on Base, the L1 origin's for the rest of the base block's epoch, then one per later epoch
         expect(b.blockOverrides.prevRandao).toBe(epochOf(n) === 0n ? h.mixHash : keccak256(concat([h.mixHash, toHex(epochOf(n), { size: 32 })])));
         for (const c of b.calls) {
           expect(BigInt(c.maxPriorityFeePerGas)).toBeGreaterThan(0n);
           expect(BigInt(c.maxFeePerGas)).toBeGreaterThan(BigInt(h.baseFeePerGas));
-          expect(c.gas).toBe(c.data.startsWith("0xc9c65396") ? "0x2dc6c0" : "0x3d090"); // the guard's 250,000, not the block's limit; others' createPair 3,000,000
+          expect(c.gas).toBe("0x3d090"); // the guard's 250,000, not the block's limit
         }
       }
     }
+    const later = (r.request[3].params[0] as { blockStateCalls: { blockOverrides: Record<string, string>; calls: unknown[] }[] }).blockStateCalls;
+    expect(BigInt(later[0].blockOverrides.number)).toBeGreaterThan(BigInt(r.evidence.later!.block)); // after the real block, the guard side's blocks
+    expect(BigInt(later.at(-1)!.blockOverrides.number)).toBe(BigInt(r.evidence.block + r.evidence.sales.late + 1));
+    const block = BigInt(r.evidence.block);
+    const seq = BigInt(await rpc<Hex>(RPC, "eth_call", [{ to: "0x4200000000000000000000000000000000000015", data: "0x64ca23ef" }, toHex(block)]));
+    const epochOf = (n: bigint) => (seq + n - block) / 6n;
     const guardSide = (r.request[0].params[0] as { blockStateCalls: { blockOverrides: Record<string, string>; calls: unknown[] }[] }).blockStateCalls;
     const [first, late] = [BigInt(r.evidence.sales.first), BigInt(r.evidence.sales.late)];
     // buy; each sale's approve, then its swap `first` and `late` blocks after the buy; nothing after the late swap

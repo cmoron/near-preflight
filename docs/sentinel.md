@@ -29,7 +29,7 @@ Every fact a verdict rests on goes into the **evidence**, whose sha256 the guard
 | Template reputation  | the index of V2 WETH pools by code template ([`app/index.ts`](../app/index.ts))  | see below       |
 | Shared blocklist     | `get_entry` on the guard for the token                                           | listed: `block` |
 | Code changed         | `last_code` on the guard: code hash and proxy implementation at the last verdict | changed: `warn` |
-| Environment          | the guard's transactions replayed on a local fork: every address they touch      | see below       |
+| Environment          | the guard's transactions replayed on a local fork: what they touch and call      | see below       |
 | Environment opcodes  | the reachable code of the token and of its implementation                        | found: `warn`   |
 | Agent exit quote     | `eth_simulateV1`: the guard's own approve and swap, alone, 2 and 3 blocks ahead  | quote = ETH in  |
 
@@ -48,33 +48,60 @@ value, nonce, gas limit and fees.
 The verdict carries the keccak256 of that buy (the MPC payload). `post_verdict` refuses an `allow` or a
 `warn` whose hashes are not what the guard would sign then, and `buy` signs only that hash.
 
-A check is four `eth_simulateV1` requests on the same block, sharing no state:
+**The reference block** is the first Base block whose timestamp is at least 4 s after the check's
+request on NEAR (`requested_ns`). It is mined after the request is public, so nobody knows its hash when
+asking, and the sentinel cannot pick another: `replay --check` recomputes it.
+
+A check is four `eth_simulateV1` requests sharing no state. Three run on the reference block:
 
 - **Guard side.** The guard's buy on the block's real state, then a first sale and the rest, each an
   approve of the exact amount then `swapExactTokensForETHSupportingFeeOnTransferTokens`, each in a block
   of its own. No read, no probe, no other sender before or between them.
-- **Probe side.** The same trades from a **probe**, a fresh address derived from the check and the Base
-  block hash, so a token cannot whitelist it in advance.
+- **Probe side.** The same trades from a **probe**, a fresh address derived from the check and the
+  reference block's hash, so a token cannot whitelist it in advance.
 - **Synthetic calls.** The pool's quote and `owner()`, then both buys, then a `transferFrom` without
   approval by `owner()` and by a stranger (a **takeback**).
-- **Busy side.** The guard side again, where before each of the guard's two swaps another user (a third
-  derived address) wraps `d` wei into WETH, unwraps a third of it, sends the guard a seventh of it and
-  creates a Uniswap V2 WETH pair; `d` is 0.001 to 0.101 ETH, derived from that address.
 
-The busy side moves what Base moves every block and a lone simulation keeps still: WETH's supply and
-balances, the guard's ETH balance, the factory. None of it touches the token or its pool, so an honest
-sale pays exactly the same.
+The fourth runs on a real block Base mined later:
 
-A sale that goes through on the guard side and is refused on the busy side, or pays another amount, is
-a `block` that lists nothing: `sale refused N blocks after the buy after others' WETH, factory and ETH
-activity (…)`. Replay resends it and rejudges it; `--check` recomputes the other user's address.
+- **Later side.** The guard side's approves and swaps again, at the same block numbers and simulated
+  times, on the first real block `t` seconds after the reference block (`t` drawn per check, 16 to 24 s), with what
+  the guard's buy wrote applied to it. A sale whose approve would come before that block is left out
+  (on Base, which mines a block every 0.2 s, that block is about 100 blocks on, often past the first sale).
+
+A simulation keeps Base still between the buy and the sales; Base does not. On the later side, whatever
+Base really did in those `t` seconds is there, before the approve as well as before the swap: others'
+WETH, the base fee, the factory, the token's own pool. Nothing in it is a recipe a token could recognise.
+The sentinel waits for that block: a verdict now comes 23 to 32 s after the request (measured on Base
+mainnet and on the fork, against 8 to 10 s before).
+
+What the buy wrote comes from the [trace](#environment-rule): each storage slot it changed and each ETH
+balance, before and after. On the later block:
+
+- a slot Base did not write since takes the buy's value;
+- a slot Base also wrote keeps Base's value, and the check is a `warn` at best (`N slot(s) the buy wrote
+  moved on Base before block B`). When someone traded the pool, the later sales meet the pool as Base
+  left it, without the buy's trade;
+- an ETH balance adds the buy's change to Base's (WETH's balance is its total supply);
+- the guard gets what its own transactions spend, as on the other sides.
+
+A sale that goes through on the guard side and is refused on the later side, or pays more than 1 % less
+there against the pool's quote, is a `block` that lists nothing: `sale refused N blocks after the buy on
+Base's state of block B (…)`. Replay rebuilds the later side on the same block and rejudges it;
+`--check` recomputes `t` and the block.
+
+Measured on Base mainnet on 2026-11-12: WETH's supply moved in 160 of 600 consecutive blocks (2 min);
+the Uniswap V2 factory got 16 new pairs in the last hour, 312 in a day. State that slow often stays
+still for 24 s: a token that reads WETH or the factory is a `block` by the
+[environment rule](#environment-rule), whatever moved.
 
 The two sales are previews of an exit (no floor, a deadline past the late sale), not bytes NEAR will
 sign. An exit's own approve and swap are simulated again, as signed, by its [exit quote](#exit-quotes).
 
 **Amounts come from logs**, never from a read between transactions: tokens bought from the token's
 `Transfer` logs; the ETH a sale pays from the ETH transfers `traceTransfers` logs; a sale's quote from
-the pool's last `Sync` before its approve.
+the pool's last `Sync` before its approve (on the later side, before any sale, from the pool's reserves
+on that block: `later.reserves`).
 
 **Blocks follow Base's cadence**: 2 s per block, every block up to the late sale listed (empty in
 between: a node fills a gap with 12 s blocks), the real base fee and coinbase, and one prevrandao per
@@ -86,25 +113,34 @@ L1 epoch of 6 blocks, as on Base. Replay recomputes them.
   approve, calldata);
 - extra calls of the simulation (a top-level read, a probe's call before a sale);
 - where or what the check sells (the next block, the late block, half the balance);
-- state Base moves every block that the busy side moves too.
+- state Base moved between the buy and the later block, including before the approve;
+- WETH and the factory, whether or not they moved (the environment rule).
 
 What stays open is in [what a check cannot show](#what-a-check-cannot-show).
 
 ## Sales drawn per check
 
-| Sale       | When                                           | How much                                                 |
-| ---------- | ---------------------------------------------- | -------------------------------------------------------- |
-| First sale | 5 to 150 blocks after the buy (10 to 300 s)    | 13 % to 87 % of the tokens bought, never a whole percent |
-| Late sale  | 200 to 255 blocks after the buy (400 to 510 s) | the rest; the request ends there                         |
+| Draw       | When                                                            | What                                                     |
+| ---------- | --------------------------------------------------------------- | -------------------------------------------------------- |
+| First sale | 5 to 150 blocks after the buy (10 to 300 s)                     | 13 % to 87 % of the tokens bought, never a whole percent |
+| Late sale  | 200 to 255 blocks after the buy (400 to 510 s)                  | the rest; the request ends there                         |
+| Later side | the first real block 16 to 24 s after the reference block       | the sales whose approve comes after it, again            |
 
-The probes, the busy side's user and both sales are drawn by `deriveProbes` from:
+The probes, both sales and the later side's wait are drawn by `deriveProbes` from:
 
 ```text
-sha256("goblin-near probe|<guard>|<check id>|<requested_ns>|<Base block hash>|<role>")
+sha256("goblin-near probe|<guard>|<check id>|<requested_ns>|<reference block hash>|<role>")
 ```
 
 That block hash does not exist before the block, so a token owner watching NEAR cannot expect either
-block or the amount. The draw is in the evidence as `sales`; `replay --check` recomputes it.
+sale's block, the amount or the later block. The draws are in the evidence as `sales` and `later.block`;
+`replay --check` recomputes them.
+
+Times here assume Base's former 2 s per block, which the simulated blocks and the fork keep. Base has
+mined a block every 0.2 s since a day between 2026-08-15 (block 50,000,000: 1,000 blocks in 2,000 s) and
+2026-11-09 (block 55,000,000: 1,000 blocks in 200 s). On Base today every span counted in blocks on this
+page (sales, liquidity window, index window, drains) lasts a tenth of the time it states, and a simulated
+block's time is not a real one's: see [what a check cannot show](#what-a-check-cannot-show).
 
 `eth_simulateV1` refuses blocks more than 256 above the base block: that bounds the late sale.
 
@@ -115,7 +151,7 @@ block or the amount. The draw is in the evidence as `sales`; `replay --check` re
 L1Block contract `0x4200…0015`, the fee vaults' credits) and cannot know a future block's fields.
 
 The red team's RedL1Trap sold only while L1Block was unchanged since the buy: every simulated sale
-passed, every real one failed. Rather than guess the next tell, two facts, both in the evidence and
+passed, every real one failed. Rather than guess the next tell, three facts, all in the evidence and
 recomputed by replay ([`app/environment.ts`](../app/environment.ts)):
 
 **`touched`**: every address the guard's own transactions read or call, at any depth (BALANCE,
@@ -126,6 +162,17 @@ EXTCODESIZE, EXTCODEHASH, EXTCODECOPY, CALL, STATICCALL, DELEGATECALL, CALLCODE)
 - Allowed: the token, its implementation, its V2 pool, the router, WETH, the factory, the guard and the
   precompiles. Any other address is a `block` naming it:
   `reads 0x4200..0015, 0x8bde..9881 during a transfer` (the second is L1Block's implementation).
+
+**`token_calls`**: the contracts the token's own code calls in those transactions (each traced with
+`callTracer`), its implementation for a proxy.
+
+- WETH and the factory are allowed above for the router's sake, yet all of Base moves their state. A
+  token that calls either one is a `block` naming it: `token calls WETH and the V2 factory during a
+  transfer: state all of Base moves`, whether or not that state moved during the check.
+- Judge pass 8's ApproveKey, BusyTell and pass 7's WethKey all call WETH (BusyTell the factory too).
+
+The same trace gives the buy's state change (`prestateTracer`, its values read before and after its
+block), which the [later side](#the-four-requests) applies.
 
 **`opcodes`**: BLOCKHASH, COINBASE, PREVRANDAO, GASLIMIT, BASEFEE, BLOBHASH, BLOBBASEFEE, GASPRICE and
 ORIGIN in the reachable code of the token and of its implementation: a `warn` naming them.
@@ -165,10 +212,13 @@ Decisions, each on purpose:
   finding; each got `warn` only for its unknown reputation.
 
 **On the fork**, `red_l1_trap` and `helper_trap` (L1Block reached through a delegatecall to a helper
-whose address sits in storage) are a `block`, `basefee_trap` a `warn`, USDC an `allow`.
+whose address sits in storage) are a `block`, USDC an `allow`. `basefee_trap` is a `warn` for its opcode,
+and a `block` once the base fee moved before the later block: on the fork it falls about 2 wei a block,
+on Base it sat at its floor in 10 of 11 blocks sampled. `weth_key`, `approve_key` and `busy_tell` call
+WETH: a `block`.
 
 [`app/environment.test.ts`](../app/environment.test.ts) shows each real sale failing after one emulated
-sequencer block (L1Block's sequence number advanced) or a base fee move.
+sequencer block (L1Block's sequence number advanced), a base fee move, or another user's WETH deposit.
 
 ## Verdicts and listing
 
@@ -177,9 +227,11 @@ sequencer block (L1Block's sequence number advanced) or a base fee move.
 | A revert, a takeback, or a tax of 50 % or more                            | `block` |
 | A pool that pays out more WETH than the seller receives                   | `block` |
 | An address outside the token, its pool and Uniswap touched                | `block` |
-| A sale that differs on the busy side                                      | `block` |
+| The token's code calls WETH or the factory                                | `block` |
+| A sale refused, or paying 1 % less, on the later side                     | `block` |
 | A template whose earlier pools were drained, or a token on the blocklist  | `block` |
 | A tax from 10 %, an environment opcode, removable liquidity, code changed | `warn`  |
+| A slot the buy wrote that Base also wrote before the later block          | `warn`  |
 | No V2 pair, no template index for the chain                               | `warn`  |
 
 A sale's tax is measured on the ETH the seller receives, against the pool's quote.
@@ -196,8 +248,8 @@ A refused sale lists the token only when the **late sale is refused too**. A ref
 could repeat checks until one lists an honest token.
 
 These never list: a failed buy, a quote under 1,000 units, a dust sale, a pool that pays out more, a
-sale that differs on the busy side, template reputation, and a failure on the guard's side only (its
-reason starts with `guard address only, not listed`).
+finding of the later side or of the environment rule, template reputation, and a failure on the guard's
+side only (its reason starts with `guard address only, not listed`).
 
 The evidence carries `list_target`; replay recomputes it and `--check` compares it with the guard's.
 
@@ -232,13 +284,16 @@ The index ([`app/index.ts`](../app/index.ts)) is rebuilt from `PairCreated`, `Mi
   It stays distinct from "not applied" and from "checked and clean" (no finding).
 
 **The index window is bound to the check.** It must start at least 2,000 blocks (67 min) before the
-check's block and end at most 300 blocks (10 min) before it, never after.
+check's reference block and end at that very block: a window cannot miss a farm's earlier pools, nor
+drop its newest ones.
 
-The sentinel refuses to judge with another window. Replay reports a `MISMATCH … is not bound to block …`,
-and rebuilds the whole index to compare its sha256.
+The sentinel builds the index for each check, from block `INDEX_FROM` to the reference block, and
+judges with no other. Replay reports a `MISMATCH … is not bound to block …`, and rebuilds the whole
+index to compare its sha256.
 
-The fork's index, built by `demo.sh` and the tests from the fork's first block, spans about 2,170 blocks;
-the real-Base one below spans 43,201.
+On the fork the index runs from the fork's first block, about 2,200 blocks. The real-Base one below spans
+43,201: rebuilt for each check, it would cost 283 requests (about 5 min at one per second), so
+`check-mainnet.sh` runs without one (a `warn`).
 
 ### Measured on real Base
 
@@ -249,10 +304,12 @@ error or `429`; none came):
 bun app/index.ts https://base-rpc.publicnode.com 56133114 56176314 base-index.json --pace-ms 1000
 ```
 
-- Blocks 56,133,114 to 56,176,314: 43,201 blocks, 24 h, ending at the chain head at 19:33 UTC.
+- Blocks 56,133,114 to 56,176,314: 43,201 blocks, from 17:09:58 to 19:33:58 UTC (2.4 h at 0.2 s a
+  block; this page first said 24 h, counting 2 s), ending at the chain head.
 - 283 requests in 298.5 s; index sha256 `0x16f519b6…96ea`.
 - 29 Uniswap V2 WETH pools with code, all of one code template, all funded (at least 0.5 ETH net).
-- 24 drained within a day of funding: from 3,907 to 14,467 blocks, median 4,027 (about 2.2 h).
+- 24 drained within 43,200 blocks of funding: from 3,907 to 14,467 blocks, median 4,027 (about 13 min
+  at 0.2 s a block).
 - A copy of that template whose pool is created after the window gets `block` (24 of 29 is above 80 %).
 
 The index lists the pools' token and pair addresses; none is published here. Re-run on 2026-11-12 with
@@ -275,9 +332,17 @@ A simulation cannot prove that a token will be sellable later. Still open:
 - Behaviour that changes after the late sale (400 to 510 s after the buy), through TIMESTAMP or NUMBER.
 - A sale size or delay the check did not draw: a sale refused only below some share, or only after
   510 s. An agent's exit sells its holding (the signed minimum, 97 % of the quote), when it chooses.
-- State others move that the busy side does not: a WETH transfer between others, a swap in another pool,
-  the token's own pool traded by nobody else (the busy side never touches it: that would move the price).
-- The guard's own ETH balance in a way the busy side's payment does not show (the real L1 data fee differs).
+- State that did not move between the reference block and the later block (16 to 24 s): the token's
+  own pool or storage when nobody touched them, a balance nobody moved. A token reading WETH or the
+  factory is a `block` whatever moved; one keyed on its own pool is not.
+- A slot the buy wrote that Base also wrote (someone traded the pool): the later sales run on Base's
+  value, without the buy's trade; such a check is a `warn` at best.
+- The later side is not traced: an address its sales touch only on Base's later state goes unseen.
+- The guard's own ETH balance: each side gives it what its transactions spend, not Base's.
+- Base's cadence: the simulated blocks advance 2 s each, Base's real ones 0.2 s (several share a second).
+  A token that compares `block.timestamp` with `block.number` since its buy tells the check from a real
+  sale, and the late sale lands 40 to 51 s after the buy on Base, not 400 to 510 s. Re-deriving every
+  block count from 0.2 s is not done in this pass.
 - Uniswap V4 hooks: only V2 WETH pools are read.
 - A token that refuses or taxes only some sale sizes can still get listed by a check of that size; the
   owner unlists.

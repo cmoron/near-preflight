@@ -4834,6 +4834,23 @@ mod tests {
         g.clear_unsettled(2, true);
     }
 
+    // Fix pass 8: the recovery `a_refund_never_overwrites_another_agents_holding` leaves open. Agent B
+    // bought the token after agent A's exit failed: A's tokens come back once B no longer holds it.
+    #[test]
+    fn a_refund_blocked_by_another_holder_goes_through_once_that_holding_is_gone() {
+        let (mut g, bought) = judged(Verdict::Allow);
+        buy(&mut g, bought);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        let exit = exit_quote(&mut g, "agent.test", bought, MIN_OUT, 1000);
+        sell_quoted_at(&mut g, exit, 1100);
+        exit_signed(&mut g, vec![PromiseResult::Failed, PromiseResult::Failed]);
+        replaced(&mut g, 2, 1200);
+        g.set_holding(TARGET.into(), id("agentb.test"), U128(5)); // B holds the token now
+        g.set_holding(TARGET.into(), id("agentb.test"), U128(0)); // B sold it all (or the owner freed it)
+        g.clear_unsettled(2, true);
+        assert_eq!(holding_of(&g, "agent.test"), MIN_OUT);
+    }
+
     #[test]
     #[should_panic(expected = "exit amount above the agent's holding")]
     fn two_exit_quotes_for_the_full_holding_the_second_sale_is_refused() {
@@ -5825,6 +5842,54 @@ mod tests {
             env::account_balance().as_yoctonear()
                 >= u128::from(env::storage_usage()) * env::storage_byte_cost().as_yoctonear()
         );
+    }
+
+    // Fix pass 8: a check's price moves to the fees at its verdict, yet the storage it pays for is written
+    // later, by the buy and its callback. A withdrawal in between takes that price; a buy whose signature
+    // then does not come back reserves its nonce out of what the credits and the escrow are owed.
+    #[test]
+    fn fees_withdrawn_before_a_buy_leave_its_reservation_unpaid() {
+        let (mut g, check) = judged(Verdict::Allow);
+        let flush = |g: &mut Guard| {
+            g.checks.flush();
+            g.credits.flush();
+            g.budgets.flush();
+            g.holdings.flush();
+            g.decisions.flush();
+            g.unsettled.flush();
+        };
+        let owed = |g: &Guard| {
+            u128::from(env::storage_usage()) * env::storage_byte_cost().as_yoctonear()
+                + g.credits_total().0
+                + g.escrow().0
+        };
+        flush(&mut g);
+        let storage = env::storage_usage();
+        ctx_holding("owner.test", owed(&g) + g.fees().0, storage);
+        let _ = g.withdraw_fees(g.fees()); // every fee, the check's price included: accepted
+        let balance = env::account_balance().as_yoctonear();
+        assert_eq!(balance, owed(&g));
+        ctx_holding("agent.test", balance, storage);
+        buy(&mut g, check);
+        flush(&mut g);
+        testing_env!(
+            VMContextBuilder::new()
+                .current_account_id(id("guard.test"))
+                .predecessor_account_id(id("guard.test"))
+                .account_balance(NearToken::from_yoctonear(balance))
+                .storage_usage(env::storage_usage())
+                .build(),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            std::collections::HashMap::default(),
+            vec![PromiseResult::Failed],
+        );
+        let since = g.signing_since_ns;
+        assert_eq!(g.on_signed(since), None);
+        flush(&mut g);
+        assert!(g.get_unsettled(0).is_some());
+        assert!(env::storage_usage() > storage);
+        assert!(balance < owed(&g)); // short by the reservation's storage until the owner deposits
     }
 
     // Judge pass 6: an agent's stop, a signature in progress and the escrow were not readable.

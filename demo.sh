@@ -43,17 +43,19 @@ echo "0. The armer (own process, function-call key limited to arm/disarm) arms t
 LLM=()
 [[ -f .env.llm ]] && LLM=(--env-file=.env.llm)
 
-# Template index the sentinel consults, rebuilt from the fork's own logs (same chain state, same sha256).
-from=$(($(jq .fork_block evm/tokens.json) + 1))
-bun app/index.ts http://127.0.0.1:8545 "$from" "$(cast block-number -r http://127.0.0.1:8545)" proofs/index-fork.json
-INDEX=proofs/index-fork.json bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts &
+# The fork mines nothing on its own: a block every 2 s with others' WETH and ETH transfers, as on Base,
+# for the blocks each check waits for (its reference block, then the later side's).
+bun app/testkit.ts live &
+MINER=$!
+# The sentinel builds the template index from the fork's first block up to each check's block.
+INDEX_FROM=$(($(jq .fork_block evm/tokens.json) + 1)) bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts &
 SENTINEL=$!
-trap 'kill $SENTINEL' EXIT
+trap 'kill $SENTINEL $MINER' EXIT
 status=0
 rm -f proofs/verify.txt
 # The agent's buy and sale wait for the MPC signature: allow 60 s per NEAR RPC call (20 s by default).
 RPC_TIMEOUT_MS=60000 bun --env-file=.env --env-file=.env.agent "${LLM[@]}" app/demo.ts $FULL || status=$?
-kill $SENTINEL
+kill $SENTINEL $MINER
 trap - EXIT # otherwise the trap kills an already reaped process, and under set -e its failure becomes the exit code
 
 if [[ $FULL ]]; then
