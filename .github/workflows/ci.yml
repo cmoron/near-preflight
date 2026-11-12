@@ -1,7 +1,9 @@
-# Manual only (Actions tab, "Run workflow"): no run on push while the repository is private.
+# Runs on every push to main (free while the repository is public) and on demand.
 name: ci
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 permissions:
   contents: read
 jobs:
