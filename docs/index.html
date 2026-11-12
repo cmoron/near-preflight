@@ -14,8 +14,52 @@
       content="#FFFFFF"
       media="(prefers-color-scheme: light)"
     />
-    <title>near-preflight journal</title>
-    <link rel="icon" id="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <title>
+      near-preflight: an AI agent cannot buy a token it could never sell
+    </title>
+    <meta
+      name="description"
+      content="Before NEAR signs an AI agent's token purchase on Base, a sentinel simulates the buy and the resale and stores a verdict anyone can replay: allow, warn or block."
+    />
+    <link rel="canonical" href="https://cmoron.github.io/near-preflight/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="near-preflight" />
+    <meta
+      property="og:url"
+      content="https://cmoron.github.io/near-preflight/"
+    />
+    <meta
+      property="og:title"
+      content="near-preflight: an AI agent cannot buy a token it could never sell"
+    />
+    <meta
+      property="og:description"
+      content="Before NEAR signs an AI agent's token purchase on Base, a sentinel simulates the buy and the resale and stores a verdict anyone can replay."
+    />
+    <meta
+      property="og:image"
+      content="https://cmoron.github.io/near-preflight/assets/social-preview.png"
+    />
+    <meta property="og:image:width" content="1280" />
+    <meta property="og:image:height" content="640" />
+    <meta
+      property="og:image:alt"
+      content="near-preflight: the rocket and its go/no-go board. An AI agent cannot buy a token it could never sell."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="near-preflight: an AI agent cannot buy a token it could never sell"
+    />
+    <meta
+      name="twitter:description"
+      content="Before NEAR signs an AI agent's token purchase on Base, a sentinel simulates the buy and the resale and stores a verdict anyone can replay."
+    />
+    <meta
+      name="twitter:image"
+      content="https://cmoron.github.io/near-preflight/assets/social-preview.png"
+    />
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -24,146 +68,386 @@
     />
     <link rel="stylesheet" href="style.css" />
   </head>
-  <body>
-    <header>
-      <div class="brand">
-        <picture>
-          <source
-            srcset="assets/logo-light.svg"
-            media="(prefers-color-scheme: light)"
-          />
-          <img src="assets/logo-dark.svg" width="48" height="48" alt="" />
-        </picture>
-        <h1>near-preflight</h1>
-      </div>
-      <p class="lede">
-        The journal of one demonstration guard,
-        <code id="guard" class="acct">…</code>, a contract on NEAR testnet. Each
-        line is a purchase (or a sale) an AI agent asked for, most often the
-        demo's scripted agent, and what the guard answered before NEAR would
-        sign anything; a line names the model decision behind it when one is
-        attached.
-      </p>
-      <p class="note">
-        The demo's tokens live on a local fork of Base (anvil), not on Base: the
-        traps and the buys run there, and the guard's signed transactions are
-        broadcast only to that fork. Checks from
-        <code>check-mainnet.sh</code> simulate USDC on Base mainnet, read-only,
-        and nothing is ever sent to Base. The verdicts, checks and blocklist
-        below are real, read from NEAR testnet.
-      </p>
-      <p class="status" role="status" aria-live="polite">
-        <span id="updated">Loading…</span>
-        <span id="error" class="err" hidden></span>
-      </p>
-    </header>
-    <main>
-      <section aria-labelledby="h-summary">
-        <h2 id="h-summary">So far</h2>
-        <p id="summary" class="summary">Loading…</p>
-        <div id="bar" class="bar" aria-hidden="true"></div>
-      </section>
-
-      <section aria-labelledby="h-steps">
-        <h2 id="h-steps">How one check goes <small id="steps-of"></small></h2>
-        <ol id="steps" class="steps">
-          <li>
-            <b>The agent asks.</b> It names a token and an amount, and pays for
-            the check.
-          </li>
-          <li>
-            <b>The sentinel simulates.</b> An off-chain service runs the buy
-            NEAR would sign, then two sales of what it bought, and judges the
-            token.
-          </li>
-          <li>
-            <b>The verdict is stored on NEAR.</b> With the sha256 of its
-            evidence and the hash of the one transaction the guard may sign.
-          </li>
-          <li>
-            <b>NEAR signs.</b> On <code>allow</code>, or a <code>warn</code> the
-            owner approved, the guard builds the swap itself and NEAR Chain
-            Signatures signs it.
-          </li>
-        </ol>
-        <p class="note">
-          The evidence replays: the Base-mainnet check shipped in the repository
-          on any machine, a fork check against the team's fork and proof files
-          (<a
-            href="https://github.com/cmoron/near-preflight/blob/main/docs/replay.md"
-            >replay and attest</a
-          >).
-        </p>
-      </section>
-
-      <section aria-labelledby="h-state">
-        <h2 id="h-state">State now</h2>
-        <dl id="state" class="facts">
-          <dt>Loading</dt>
-          <dd>…</dd>
-        </dl>
-      </section>
-
-      <section aria-labelledby="h-checks">
-        <h2 id="h-checks">Checks <small id="count"></small></h2>
-        <p class="note">
-          Newest first. Open a line for its agent, hashes, model decision,
-          signed transaction and how to verify it.
-        </p>
-        <p class="note legend">
-          <span class="lamps" aria-hidden="true"
-            ><i></i><i></i><i></i><i></i
-          ></span>
-          Four lamps, four steps: asked, simulated, verdict stored, signed by
-          NEAR. The fourth lights only when NEAR signs.
-        </p>
-        <div class="log-head" aria-hidden="true">
-          <span>Id</span><span>Token</span><span>Verdict</span
-          ><span>Reason</span>
-        </div>
-        <ul id="checks" class="log"></ul>
-      </section>
-
-      <section aria-labelledby="h-block">
-        <h2 id="h-block">Shared blocklist <small id="listed"></small></h2>
-        <p class="note">
-          The guard refuses a check or a buy of these tokens. A sentinel listing
-          names the verdict it rests on; only the owner can unlist.
-        </p>
-        <table id="blocklist">
-          <thead>
-            <tr>
-              <th>Token</th>
-              <th>Listed by</th>
-              <th>When</th>
-              <th>Note</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </section>
-
-      <details class="more">
-        <summary><h2 id="h-bounds">Bounds and roles</h2></summary>
-        <dl id="bounds" class="facts">
-          <dt>Loading</dt>
-          <dd>…</dd>
-        </dl>
-      </details>
-    </main>
-    <footer>
-      <p>
-        Read-only: this page calls the guard's view methods on the NEAR testnet
-        RPC, with no backend, no wallet and no key. RPC in use:
-        <span id="rpc">-</span>.
-      </p>
-      <p>
-        <a href="https://github.com/cmoron/near-preflight">Repository</a>,
-        <a href="https://github.com/cmoron/near-preflight#readme"
-          >README with the steps to reproduce</a
+  <body class="landing">
+    <header class="top">
+      <a class="wordmark" href="./">near-preflight</a>
+      <nav aria-label="Site">
+        <a href="journal.html">Journal</a>
+        <a
+          href="https://github.com/cmoron/near-preflight/blob/main/docs/README.md"
+          >Docs</a
         >
+        <a href="https://github.com/cmoron/near-preflight">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="h-hero">
+        <h1 id="h-hero">An AI agent cannot buy a token it could never sell.</h1>
+        <p class="lede">
+          The agent buys on Base only through the guard, a NEAR contract. Before
+          NEAR signs, a sentinel simulates the buy and the resale, checks
+          whether the token's code has drained pools before, and stores a
+          verdict anyone can replay: <span class="vw allow">allow</span>,
+          <span class="vw warn">warn</span> (the owner decides) or
+          <span class="vw block">block</span>.
+        </p>
+        <p class="lede">
+          The agent holds no key for Base: the guard builds the transaction and
+          NEAR Chain Signatures signs it.
+        </p>
+        <div class="pad">
+          <p class="cta">
+            <a class="btn primary" href="journal.html">See the live journal</a>
+            <a class="btn" href="https://github.com/cmoron/near-preflight"
+              >Source on GitHub</a
+            >
+          </p>
+          <picture aria-hidden="true">
+            <source
+              srcset="assets/logo-light.svg"
+              media="(prefers-color-scheme: light)"
+            />
+            <img src="assets/logo-dark.svg" width="96" height="96" alt="" />
+          </picture>
+        </div>
+        <p class="live" id="live" role="status" aria-live="polite">
+          Reading the demo guard on NEAR testnet…
+        </p>
+      </section>
+
+      <section class="run" id="run" aria-labelledby="h-run">
+        <h2 id="h-run">Run a check</h2>
+        <p class="intro">
+          Pick a token. The board replays the latest check of it that the demo
+          guard recorded on NEAR testnet, value for value: nothing is simulated
+          in your browser.
+        </p>
+        <div class="console">
+          <fieldset class="picker" id="picker" disabled>
+            <legend class="sr">Token to replay</legend>
+            <div id="choices"><p class="empty">Reading the journal…</p></div>
+            <button type="button" class="btn small" id="replay">Replay</button>
+          </fieldset>
+          <div class="board" id="board" data-v="none">
+            <p class="caption" id="caption">
+              Four lamps, four steps of a check. The fourth lights only when
+              NEAR signs.
+            </p>
+            <ol class="seq">
+              <li>
+                <span class="lamp" aria-hidden="true"></span><b>Asked</b>
+                <p class="what" id="w1"></p>
+              </li>
+              <li>
+                <span class="lamp" aria-hidden="true"></span><b>Simulated</b>
+                <p class="what" id="w2"></p>
+              </li>
+              <li>
+                <span class="lamp" aria-hidden="true"></span
+                ><b>Verdict stored on NEAR</b>
+                <div class="what" id="w3"></div>
+              </li>
+              <li>
+                <span class="lamp" aria-hidden="true"></span
+                ><b>Signed by NEAR</b>
+                <p class="what" id="w4"></p>
+              </li>
+            </ol>
+            <p class="plate" id="plate" aria-live="polite"></p>
+          </div>
+        </div>
+      </section>
+
+      <section class="limits" aria-label="What it stops and what it does not">
+        <div>
+          <h2>What it stops</h2>
+          <ul class="threats">
+            <li>
+              <a
+                href="https://github.com/cmoron/near-preflight/blob/main/docs/threat-model.md#sale-refused-after-the-buy"
+              >
+                <span class="v block"
+                  ><span class="lamps" aria-hidden="true"
+                    ><i></i><i></i><i></i><i></i></span
+                  ><b class="verdict">block</b><small>listed</small></span
+                >
+                <span>A token you can buy but never sell</span>
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://github.com/cmoron/near-preflight/blob/main/docs/threat-model.md#the-owner-takes-tokens-back"
+              >
+                <span class="v block"
+                  ><span class="lamps" aria-hidden="true"
+                    ><i></i><i></i><i></i><i></i></span
+                  ><b class="verdict">block</b><small>listed</small></span
+                >
+                <span
+                  >The token's owner takes tokens back without approval</span
+                >
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://github.com/cmoron/near-preflight/blob/main/docs/threat-model.md#template-farm"
+              >
+                <span class="v block"
+                  ><span class="lamps" aria-hidden="true"
+                    ><i></i><i></i><i></i><i></i></span
+                  ><b class="verdict">block</b></span
+                >
+                <span
+                  >A clean copy of code whose earlier pools were drained</span
+                >
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://github.com/cmoron/near-preflight/blob/main/docs/threat-model.md#telling-the-check-from-a-real-sale"
+              >
+                <span class="v block"
+                  ><span class="lamps" aria-hidden="true"
+                    ><i></i><i></i><i></i><i></i></span
+                  ><b class="verdict">block</b><small>listed</small></span
+                >
+                <span
+                  >A token that sells only in a simulation, or at the delay a
+                  check would try</span
+                >
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://github.com/cmoron/near-preflight/blob/main/docs/threat-model.md#state-base-moves-every-block"
+              >
+                <span class="v block"
+                  ><span class="lamps" aria-hidden="true"
+                    ><i></i><i></i><i></i><i></i></span
+                  ><b class="verdict">block</b></span
+                >
+                <span
+                  >A token keyed on WETH or the factory, or that fails on a
+                  later Base block</span
+                >
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://github.com/cmoron/near-preflight/blob/main/docs/threat-model.md#agent-bypasses"
+              >
+                <span class="v block"
+                  ><span class="lamps" aria-hidden="true"
+                    ><i></i><i></i><i></i><i></i></span
+                  ><b class="verdict">ignored</b></span
+                >
+                <span
+                  >A prompt-injected agent changes the route, recipient or
+                  minimum output: NEAR signs what was simulated</span
+                >
+              </a>
+            </li>
+          </ul>
+          <p class="note">
+            Each line opens the exact reason the sentinel gives and the test
+            that shows it. Listed: put on the guard's shared blocklist, refused
+            to every agent.
+          </p>
+        </div>
+        <div class="nostop">
+          <h2>What it does not stop</h2>
+          <ul>
+            <li>
+              <b>A lying sentinel.</b> Its <code>allow</code> on a trap can be
+              bought within 120 s; replay shows the lie afterwards.
+            </li>
+            <li>
+              <b>What a token does later.</b> A pause, tax or blacklist after
+              the buy.
+            </li>
+            <li>
+              <b>Front-running.</b> The signing request is public on NEAR before
+              the swap reaches Base.
+            </li>
+          </ul>
+          <p class="note">
+            <a
+              href="https://github.com/cmoron/near-preflight/blob/main/docs/threat-model.md#what-it-does-not-stop"
+              >Every limit, with its reason</a
+            >
+          </p>
+        </div>
+      </section>
+
+      <section class="how" aria-labelledby="h-how">
+        <h2 id="h-how">How one purchase goes</h2>
+        <div class="how-grid">
+          <svg
+            class="dia"
+            viewBox="0 0 560 392"
+            role="img"
+            aria-labelledby="dia-t"
+          >
+            <title id="dia-t">
+              One purchase: the agent, the guard and Chain Signatures on NEAR,
+              the sentinel, and Base. The numbered steps are listed beside the
+              diagram.
+            </title>
+            <defs>
+              <marker
+                id="ah"
+                viewBox="0 0 8 8"
+                refX="7"
+                refY="4"
+                markerWidth="8"
+                markerHeight="8"
+                orient="auto-start-reverse"
+              >
+                <path class="ah" d="M0 0L8 4L0 8z" />
+              </marker>
+            </defs>
+            <rect class="region" x="1" y="1" width="558" height="150" />
+            <text class="tag" x="16" y="27">NEAR testnet</text>
+            <rect class="box key" x="16" y="44" width="250" height="88" />
+            <text class="name" x="32" y="82">guard</text>
+            <text class="sub" x="32" y="106">
+              the contract, builds every swap
+            </text>
+            <rect class="box" x="346" y="44" width="198" height="88" />
+            <text class="name" x="362" y="82">Chain Signatures</text>
+            <text class="sub" x="362" y="106">NEAR's threshold signers</text>
+            <rect class="box" x="16" y="282" width="130" height="88" />
+            <text class="name" x="32" y="320">AI agent</text>
+            <text class="sub" x="32" y="344">no key for Base</text>
+            <rect class="box" x="186" y="282" width="150" height="88" />
+            <text class="name" x="202" y="320">sentinel</text>
+            <text class="sub" x="202" y="344">off-chain</text>
+            <rect class="box" x="396" y="282" width="148" height="88" />
+            <text class="name" x="412" y="320">Base</text>
+            <text class="sub" x="412" y="344">a local fork here</text>
+            <g class="arrows">
+              <line x1="50" y1="282" x2="50" y2="134" />
+              <line x1="112" y1="282" x2="112" y2="134" />
+              <line class="faint" x1="206" y1="132" x2="206" y2="280" />
+              <line x1="246" y1="282" x2="246" y2="134" />
+              <line x1="336" y1="326" x2="394" y2="326" />
+              <line x1="266" y1="80" x2="344" y2="80" />
+              <line x1="346" y1="100" x2="268" y2="100" />
+              <line class="faint" x1="470" y1="132" x2="470" y2="280" />
+            </g>
+            <text class="tag" x="458" y="250" text-anchor="end">
+              relay, no key
+            </text>
+            <g class="badges">
+              <rect x="39" y="196" width="22" height="22" />
+              <text x="50" y="212">1</text>
+              <rect x="354" y="315" width="22" height="22" />
+              <text x="365" y="331">2</text>
+              <rect x="235" y="196" width="22" height="22" />
+              <text x="246" y="212">3</text>
+              <rect x="101" y="196" width="22" height="22" />
+              <text x="112" y="212">4</text>
+              <rect x="295" y="79" width="22" height="22" />
+              <text x="306" y="95">5</text>
+              <rect x="459" y="196" width="22" height="22" />
+              <text x="470" y="212">6</text>
+            </g>
+          </svg>
+          <ol class="flow">
+            <li>
+              The agent asks the guard to check a token and an amount, and pays
+              for the check.
+            </li>
+            <li>
+              The sentinel reads the check and simulates on Base the exact buy
+              the guard would sign, then two sales of what it bought.
+            </li>
+            <li>
+              It stores the verdict on the guard, with the sha256 of its
+              evidence and the hash of the one transaction NEAR may sign.
+            </li>
+            <li>
+              On a fresh <code>allow</code>, within 120 s, the agent buys. It
+              names no route, recipient or minimum.
+            </li>
+            <li>
+              The guard rebuilds the simulated swap and Chain Signatures signs
+              it for the guard's Base address.
+            </li>
+            <li>
+              A relay with no key broadcasts the signed swap: in this demo, to a
+              local fork of Base.
+            </li>
+          </ol>
+        </div>
+        <p class="note">
+          The guard's owner appoints the sentinel; its key can only post
+          verdicts.
+          <a
+            href="https://github.com/cmoron/near-preflight/blob/main/docs/threat-model.md#a-lying-sentinel"
+            >What a lying sentinel can still do</a
+          >, and the
+          <a
+            href="https://github.com/cmoron/near-preflight/blob/main/docs/architecture.md"
+            >architecture</a
+          >.
+        </p>
+      </section>
+
+      <section class="verify" aria-labelledby="h-verify">
+        <h2 id="h-verify">Verify it yourself</h2>
+        <p class="intro">
+          No NEAR account, no key: replay a stored verdict and check the model's
+          decision behind a check. You need <code>bun</code> 1.4, Foundry 1.8
+          and <code>jq</code>.
+          <a
+            href="https://github.com/cmoron/near-preflight#verify-it-yourself-in-five-minutes"
+            >The README section</a
+          >
+          adds the trap tests on a local fork.
+        </p>
+        <div class="cmd">
+          <pre
+            id="cmds"
+          ><code>git clone https://github.com/cmoron/near-preflight &amp;&amp; cd near-preflight &amp;&amp; bun install
+export GUARD=<span id="cmd-guard">guard.goblin-guard-13713.testnet</span>   <span class="c"># the demo guard on NEAR testnet, read only</span>
+
+<span class="c"># Check #64 (USDC on Base mainnet): resent, traced on a local fork, re-judged, compared with NEAR</span>
+bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
+<span class="c">#   REPLAY OK: verdict warn confirmed, same as on chain</span>
+
+<span class="c"># The model's decision behind check #1: signature, Intel and NVIDIA attestation, the guard's record</span>
+bun app/attest.ts app/fixtures/decision.json --check 1
+<span class="c">#   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)</span></code></pre>
+          <p class="copy">
+            <button type="button" class="btn small" id="copy">
+              Copy the commands
+            </button>
+            <span id="copied" role="status" aria-live="polite"></span>
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <p>
+        Built for the NEAR Hackathon, track AI Security &amp; Defense. MIT
+        license. The demo's tokens live on a local fork of Base; nothing is sent
+        to Base. The figures above are read from NEAR testnet by your browser,
+        with no backend, no wallet and no key.
       </p>
+      <ul>
+        <li><a href="https://github.com/cmoron/near-preflight">GitHub</a></li>
+        <li><a href="journal.html">Journal</a></li>
+        <li>
+          <a
+            href="https://github.com/cmoron/near-preflight/blob/main/docs/README.md"
+            >Docs index</a
+          >
+        </li>
+      </ul>
     </footer>
-    <script src="app.js"></script>
+    <script src="landing.js"></script>
   </body>
 </html>

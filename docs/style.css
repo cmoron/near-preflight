@@ -28,6 +28,7 @@ a:hover{text-decoration-color:currentColor}
 
 /* Header: the go/no-go board beside the name. */
 .brand{display:flex;align-items:center;gap:.875rem;margin-bottom:1.25rem}
+a.brand{width:fit-content;text-decoration:none}
 .brand img{display:block;width:48px;height:48px}
 .lede{font-size:1.125rem;line-height:1.5;max-width:44rem}
 
@@ -130,4 +131,152 @@ footer p{margin:.25rem 0;max-width:none}
  tr{border-top:1px solid var(--rule);padding:.5rem 0}
  tr:last-child{border-bottom:1px solid var(--rule)}
  td{border:0;padding:.1rem 0}
+}
+
+/* Landing page (index.html). Everything below is scoped to body.landing: the journal is untouched.
+   One loud thing, the board of "Run a check"; the rest stays quiet. Verdict colours mean verdicts only:
+   buttons and links use the text colour. */
+.landing{max-width:74rem;padding:0 clamp(16px,4vw,48px) 3rem;font-size:1.0625rem}
+.landing h1{font-size:clamp(2.5rem,1.1rem + 4.4vw,4.6rem);line-height:1.02;font-stretch:125%;letter-spacing:-.025em;max-width:15em;margin:0;text-wrap:balance}
+.landing h2{font-size:clamp(1.6rem,1.2rem + 1.2vw,2.15rem);line-height:1.1;font-stretch:118%;letter-spacing:-.02em;margin:0 0 1rem}
+.landing code{font-size:.84em}
+.landing .note{font-size:.9375rem}
+.landing .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.landing main>section{margin:0;padding:clamp(4rem,9vw,7.5rem) 0 0;border:0}
+.landing .intro{color:var(--dim);max-width:40rem;margin-bottom:2rem}
+
+.landing .top{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:.5rem 1.5rem;padding:1.5rem 0}
+.landing .wordmark{font-weight:700;font-stretch:112.5%;font-size:1.125rem;text-decoration:none;letter-spacing:-.01em}
+.landing .top nav{display:flex;gap:1.5rem}
+.landing .top nav a{text-decoration-color:transparent}
+.landing .top nav a:hover{text-decoration-color:currentColor}
+
+/* Hero: the headline, two sentences, two buttons; then the pad, the logo standing on a ground line drawn at
+   its own pixel size (96 px logo, 6 px pixels), and under it the live readout. */
+.landing .hero{padding-top:clamp(2rem,5vw,4rem)}
+.landing .lede{font-size:clamp(1.0625rem,1rem + .3vw,1.25rem);line-height:1.55;max-width:38rem;margin:0 0 .9rem}
+.landing .hero h1+.lede{margin-top:clamp(1.5rem,3vw,2.25rem)}
+.landing .vw{font:700 .84em var(--mono)}
+.allow.vw{color:var(--allow)} .warn.vw{color:var(--warn)} .block.vw{color:var(--block)}
+.landing .cta{display:flex;flex-wrap:wrap;gap:.75rem;margin:0 0 1.75rem}
+.landing .btn{display:inline-flex;align-items:center;min-height:2.75rem;padding:.55rem 1.15rem;border:1.5px solid var(--text);background:none;color:var(--text);
+ font:600 1rem/1.2 var(--sans);font-stretch:112.5%;text-decoration:none;cursor:pointer}
+.landing .btn:hover{background:var(--raised)}
+.landing .btn.primary{background:var(--text);color:var(--ground)}
+.landing .btn.primary:hover{background:var(--dim);border-color:var(--dim)}
+.landing .btn.small{min-height:2.25rem;padding:.35rem .85rem;font-size:.9375rem}
+.landing .btn:disabled{opacity:.45;cursor:default}
+.landing .pad{position:relative;display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;margin-top:clamp(1.75rem,3.5vw,2.5rem)}
+.landing .pad::before{content:"";position:absolute;left:0;right:0;bottom:0;height:6px;background:var(--text)}
+.landing .pad picture{flex:none}
+.landing .pad img{display:block;width:96px;height:96px;margin-right:clamp(0px,6vw,4rem)}
+.landing .live{margin:1.1rem 0 0;font-size:1.0625rem;max-width:none}
+.landing .live strong{font:700 1.1em var(--mono);font-variant-numeric:tabular-nums}
+.landing .live small{display:block;margin-top:.2rem;color:var(--dim);font-size:.875rem}
+
+/* Run a check: the picker, then the board. A lamp per step, joined by a rail; lit in order in the text colour,
+   then all of them in the verdict's colour once the verdict is stored; the fourth only if NEAR signed. */
+.landing .console{display:grid;grid-template-columns:minmax(0,19rem) minmax(0,1fr);align-items:start}
+.landing .picker{margin:0;padding:0;border:0;min-width:0}
+/* The chosen token is a tab of the board: same ground, no gap between them. */
+.landing .choice{display:grid;grid-template-columns:auto minmax(0,1fr);gap:0 .85rem;padding:.75rem 1rem .75rem .9rem;cursor:pointer}
+.landing .choice:has(input:checked){background:var(--raised)}
+.landing .choice input{appearance:none;-webkit-appearance:none;margin:.42em 0 0;width:10px;height:10px;background:var(--rule);cursor:pointer;grid-row:1/3}
+.landing .choice input:checked{background:var(--text)}
+.landing .choice input:focus-visible{outline:2px solid var(--text);outline-offset:4px}
+.landing .choice:has(input:checked){font-weight:600}
+.landing .choice:hover .name{text-decoration:underline;text-decoration-color:var(--dim);text-underline-offset:.2em}
+.landing .choice .id{font:400 .8125rem var(--sans);color:var(--dim)}
+.landing .picker .btn{margin:1.25rem 0 0 .9rem}
+.landing .picker .empty{margin:0;padding:.8rem .9rem;color:var(--dim)}
+
+.landing .board{--vc:var(--text);background:var(--raised);padding:clamp(1.25rem,3vw,2rem) clamp(1rem,3vw,2.25rem) clamp(1.25rem,3vw,2rem);min-width:0}
+.landing .board[data-v=allow]{--vc:var(--allow)} .landing .board[data-v=warn]{--vc:var(--warn)} .landing .board[data-v=block]{--vc:var(--block)}
+.landing .caption{color:var(--dim);font-size:.9375rem;margin:0 0 1.75rem;max-width:44rem}
+.landing .caption strong{color:var(--text);font-weight:600}
+.landing .seq{list-style:none;margin:0;padding:0}
+.landing .seq>li{position:relative;padding:0 0 1.5rem 2.6rem;min-height:3.25rem}
+.landing .seq>li:last-child{padding-bottom:0}
+.landing .seq .lamp{position:absolute;left:0;top:.15rem;width:20px;height:20px;background:var(--rule);transition:background-color .3s,box-shadow .4s}
+.landing .seq>li:not(:last-child)::after{content:"";position:absolute;left:9px;top:28px;bottom:6px;width:2px;background:var(--rule);transition:background-color .3s}
+.landing .seq>li>b{display:block;font-weight:600;font-stretch:112.5%;color:var(--dim);transition:color .3s}
+.landing .seq .what{display:none;margin:.25rem 0 0;max-width:46rem;overflow-wrap:anywhere}
+.landing .seq>li.on>b{color:var(--text)}
+.landing .seq>li.on .what{display:block;animation:lit .45s ease-out}
+@keyframes lit{from{opacity:0}}
+.landing .seq>li.on .lamp{background:var(--text)}
+.landing .seq>li.on:has(+li.on)::after{background:var(--text)}
+.landing .board.judged .seq>li.on .lamp{background:var(--vc);box-shadow:0 0 18px -2px var(--vc)}
+.landing .board.judged .seq>li.on:has(+li.on)::after{background:var(--vc)}
+.landing .board.judged[data-signed=no] .seq>li:last-child.on .lamp{background:none;box-shadow:inset 0 0 0 2px var(--rule)}
+.landing .board.judged[data-signed=no] .seq>li.on:nth-child(3)::after{background:var(--rule)}
+.landing .what code{font-size:.8em}
+.landing .what .acct{font-size:1em}
+.landing .reasons{list-style:none;margin:.35rem 0 .35rem;padding:0}
+.landing .reasons li{padding:0 0 .2rem;min-height:0}
+.landing .reasons q{quotes:"\201C" "\201D"}
+.landing .what small{color:var(--dim);font-size:.875rem}
+.landing .plate{display:none;flex-wrap:wrap;align-items:center;gap:.5rem 1.1rem;margin:1.75rem 0 0;padding-top:1.5rem;border-top:1px solid var(--rule);max-width:none}
+.landing .board.done .plate{display:flex;animation:lit .45s ease-out}
+.landing .plate .lamps{gap:5px}
+.landing .plate .lamps i{width:14px;height:14px}
+.landing .plate .word{font:700 clamp(1.75rem,1.3rem + 1.5vw,2.5rem)/1 var(--mono);color:var(--vc);letter-spacing:.01em}
+.landing .plate .means{flex:1 1 16rem;color:var(--text)}
+.landing .board .err{display:block;margin-top:.5rem}
+
+/* What it stops / does not stop: side by side, the second plainer. */
+.landing .limits{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:clamp(3rem,6vw,5.5rem)}
+.landing .threats{list-style:none;margin:0 0 1rem;padding:0;border-top:1px solid var(--rule)}
+.landing .threats a{display:grid;grid-template-columns:9.5rem minmax(0,1fr);gap:1rem;align-items:baseline;padding:.85rem 0;border-bottom:1px solid var(--rule);text-decoration:none}
+.landing .threats a:hover>span:last-child{text-decoration:underline;text-decoration-color:var(--dim);text-underline-offset:.2em}
+.landing .threats .lamps i{width:7px;height:7px}
+.landing .threats small{font:400 .8rem var(--sans);color:var(--dim)}
+.landing .nostop ul{margin:0 0 1rem;padding:0;list-style:none;border-top:1px solid var(--rule)}
+.landing .nostop li{padding:.85rem 0;border-bottom:1px solid var(--rule)}
+.landing .nostop b{font-weight:600}
+
+/* How one purchase goes: the diagram beside its numbered steps. */
+.landing .how-grid{display:grid;grid-template-columns:minmax(0,35rem) minmax(0,1fr);gap:clamp(2rem,5vw,4rem);align-items:start;margin-bottom:1.5rem}
+.landing .dia{display:block;width:100%;height:auto;overflow:visible}
+.dia .region{fill:none;stroke:var(--rule);stroke-width:1.5;stroke-dasharray:6 5}
+.dia .box{fill:var(--raised)}
+.dia .box.key{stroke:var(--text);stroke-width:1.5}
+.dia text{font-family:var(--sans)}
+.dia .name{fill:var(--text);font-size:18px;font-weight:600;font-stretch:112.5%}
+.dia .sub,.dia .tag{fill:var(--dim);font-size:14px}
+.dia .arrows line{stroke:var(--dim);stroke-width:1.5;marker-end:url(#ah)}
+.dia .arrows line.faint{stroke-dasharray:4 4}
+.dia .ah{fill:var(--dim)}
+.dia .badges rect{fill:var(--ground);stroke:var(--text);stroke-width:1.5}
+.dia .badges text{fill:var(--text);font:700 13px var(--mono);text-anchor:middle}
+.landing .flow{list-style:none;counter-reset:f;margin:0;padding:0}
+.landing .flow li{counter-increment:f;position:relative;padding:0 0 1rem 2.6rem;max-width:34rem}
+.landing .flow li::before{content:counter(f);position:absolute;left:0;top:.1rem;width:1.5rem;height:1.5rem;display:grid;place-items:center;
+ font:700 .8rem/1 var(--mono);border:1.5px solid var(--text);box-sizing:border-box}
+
+/* Verify it yourself */
+.landing .cmd pre{margin:0;padding:1.25rem clamp(1rem,3vw,1.75rem);background:var(--raised);font:400 .875rem/1.65 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
+.landing .cmd pre code{font-size:1em}
+.landing .cmd .c{color:var(--dim)}
+.landing .copy{display:flex;flex-wrap:wrap;align-items:center;gap:.75rem;margin:.9rem 0 0}
+.landing #copied{color:var(--dim);font-size:.9375rem}
+
+.landing .foot{display:flex;flex-wrap:wrap;justify-content:space-between;gap:1rem 3rem;margin-top:clamp(4rem,9vw,7rem);padding-top:1.5rem;border-top:1px solid var(--rule);font-size:.9rem}
+.landing .foot p{max-width:40rem;margin:0}
+.landing .foot ul{display:flex;flex-wrap:wrap;gap:.5rem 1.5rem;list-style:none;margin:0;padding:0}
+
+@media (prefers-color-scheme:light){.landing .board.judged .seq>li.on .lamp{box-shadow:none}}
+@media (prefers-reduced-motion:reduce){.landing *,.landing *::after{transition:none!important;animation:none!important}}
+@media (max-width:860px){
+ .landing .console,.landing .limits,.landing .how-grid{grid-template-columns:minmax(0,1fr)}
+ .landing .console{gap:1.25rem}
+}
+@media (max-width:560px){
+ .landing .pad img{width:64px;height:64px;margin-right:0}
+ .landing .pad::before{height:4px}
+ .landing .threats a{grid-template-columns:minmax(0,1fr);gap:.2rem}
+ .dia .sub{display:none}
+ .dia .name{font-size:20px;font-stretch:100%}
+ .dia .tag{font-size:18px}
+ .dia .badges text{font-size:16px}
 }

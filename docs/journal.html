@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <meta
+      name="theme-color"
+      content="#0E1A2C"
+      media="(prefers-color-scheme: dark)"
+    />
+    <meta
+      name="theme-color"
+      content="#FFFFFF"
+      media="(prefers-color-scheme: light)"
+    />
+    <title>near-preflight journal</title>
+    <link rel="icon" id="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=B612+Mono:wght@400;700&family=Mona+Sans:wdth,wght@100..125,400..700&display=swap"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="./" title="near-preflight home">
+        <picture>
+          <source
+            srcset="assets/logo-light.svg"
+            media="(prefers-color-scheme: light)"
+          />
+          <img src="assets/logo-dark.svg" width="48" height="48" alt="" />
+        </picture>
+        <h1>near-preflight</h1>
+      </a>
+      <p class="lede">
+        The journal of one demonstration guard,
+        <code id="guard" class="acct">…</code>, a contract on NEAR testnet. Each
+        line is a purchase (or a sale) an AI agent asked for, most often the
+        demo's scripted agent, and what the guard answered before NEAR would
+        sign anything; a line names the model decision behind it when one is
+        attached.
+      </p>
+      <p class="note">
+        The demo's tokens live on a local fork of Base (anvil), not on Base: the
+        traps and the buys run there, and the guard's signed transactions are
+        broadcast only to that fork. Checks from
+        <code>check-mainnet.sh</code> simulate USDC on Base mainnet, read-only,
+        and nothing is ever sent to Base. The verdicts, checks and blocklist
+        below are real, read from NEAR testnet.
+      </p>
+      <p class="status" role="status" aria-live="polite">
+        <span id="updated">Loading…</span>
+        <span id="error" class="err" hidden></span>
+      </p>
+    </header>
+    <main>
+      <section aria-labelledby="h-summary">
+        <h2 id="h-summary">So far</h2>
+        <p id="summary" class="summary">Loading…</p>
+        <div id="bar" class="bar" aria-hidden="true"></div>
+      </section>
+
+      <section aria-labelledby="h-steps">
+        <h2 id="h-steps">How one check goes <small id="steps-of"></small></h2>
+        <ol id="steps" class="steps">
+          <li>
+            <b>The agent asks.</b> It names a token and an amount, and pays for
+            the check.
+          </li>
+          <li>
+            <b>The sentinel simulates.</b> An off-chain service runs the buy
+            NEAR would sign, then two sales of what it bought, and judges the
+            token.
+          </li>
+          <li>
+            <b>The verdict is stored on NEAR.</b> With the sha256 of its
+            evidence and the hash of the one transaction the guard may sign.
+          </li>
+          <li>
+            <b>NEAR signs.</b> On <code>allow</code>, or a <code>warn</code> the
+            owner approved, the guard builds the swap itself and NEAR Chain
+            Signatures signs it.
+          </li>
+        </ol>
+        <p class="note">
+          The evidence replays: the Base-mainnet check shipped in the repository
+          on any machine, a fork check against the team's fork and proof files
+          (<a
+            href="https://github.com/cmoron/near-preflight/blob/main/docs/replay.md"
+            >replay and attest</a
+          >).
+        </p>
+      </section>
+
+      <section aria-labelledby="h-state">
+        <h2 id="h-state">State now</h2>
+        <dl id="state" class="facts">
+          <dt>Loading</dt>
+          <dd>…</dd>
+        </dl>
+      </section>
+
+      <section aria-labelledby="h-checks">
+        <h2 id="h-checks">Checks <small id="count"></small></h2>
+        <p class="note">
+          Newest first. Open a line for its agent, hashes, model decision,
+          signed transaction and how to verify it.
+        </p>
+        <p class="note legend">
+          <span class="lamps" aria-hidden="true"
+            ><i></i><i></i><i></i><i></i
+          ></span>
+          Four lamps, four steps: asked, simulated, verdict stored, signed by
+          NEAR. The fourth lights only when NEAR signs.
+        </p>
+        <div class="log-head" aria-hidden="true">
+          <span>Id</span><span>Token</span><span>Verdict</span
+          ><span>Reason</span>
+        </div>
+        <ul id="checks" class="log"></ul>
+      </section>
+
+      <section aria-labelledby="h-block">
+        <h2 id="h-block">Shared blocklist <small id="listed"></small></h2>
+        <p class="note">
+          The guard refuses a check or a buy of these tokens. A sentinel listing
+          names the verdict it rests on; only the owner can unlist.
+        </p>
+        <table id="blocklist">
+          <thead>
+            <tr>
+              <th>Token</th>
+              <th>Listed by</th>
+              <th>When</th>
+              <th>Note</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <details class="more">
+        <summary><h2 id="h-bounds">Bounds and roles</h2></summary>
+        <dl id="bounds" class="facts">
+          <dt>Loading</dt>
+          <dd>…</dd>
+        </dl>
+      </details>
+    </main>
+    <footer>
+      <p>
+        Read-only: this page calls the guard's view methods on the NEAR testnet
+        RPC, with no backend, no wallet and no key. RPC in use:
+        <span id="rpc">-</span>.
+      </p>
+      <p>
+        <a href="https://github.com/cmoron/near-preflight">Repository</a>,
+        <a href="https://github.com/cmoron/near-preflight#readme"
+          >README with the steps to reproduce</a
+        >
+      </p>
+    </footer>
+    <script src="app.js"></script>
+    <script>
+      // The landing page links one check as journal.html#check-N: open that line once app.js has drawn it.
+      const want = location.hash.match(/^#check-(\d+)$/);
+      if (want) {
+        new MutationObserver((_, obs) => {
+          const d = document.querySelector('#checks details[data-id="' + want[1] + '"]');
+          if (!d) return;
+          obs.disconnect();
+          d.open = true;
+          d.scrollIntoView({ block: 'start' });
+        }).observe(document.getElementById('checks'), { childList: true });
+      }
+    </script>
+  </body>
+</html>
