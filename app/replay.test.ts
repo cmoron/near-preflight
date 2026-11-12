@@ -6,7 +6,7 @@ import tokens from "../evm/tokens.json";
 import { buildIndex } from "./index";
 import { replay, summary, type OnChain, type Proof } from "./replay";
 import { CHECK_BLOCKS, localPreviews, mine } from "./testkit";
-import { checkExit, checkToken, deriveProbes, LATER_S, rpc, ROUTER, saleRanges, specialOf, toProof, WETH, type Cadence, type NearFacts, type Probe } from "./verifier";
+import { checkExit, checkToken, deriveProbes, FAR_METHOD, LATER_S, rpc, ROUTER, saleRanges, specialOf, toProof, WETH, type Cadence, type NearFacts, type Probe } from "./verifier";
 
 const RPC = process.env.EVM_RPC ?? "http://127.0.0.1:8545";
 const DEPLOYER: Address = "0x60B1100000000000000000000000000000000001"; // owner() of the demo tokens (evm/fork.sh)
@@ -566,9 +566,9 @@ describe("replay: the sales and list_target", () => {
     const late = withEvidence(proof, (e) => (e.sales.late = e.sales.late === RANGES.late[0] ? RANGES.late[0] + 1 : RANGES.late[0]));
     expect(failed(await replay(late, RPC)).some((l) => l.includes("the guard's sales are not where evidence.sales puts them"))).toBe(true);
   });
-  test("a first sale of exactly half (a whole percent), a late sale past 51 s, or a cadence not measured over 100 blocks, is refused before anything is sent", async () => {
+  test("a first sale of exactly half (a whole percent), a late sale past 51 s, a far sale before 301 s, or a cadence not measured over 100 blocks, is refused before anything is sent", async () => {
     const proof = await proofOf(tokens.safe as Address);
-    for (const forge of [(e: any) => (e.sales.bps = 5000), (e: any) => (e.sales.late = RANGES.late[1] + 1), (e: any) => (e.cadence = { blocks: 30, seconds: 30 })]) {
+    for (const forge of [(e: any) => (e.sales.bps = 5000), (e: any) => (e.sales.late = RANGES.late[1] + 1), (e: any) => (e.sales.far = RANGES.far[0] - 1), (e: any) => (e.cadence = { blocks: 30, seconds: 30 })]) {
       expect(failed(await replay(withEvidence(proof, forge), RPC))).toEqual(["MISMATCH evidence fields have unexpected types (nothing sent to the node)"]);
     }
   });
@@ -592,6 +592,40 @@ describe("replay: the sales and list_target", () => {
   });
 });
 
+// Since Base mines five blocks a second, eth_simulateV1 reaches 51 s past a real block: the far sale runs
+// the late sale again 5 to 15 min after the buy on a local fork whose clock moves. Replay re-runs it.
+describe("replay: the far sale", () => {
+  test("a sale closed 5 minutes after the buy: its block replays identically, with --check, the far sale re-run on a local fork and its delay derived like the probes", async () => {
+    const proof = await proofOf(tokens.sell_blocked_later as Address);
+    expect(proof.verdict).toBe("block");
+    expect(proof.request[4].method).toBe(FAR_METHOD);
+    const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) });
+    expect(failed(lines)).toEqual([]);
+    expect(lines.some((l) => l.ok && l.line.includes("far sale re-run on a local fork"))).toBe(true);
+  });
+  test("a far sale's result forged (refused into a pass): MISMATCH", async () => {
+    const proof = structuredClone(await proofOf(tokens.sell_blocked_later as Address));
+    proof.response[4] = proof.response[4].map((r) => ({ ...r, status: "0x1" as Hex }));
+    expect(failed(await replay(proof, RPC))).toEqual([expect.stringContaining("far sale re-run on a local fork")]);
+  });
+  test("a far sale moved off the late sale's own transactions: refused", async () => {
+    const proof = structuredClone(await proofOf(tokens.safe as Address));
+    const [approve] = (proof.request as any)[4].params[0].blockStateCalls[0].calls;
+    approve.data = approve.data.slice(0, -2) + "00"; // another amount approved
+    expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("request shape: the far sale is not the late sale"))).toBe(true);
+  });
+  test("a far request sent as eth_simulateV1: refused before anything is sent", async () => {
+    const proof = structuredClone(await proofOf(tokens.safe as Address));
+    (proof.request as any)[4].method = "eth_simulateV1";
+    expect(failed(await replay(rehashed(proof), RPC))).toEqual([expect.stringContaining("(nothing sent to the node)")]);
+  });
+  test("a far sale drawn by the sentinel: replays, but --check refuses it", async () => {
+    const proof = await proofOf(tokens.safe as Address, (d) => ({ sale: { ...d.sale, far: d.sale.far === RANGES.far[1] ? RANGES.far[0] : RANGES.far[1] } }));
+    expect(failed(await replay(proof, RPC))).toEqual([]);
+    expect(failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) }))).toEqual([expect.stringContaining("sales not derived from on-chain data")]);
+  });
+});
+
 // Judges 7 and 8: the guard's sales run again on a real block mined after the reference block (a fourth
 // request, on its own base block), and the template index window is bound to the check's block.
 describe("replay: the later side and the index window", () => {
@@ -599,7 +633,7 @@ describe("replay: the later side and the index window", () => {
     test(`${name}'s block replays identically, with --check: the later side's block derived like the probes`, async () => {
       const proof = await proofOf(token as Address);
       expect(proof.verdict).toBe("block");
-      expect(proof.request.length).toBe(4);
+      expect(proof.request.length).toBe(5);
       const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) });
       expect(failed(lines)).toEqual([]);
       expect(lines.some((l) => l.ok && l.line.includes("later side's request rebuilt on block"))).toBe(true);

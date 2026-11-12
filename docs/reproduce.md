@@ -29,13 +29,14 @@ No NEAR account, no key: `GUARD` only names the contract to read.
 git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun install
 export GUARD=guard.goblin-guard-13713.testnet
 bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
-#   37 OK lines, then: REPLAY OK: verdict warn confirmed, same as on chain
+#   38 OK lines, then: REPLAY OK: verdict warn confirmed, same as on chain
 bun app/attest.ts app/fixtures/decision.json --check 1
 #   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)
 ```
 
-- `replay` resends check #70 (USDC on Base mainnet) to `mainnet.base.org`, traces it on a throwaway anvil
-  fork, rejudges it and compares everything with the guard ([what it checks](replay.md#what-replay-recomputes)).
+- `replay` resends check #96 (USDC on Base mainnet) to `mainnet.base.org`, traces it on a throwaway anvil
+  fork, mines its far sale there again, rejudges it and compares everything with the guard
+  ([what it checks](replay.md#what-replay-recomputes)).
 - `attest` verifies the model's decision behind check #1; it calls Intel and NVIDIA
   ([what it checks](replay.md#what-attest-verifies)).
 
@@ -43,7 +44,7 @@ Then every trap on a local Base fork, as CI runs it:
 
 ```sh
 echo GUARD=$GUARD > .env && evm/fork.sh    # Base fork at block 55836672 ready on http://127.0.0.1:8545 (about 30 s)
-bun test --timeout 30000                   # in another terminal: 285 pass, 0 fail (3 to 5 min)
+bun test --timeout 30000                   # in another terminal: 299 pass, 0 fail (3 to 5 min)
 ```
 
 `evm/fork.sh` starts anvil on a copy of Base at block 55,836,672 and deploys the demo tokens at fixed
@@ -65,10 +66,10 @@ reverts the fork; `demo.sh` mines one a second (`bun app/testkit.ts live`).
 3. **Deploy.** `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard
    and creates `agent.`, `agent2.`, `sentinel.` and `armer.`, each with a function-call key limited to the
    guard. The armer, a key apart from the agent's, opens the agent's armed budget.
-4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`285 pass`) and
+4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`299 pass`) and
    `bunx tsc --noEmit` (exit 0).
 5. **Run the demo.** `./demo.sh` exits 0 in about 3 min (161 s here; each check waits for Base blocks), in four moments:
-   - a poisoned inbox message pushes the agent to a trap: `BLOCK (sale refused N blocks after the buy …)`,
+   - a poisoned inbox message pushes the agent to a trap: `BLOCK (sale refused N s after the buy …)`,
      and the contract refuses the buy (`verdict does not allow the purchase`);
    - a farm token whose simulation is clean: `BLOCK (template 0x9c69..94c8: 5 of 5 earlier pools drained …)`;
    - USDC: `ALLOW`, the guard builds the swap, NEAR signs it, a relay with no key broadcasts it to the
@@ -93,7 +94,8 @@ for the later side's block and posts the verdict; then the proof is replayed wit
 The verdict is `warn`: there is no template index for mainnet. When USDC/WETH traded during the wait,
 the trades are re-executed after the buy, or a second reason says the resale was not verified (4 of 7
 such windows, [sentinel](sentinel.md#others-trades-during-the-wait)). Check #70's pool traded, its trade
-was re-executed; its proof ships as `app/fixtures/usdc-base-mainnet.json`.
+was re-executed. Check #96's proof ships as `app/fixtures/usdc-base-mainnet.json` (nobody traded its pool
+during its wait; its far sale ran 771 s after the buy).
 
 To build an index, use a node that serves `eth_getLogs` (`mainnet.base.org` does not):
 `bun app/index.ts <rpc> <from> <to> <out.json> --pace-ms 1000`. The measurements are in

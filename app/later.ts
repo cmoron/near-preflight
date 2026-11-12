@@ -138,7 +138,10 @@ export async function carry(url: string, ref: Header, r: Header, trades: Real[],
  *  `r`, which Base mined after the reference block `ref`, with the buy's footprint set. When no slot the
  *  buy wrote moved on Base (`moved` empty), that is what the buy wrote. When some did, the trades of the
  *  pool in between are re-executed after the buy (carry; `replayed`); when that cannot be built
- *  (`unverified` says why), the moved slots keep Base's value and the others take the buy's. An ETH
+ *  (`unverified` says why), the moved slots keep Base's value and the others take the buy's. Save one
+ *  case: a single slot moved and nobody traded the pool (dust sent to the guard, whose balance the buy
+ *  wrote too); that slot gets both changes, Base's and the buy's, which is what a balance holds. Nothing
+ *  the token returns decides it; a sale refused there is judged like any other (laterFindings). An ETH
  *  balance adds the buy's change to Base's (WETH's is its total supply); the guard gets what its own
  *  calls spend, as on the other sides. Each simulated block keeps the guard side's time, unless Base's
  *  clock ran ahead of cadence `c` (then the blocks follow `r`'s time). `reserves`: the pool's at the
@@ -160,6 +163,13 @@ export async function laterSide(url: string, r: Header, ref: Header, c: Cadence,
     const carried = trades.length > MAX_REPLAYED ? { error: `${trades.length} trades of the pool, more than ${MAX_REPLAYED} to re-execute` } : await carry(url, ref, r, trades, diff, token, pair);
     if ("error" in carried) unverified = carried.error;
     else [footprint, replayed] = [carried.state, trades.map((t) => t.hash)];
+    if (unverified !== null && moved.length === 1 && !trades.length) {
+      const [a, s] = moved[0].split(":");
+      const [pre, post] = diff.storage[a][s];
+      const base = BigInt(await rpc<Hex>(url, "eth_getStorageAt", [a, s, r.number]));
+      footprint = new Map([...footprint, [moved[0], toHex(BigInt.asUintN(256, base + BigInt(post) - BigInt(pre)), { size: 32 })]]);
+      unverified += `; the sales ran with both its changes, Base's and the buy's`;
+    }
   }
   const state: Record<string, Record<string, Hex>> = {};
   for (const [key, v] of footprint) {

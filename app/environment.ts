@@ -8,7 +8,8 @@
 //   block: L1Block, a fee vault, the coinbase, a helper contract, a library. The code that runs during
 //   the guard's transactions is then only the token's, its implementation's and the Uniswap contracts'.
 // - `token_calls`: what the token's own code reaches: the addresses it calls, or whose code or ETH balance
-//   it reads (BALANCE, EXTCODE*), in any of its frames (its implementation's run in its context). WETH and
+//   it reads (BALANCE, EXTCODE*), in every frame run in its context or running its code or its
+//   implementation's (a plain call to its implementation runs there in another context). WETH and
 //   the factory are on the list above for the router's sake, yet all of Base moves their state (measured
 //   on 2026-11-12: WETH's supply moved in 160 of 600 blocks, 2 min; the factory got 16 pairs in an hour):
 //   a token that reaches either one is a block, whether or not that state moved during the check.
@@ -17,12 +18,13 @@
 // - `opcodes`: the opcodes of the token's and its implementation's reachable code whose value no
 //   simulation can guarantee: at least a warn, the owner decides.
 // TIMESTAMP and NUMBER stay allowed: the simulated blocks follow the cadence measured at the check up to
-// the late sale (30 to 50 s after the buy, derived per check), and the sales there exercise them.
+// the late sale (30 to 51 s after the buy), and the far sale's blocks (301 to 900 s, on the local fork
+// trace starts) get the number and time real ones would have; the sales there exercise them.
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hexToBytes, toHex, type Address, type Hex } from "viem";
-import { FACTORY, ROUTER, rpc, short, WETH, type Finding, type Liquidity, type Request } from "./verifier";
+import { hexToBytes, keccak256, pad, stringToHex, toHex, type Address, type Hex } from "viem";
+import { ETH_LOGS, FACTORY, ROUTER, rpc, short, WETH, type Finding, type Liquidity, type Log, type Request, type Result } from "./verifier";
 
 /** Opcodes whose value the simulation cannot guarantee for a future real block or transaction. GAS is
  *  not one (solc emits it before every external call, and the simulation gives each transaction the
@@ -102,40 +104,64 @@ export type Diff = { storage: Record<string, Record<string, [Hex, Hex]>>; balanc
  *  what its buy wrote. */
 export type Trace = { touched: Address[]; calls: Address[]; balances: Address[]; diff: Diff };
 type Account = { balance?: Hex; storage?: Record<string, Hex> };
-/** A JS tracer (anvil runs geth's API) of what code running in TOKEN's context reaches: the target of
- *  each CALL, CALLCODE, DELEGATECALL, STATICCALL ("c:"), EXTCODESIZE, EXTCODECOPY, EXTCODEHASH ("c:") and
- *  BALANCE ("b:"). An implementation's code runs in its proxy's context: the token's own. */
-const REACH = `{seen: {}, step: function (log) {
+/** A JS tracer (anvil runs geth's API) of what the token's code reaches: the target of each CALL,
+ *  CALLCODE, DELEGATECALL, STATICCALL ("c:"), EXTCODESIZE, EXTCODECOPY, EXTCODEHASH ("c:") and BALANCE
+ *  ("b:"), in every frame run in TOKEN's context (a proxy's implementation runs there) or running TOKEN's
+ *  or IMPL's code, whatever its context: a plain call from the token to its implementation (an expected
+ *  address) runs the implementation in its own. `code` holds each frame's code address (enter, exit). */
+const REACH = `{seen: {}, code: [], enter: function (f) { this.code.push(toHex(f.getTo())); }, exit: function () { this.code.pop(); }, step: function (log) {
   var op = log.op.toNumber();
   var at = op == 0x31 || op == 0x3b || op == 0x3c || op == 0x3f ? 0 : op == 0xf1 || op == 0xf2 || op == 0xf4 || op == 0xfa ? 1 : -1;
-  if (at < 0 || toHex(log.contract.getAddress()) != "TOKEN") return;
+  if (at < 0) return;
+  var context = toHex(log.contract.getAddress());
+  var code = this.code.length ? this.code[this.code.length - 1] : context;
+  if (context != "TOKEN" && code != "TOKEN" && code != "IMPL") return;
   this.seen[(op == 0x31 ? "b:" : "c:") + toHex(toAddress(log.stack.peek(at).toString(16)))] = true;
 }, fault: function () {}, result: function () { return Object.keys(this.seen); }}`;
-/** What the code in `token`'s context reaches in mined transaction `hash` (REACH): [address, balance read]. */
-export async function reachOf(url: string, hash: Hex, token: Address): Promise<[string, boolean][]> {
-  const seen = await rpc<string[]>(url, "debug_traceTransaction", [hash, { tracer: REACH.replace("TOKEN", token.toLowerCase()) }]);
+/** What the code of `token` and of its `implementation` reaches in mined transaction `hash` (REACH):
+ *  [address, balance read]. */
+export async function reachOf(url: string, hash: Hex, token: Address, implementation: Address | null): Promise<[string, boolean][]> {
+  const tracer = REACH.replaceAll("TOKEN", token.toLowerCase()).replaceAll("IMPL", (implementation ?? token).toLowerCase());
+  const seen = await rpc<string[]>(url, "debug_traceTransaction", [hash, { tracer }]);
   return seen.map((k) => [k.slice(2), k.startsWith("b:")]);
 }
 
+/** The far sale's runs (app/verifier.ts farBlocks, farRequest): the probe-side request, the far
+ *  request, and `until`, the block of the late sale's approve: each side's blocks before it run first. */
+export type FarRuns = { probe: Request; far: Request; until: number };
+
 /** The guard side's transactions run for real on a throwaway fork. `guard` is the guard-side
  *  eth_simulateV1 request as sent (app/verifier.ts buildRequest), `block` its base block, `token` the
- *  target. A throwaway anvil forks `url` at that block and replays the request: before each block, its
- *  time, base fee and coinbase; each call's access list taken at "pending" (the state after the calls
- *  before it, in that block), then the call sent as is (calldata, value, gas, fees) and what the token's
- *  code reaches traced (REACH); every block mined at its listed time, the empty ones too. So the sales run
- *  at their simulated block numbers and times on the state the buy left. The buy's own state change comes from prestateTracer's
- *  diff, its values read before and after its block. Not reproduced, and read only through ENV_OPCODES:
- *  the prevrandao, the gas price an access list sees, block hashes. */
-export async function trace(url: string, guard: Request, block: number, token: Address): Promise<Trace> {
-  const [{ blockStateCalls: blocks }] = guard.params as [{ blockStateCalls: SimBlock[] }];
+ *  target and `implementation` its own. A throwaway anvil forks `url` at that block and replays the
+ *  request: before each block, its time, base fee and coinbase; each call's access list taken at
+ *  "pending" (the state after the calls before it, in that block), then the call sent as is (calldata,
+ *  value, gas, fees) and what the token's code reaches traced (REACH); every block mined at its listed
+ *  time, the empty ones too. So the sales run at their simulated block numbers and times on the state the
+ *  buy left. The buy's own state change comes from prestateTracer's diff, its values read before and after
+ *  its block. Not reproduced, and read only through ENV_OPCODES: the prevrandao, the gas price an access
+ *  list sees, block hashes.
+ *  With `far`, the far sale on the same fork: back before the guard's late approve, the empty blocks up to
+ *  the far sale mined at once (anvil_mine: in memory, the last 300 states kept), then the guard's far
+ *  approve and swap at their numbers and times, traced as above; then back at `block`, the probe side's
+ *  buy and first sale at their blocks and times, the empty blocks mined at once, and its far approve and
+ *  swap, not traced. `far` holds their four results, as eth_simulateV1 gives them
+ *  (resultOf). */
+export async function trace(url: string, guard: Request, block: number, token: Address, implementation: Address | null, far?: FarRuns): Promise<Trace & { far: Result[] | null }> {
+  const blocksOf = (q: Request) => (q.params as [{ blockStateCalls: SimBlock[] }])[0].blockStateCalls;
+  const blocks = blocksOf(guard);
   const fork = await forkAt(url, block);
   const local = fork.url;
   const call = <T>(method: string, params: unknown[]) => rpc<T>(local, method, params);
   const same = (a: string | undefined, b: string) => a?.toLowerCase() === b.toLowerCase();
-  try {
-    const set = new Map(Object.entries(blocks[0].stateOverrides ?? {}).map(([a, o]) => [a.toLowerCase(), o.balance]));
-    const calls = blocks.flatMap((b) => b.calls);
-    const sender = calls[0].from;
+  const touched = new Set<string>();
+  const [called, balances] = [new Set<string>(), new Set<string>()];
+  /** Mines `run` on the fork from where it stands, its senders funded and impersonated as `side`'s first
+   *  block says; a gap before a block is mined at once, empty. With `own`, records what each call touches
+   *  and what the token's code reaches. Returns each call sent, in order, with the addresses it accessed,
+   *  and a snapshot taken before block `pause` (a revert there keeps the state fetched before it). */
+  const mine = async (run: SimBlock[], side: SimBlock[], own: boolean, pause = -1n) => {
+    const set = new Map(Object.entries(side[0].stateOverrides ?? {}).map(([a, o]) => [a.toLowerCase(), o.balance]));
+    const calls = run.flatMap((b) => b.calls);
     for (const s of new Set(calls.map((c) => c.from.toLowerCase()))) {
       const balance = BigInt(set.get(s) ?? (await call<Hex>("eth_getBalance", [s, "latest"])));
       await call("anvil_setBalance", [s, toHex(balance + TRACE_MARGIN)]);
@@ -143,13 +169,16 @@ export async function trace(url: string, guard: Request, block: number, token: A
       const first = calls.find((c) => c.from.toLowerCase() === s)?.nonce;
       if (first) await call("anvil_setNonce", [s, first]);
     }
-    const touched = new Set<string>();
-    const [called, balances] = [new Set<string>(), new Set<string>()];
-    let buy: { hash: Hex; accessed: Set<string> } | null = null;
-    let at = BigInt(block);
-    for (const b of blocks) {
+    const sent: { hash: Hex; accessed: Set<string> }[] = [];
+    let paused: Hex | null = null;
+    let at = BigInt((await call<{ number: Hex }>("eth_getBlockByNumber", ["latest", false])).number);
+    for (const b of run) {
       const n = BigInt(b.blockOverrides.number);
-      if (n !== at + 1n) throw new Error(`trace: block ${n} does not follow block ${at}`);
+      if (n <= at) throw new Error(`trace: block ${n} does not follow block ${at}`);
+      if (n === pause) paused = await call<Hex>("evm_snapshot", []);
+      // the far sale's gap: empty blocks, mined at once, their times the clock's (only BLOCKHASH, a
+      // flagged opcode, sees them); the next block gets its own time below
+      if (n > at + 1n) await call("anvil_mine", [toHex(n - at - 1n), "0x0"]);
       at = n;
       await call("evm_setNextBlockTimestamp", [b.blockOverrides.time]);
       if (!b.calls.length) {
@@ -164,21 +193,30 @@ export async function trace(url: string, guard: Request, block: number, token: A
         // before the buy), which only a node that checks them sees; no opcode reads a nonce.
         const tx = { from: c.from, to: c.to, data: c.data, value: c.value ?? "0x0", gas: c.gas, maxFeePerGas: c.maxFeePerGas, maxPriorityFeePerGas: c.maxPriorityFeePerGas };
         // A reverting call still returns the access list of what it ran, with an `error` field.
-        const r = await call<{ accessList: { address: Address }[] }>("eth_createAccessList", [tx, "pending"]);
-        for (const e of r.accessList) touched.add(e.address.toLowerCase());
+        const accessed = new Set<string>();
+        if (own) for (const e of (await call<{ accessList: { address: Address }[] }>("eth_createAccessList", [tx, "pending"])).accessList) accessed.add(e.address.toLowerCase());
+        for (const a of accessed) touched.add(a);
         hashes.push(await call<Hex>("eth_sendTransaction", [tx]));
-        buy ??= { hash: hashes[0], accessed: new Set(r.accessList.map((e) => e.address.toLowerCase())) };
+        sent.push({ hash: hashes.at(-1)!, accessed });
       }
       await call("evm_mine", []);
       const mined = await call<{ number: Hex; transactions: unknown[] }>("eth_getBlockByNumber", ["latest", false]);
       if (BigInt(mined.number) !== n || mined.transactions.length !== b.calls.length) {
         throw new Error(`trace: block ${n} mined as ${BigInt(mined.number)} with ${mined.transactions.length} of ${b.calls.length} transactions`);
       }
+      if (!own) continue;
       for (const h of hashes) {
-        for (const [a, balance] of await reachOf(local, h, token)) if (!same(a, token)) (balance ? balances : called).add(a);
+        for (const [a, balance] of await reachOf(local, h, token, implementation)) if (!same(a, token)) (balance ? balances : called).add(a);
       }
     }
+    return { sent, paused };
+  };
+  try {
+    const start = await call<Hex>("evm_snapshot", []);
+    const guardSide = await mine(blocks, blocks, true, far ? BigInt(far.until) : -1n);
+    const [buy] = guardSide.sent;
     if (!buy) throw new Error("trace: no transaction in the guard-side request");
+    const sender = blocks[0].calls[0].from;
     // The buy is alone in the first block after `block`: its diff is that block's.
     const d = await call<{ pre: Record<string, Account>; post: Record<string, Account> }>("debug_traceTransaction", [buy.hash, { tracer: "prestateTracer", tracerConfig: { diffMode: true } }]);
     const [before, after] = [toHex(block), toHex(block + 1)];
@@ -193,10 +231,42 @@ export async function trace(url: string, guard: Request, block: number, token: A
       const [x, y] = await Promise.all([before, after].map((t) => call<Hex>("eth_getBalance", [a, t])));
       if (BigInt(x) !== BigInt(y)) diff.balance[a] = [x, y];
     }
-    return { touched: [...touched].sort() as Address[], calls: [...new Set([...called, ...balances])].sort() as Address[], balances: [...balances].sort() as Address[], diff };
+    let results: Result[] | null = null;
+    if (far) {
+      results = [];
+      const [guardFar, probeFar] = [blocksOf(far.far).slice(0, 2), blocksOf(far.far).slice(2)]; // farBlocks' order
+      // The guard: back before its late approve (the state fetched so far kept), the far sale after a gap.
+      await call("evm_revert", [guardSide.paused]);
+      for (const { hash } of (await mine(guardFar, blocks, true)).sent) results.push(await resultOf(local, hash));
+      // The probe: back at `block`, its buy and first sale at their blocks, the empty blocks before them and
+      // up to the far sale mined at once.
+      const probe = blocksOf(far.probe);
+      await call("evm_revert", [start]);
+      const run = [...probe.filter((b) => b.calls.length && BigInt(b.blockOverrides.number) < BigInt(far.until)), ...probeFar];
+      for (const { hash } of (await mine(run, probe, false)).sent.slice(-2)) results.push(await resultOf(local, hash));
+    }
+    return { touched: [...touched].sort() as Address[], calls: [...new Set([...called, ...balances])].sort() as Address[], balances: [...balances].sort() as Address[], diff, far: results };
   } finally {
     await fork.stop();
   }
+}
+
+type Frame = { type: string; from: Address; to?: Address; value?: Hex; output?: Hex; error?: string; calls?: Frame[] };
+const TRANSFER = keccak256(stringToHex("Transfer(address,address,uint256)"));
+/** A mined transaction as eth_simulateV1 with traceTransfers reports a call: its status, its return (or
+ *  revert) data, its logs, then each ETH transfer of a frame that did not revert as a Transfer log of
+ *  ETH_LOGS (every frame type but DELEGATECALL, as geth's). */
+export async function resultOf(url: string, hash: Hex): Promise<Result> {
+  const receipt = await rpc<{ status: Hex; logs: Log[] }>(url, "eth_getTransactionReceipt", [hash]);
+  const top = await rpc<Frame>(url, "debug_traceTransaction", [hash, { tracer: "callTracer" }]);
+  const eth: Log[] = [];
+  const walk = (f: Frame) => {
+    if (f.error) return; // a frame that reverted moved nothing
+    if (f.type !== "DELEGATECALL" && f.to && BigInt(f.value ?? "0x0") > 0n) eth.push({ address: ETH_LOGS, topics: [TRANSFER, pad(f.from), pad(f.to)], data: toHex(BigInt(f.value!), { size: 32 }) });
+    for (const c of f.calls ?? []) walk(c);
+  };
+  walk(top);
+  return { status: receipt.status, returnData: top.output ?? "0x", logs: [...receipt.logs.map(({ address, topics, data }) => ({ address, topics, data })), ...eth] };
 }
 
 /** A throwaway anvil forking `url` at `block`, mining only when asked, transactions in the order sent.

@@ -11,6 +11,8 @@ import {
   deriveProbes,
   ETH_LOGS,
   FACTORY,
+  FAR,
+  FAR_METHOD,
   GUARD,
   judge,
   judgeExit,
@@ -18,11 +20,14 @@ import {
   LATER,
   LATER_S,
   laterBlocks,
+  laterFindings,
   liquidityFindings,
   plan,
   REF_MARGIN_S,
   ROUTER,
   rpc,
+  saleRanges,
+  secondsAfterBuy,
   specialOf,
   timeOf,
   WETH,
@@ -99,14 +104,22 @@ describe("sentinel verdict", () => {
   test("sale closed from the buy: block", async () => {
     const r = await check(tokens.sell_blocked);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(/sale refused \d+ blocks after the buy/);
+    expect(r.reasons).toMatch(/sale refused \d+ s after the buy/);
     expect(r.list_target).toBe(true);
   });
   // Since Base mines five blocks a second, eth_simulateV1's 256 blocks reach 51 s past the reference
-  // block: nothing after that is simulated. These two traps act at 5 minutes.
-  test("sale closed 5 minutes after the buy: not caught, allow (the late sale is at most 51 s after the buy)", async () => {
+  // block. These two traps act at 5 minutes: the far sale, the late one again 5 to 15 min after the buy
+  // on a local fork whose clock moves, meets them.
+  test("sale closed 5 minutes after the buy: block on the far sale, listed (the late sale at 51 s at most went through)", async () => {
     const r = await check(tokens.sell_blocked_later);
-    expect(r.verdict).toBe("allow");
+    expect(r.verdict).toBe("block");
+    const far = secondsAfterBuy(CADENCE, r.evidence.sales.far);
+    expect(far).toBeGreaterThan(300);
+    expect(r.reasons).toBe(`sale refused ${far} s after the buy (TransferHelper: TRANSFER_FROM_FAILED)`);
+    expect(r.evidence.calls).toContain("sale late: ok");
+    expect(r.evidence.calls).toContain(`${FAR}sale late: revert`);
+    expect(r.evidence.calls).toContain(`${FAR}${GUARD}sale late: revert`);
+    expect(r.list_target).toBe(true);
   });
   test("90 % tax on the sale: block", async () => {
     const r = await check(tokens.sell_tax);
@@ -114,8 +127,11 @@ describe("sentinel verdict", () => {
     expect(r.reasons).toContain("90 % tax");
     expect(r.list_target).toBe(true);
   });
-  test("90 % tax from 5 minutes after the buy: not caught either, allow", async () => {
-    expect((await check(tokens.sell_tax_later)).verdict).toBe("allow");
+  test("90 % tax from 5 minutes after the buy: block on the far sale, listed", async () => {
+    const r = await check(tokens.sell_tax_later);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toBe(`90 % tax on the sale ${secondsAfterBuy(CADENCE, r.evidence.sales.far)} s after the buy`);
+    expect(r.list_target).toBe(true);
   });
   test("a token that freezes only the guard's public EVM address: block, but not listed (it rests on the guard's own state)", async () => {
     const r = await check(tokens.guard_frozen);
@@ -126,7 +142,7 @@ describe("sentinel verdict", () => {
   test("a sale that needs more gas than the guard signs with (250,000): block, the simulation uses the guard's gas limit", async () => {
     const r = await check(tokens.gas_hungry);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(/sale refused \d+ blocks after the buy/);
+    expect(r.reasons).toMatch(/sale refused \d+ s after the buy/);
     expect(r.list_target).toBe(true); // the probe's sale fails too: the token's own behaviour
   });
   test("the same token simulated with 1,000,000 gas sells: only the guard's own gas limit says what a sale will meet", async () => {
@@ -140,7 +156,7 @@ describe("sentinel verdict", () => {
   test("sale allowed only in simulation (zero gas price or base fee): block", async () => {
     const r = await check(tokens.sim_detector);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(/sale refused \d+ blocks after the buy/); // the router masks the token's reason
+    expect(r.reasons).toMatch(/sale refused \d+ s after the buy/); // the router masks the token's reason
     expect(r.list_target).toBe(true);
   });
 });
@@ -151,13 +167,13 @@ describe("the guard side simulates exactly what the guard signs", () => {
   test("Trap2 mode 1, a sale only after an approve of 2^256 - 1 (the guard approves the exact amount): block, listed", async () => {
     const r = await check(tokens.approve_max_only);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(/sale refused \d+ blocks after the buy/);
+    expect(r.reasons).toMatch(/sale refused \d+ s after the buy/);
     expect(r.list_target).toBe(true); // the probe signs the same approve: the token's own behaviour
   });
   test("Trap2 mode 2, a sale only after a buy of exactly 0.01 ETH (the agent asked 0.00001 ETH): block, listed", async () => {
     const r = await check(tokens.buy_001_only);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(/sale refused \d+ blocks after the buy/);
+    expect(r.reasons).toMatch(/sale refused \d+ s after the buy/);
     expect(r.list_target).toBe(true);
   });
   test("the guard's buy is simulated as the very transaction it signs: calldata, value, nonce, gas, fees; its hash is in the evidence", async () => {
@@ -181,19 +197,19 @@ describe("nothing but the guard's own transactions before each one it signs", ()
   test("JudgeTrap, a sale only after a top-level balanceOf (which only a simulation sent): block, listed", async () => {
     const r = await check(tokens.judge_trap);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(/sale refused \d+ blocks after the buy/);
+    expect(r.reasons).toMatch(/sale refused \d+ s after the buy/);
     expect(r.list_target).toBe(true); // the probe never calls balanceOf either: the token's own behaviour
   });
   test("a buyer that never called the token itself before its buy can never sell: block, listed", async () => {
     const r = await check(tokens.untouched_buyer);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(/sale refused \d+ blocks after the buy/);
+    expect(r.reasons).toMatch(/sale refused \d+ s after the buy/);
     expect(r.list_target).toBe(true);
   });
   test("a sale keyed by a stranger's failed transferFrom (it returns false and writes state): block, listed", async () => {
     const r = await check(tokens.stranger_key);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(/sale refused \d+ blocks after the buy/);
+    expect(r.reasons).toMatch(/sale refused \d+ s after the buy/);
     expect(r.list_target).toBe(true);
   });
   test("the guard-side request holds only the guard's buy, approves and swaps, from the block's real state", async () => {
@@ -205,7 +221,7 @@ describe("nothing but the guard's own transactions before each one it signs", ()
     expect(calls.every((c) => c.from.toLowerCase() === GUARD_EVM.toLowerCase() && c.nonce !== undefined)).toBe(true);
     expect(calls.map((c) => c.data.slice(0, 10))).toEqual(["0xb6f9de95", "0x095ea7b3", "0x791ac947", "0x095ea7b3", "0x791ac947"]);
     expect(Object.keys(guardSide[0].stateOverrides ?? {}).every((a) => a.toLowerCase() === GUARD_EVM.toLowerCase())).toBe(true);
-    expect(r.request.length).toBe(4); // the probe's twins, the synthetic calls and the later side run apart
+    expect(r.request.length).toBe(5); // the probe's twins, the synthetic calls, the later side and the far sale run apart
   });
 });
 
@@ -235,7 +251,7 @@ describe("a token whose transfers read what the simulation cannot reproduce", ()
     expect(r.evidence.opcodes).toEqual(["BASEFEE"]);
     // the fork's base fee falls by about 2 wei a block; on Base it sits at its floor in most blocks (a warn)
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(new RegExp(`^sale refused \\d+ blocks after the buy on Base's state of block ${r.evidence.later!.block}`));
+    expect(r.reasons).toMatch(new RegExp(`^sale refused \\d+ s after the buy on Base's state of block ${r.evidence.later!.block}`));
   });
   test("USDC touches its proxy, its implementation, its pool, the router and WETH only: allow", async () => {
     const r = await check(tokens.usdc);
@@ -253,16 +269,16 @@ describe("the check's sales are where and what a token cannot expect", () => {
   test("NextBlockKey, a sale only in the block right after the buy: block, listed", async () => {
     const r = await check(tokens.next_block_key);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(/^sale refused \d+ blocks after the buy/);
+    expect(r.reasons).toMatch(/^sale refused \d+ s after the buy/);
     expect(r.list_target).toBe(true);
   });
   test("AmountTrap, a sale only of half or all of the balance: block, listed", async () => {
     const r = await check(tokens.amount_trap);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(/^sale refused \d+ blocks after the buy/);
+    expect(r.reasons).toMatch(/^sale refused \d+ s after the buy/);
     expect(r.list_target).toBe(true);
   });
-  test("the sales are drawn in seconds and land on blocks at the cadence measured: the first 2 to 25 s after the buy, 13 % to 87 %, never a whole percent; the rest 30 to 51 s after it; the later side 16 to 24 s after the reference block (pure)", () => {
+  test("the sales are drawn in seconds and land on blocks at the cadence measured: the first 2 to 25 s after the buy, 13 % to 87 %, never a whole percent; the rest 30 to 51 s after it, and again 301 to 900 s after it (the far sale); the later side 16 to 24 s after the reference block (pure)", () => {
     const draw = (c: Cadence) => Array.from({ length: 3000 }, (_, id) => deriveProbes({ guard: "guard.test", id, requested_ns: "0" }, keccak256(toHex(id)), c));
     const range = (xs: number[]) => [Math.min(...xs), Math.max(...xs)];
     const base = draw({ blocks: 100, seconds: 20 }); // Base since November 2026: 5 blocks a second
@@ -271,10 +287,14 @@ describe("the check's sales are where and what a token cannot expect", () => {
     expect(range(sales.map((s) => s.late))).toEqual([150, 255]); // eth_simulateV1 refuses a block 257 past the proof's: the buy is in the 1st
     expect(new Set(sales.map((s) => s.late)).size).toBe(106);
     expect([...new Set(base.map((d) => d.later))].sort((a, b) => a - b)).toEqual([16, 17, 18, 19, 20, 21, 22, 23, 24]);
+    expect(saleRanges({ blocks: 100, seconds: 20 }).far).toEqual([1505, 4500]); // the far sale, 301 to 900 s after the buy: past 51 s, on a local fork
+    expect(sales.every((s) => s.far >= 1505 && s.far <= 4500)).toBe(true);
+    expect(new Set(sales.map((s) => s.far)).size).toBeGreaterThan(1500);
+    expect(range(sales.map((s) => secondsAfterBuy({ blocks: 100, seconds: 20 }, s.far)))).toEqual([301, 900]);
     expect(sales.every((s) => s.bps > 1300 && s.bps < 8700 && s.bps % 100 !== 0)).toBe(true);
     expect(new Set(sales.map((s) => s.bps)).size).toBeGreaterThan(1000);
     const fork = draw({ blocks: 100, seconds: 100 }).map((d) => d.sale); // the local fork: a block a second
-    expect([range(fork.map((s) => s.first)), range(fork.map((s) => s.late))]).toEqual([[2, 25], [30, 51]]);
+    expect([range(fork.map((s) => s.first)), range(fork.map((s) => s.late)), range(fork.map((s) => s.far))]).toEqual([[2, 25], [30, 51], [301, 900]]);
     const fast = draw({ blocks: 100, seconds: 5 }).map((d) => d.sale); // 20 blocks a second: the late sale capped at the 256th block
     expect(Math.max(...fast.map((s) => s.late))).toBe(255);
     expect(fast.every((s) => s.first <= s.late - 2)).toBe(true);
@@ -290,7 +310,7 @@ describe("the check's sales are where and what a token cannot expect", () => {
   test("the later side holds the guard side's blocks after its real block, a sale whose approve is not after it left out whole (pure)", () => {
     const at = (n: number): Block => ({ number: 100n + BigInt(n), calls: n === 20 || n === 230 ? [{ label: "approve", from: GUARD_EVM, to: WETH, data: "0x" }] : n === 21 || n === 231 ? [{ label: "swap", from: GUARD_EVM, to: WETH, data: "0x" }] : [] });
     const guardSide = Array.from({ length: 231 }, (_, i) => at(i + 1));
-    const sale = { first: 20, bps: 5001, late: 230 };
+    const sale = { first: 20, bps: 5001, late: 230, far: 1600 };
     /** The later side's first block and the blocks holding a call, after real block `real`. */
     const after = (real: number) => {
       const blocks = laterBlocks(guardSide, 100n, sale, BigInt(real));
@@ -323,7 +343,7 @@ describe("a token keyed on state Base moves", () => {
       const r = await check(token);
       expect(r.evidence.calls.filter((c) => c.startsWith(`${GUARD}sale`)).every((c) => c.endsWith(": ok"))).toBe(true);
       expect(r.verdict).toBe("block");
-      expect(r.reasons).toMatch(new RegExp(`^sale refused \\d+ blocks after the buy on Base's state of block ${r.evidence.later!.block} `));
+      expect(r.reasons).toMatch(new RegExp(`^sale refused \\d+ s after the buy on Base's state of block ${r.evidence.later!.block} `));
       expect(r.evidence.later!.block - r.evidence.block).toBeGreaterThanOrEqual(LATER_S[0]); // a block a second on the fork
       expect(r.list_target).toBe(false);
     });
@@ -401,10 +421,53 @@ describe("others trade the token's pool while the check waits", () => {
     };
     const r = await checkNow(tokens.usdc, GUARD_EVM, probes, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(tokens.usdc, GUARD_EVM) }, dust);
     expect(r.evidence.later!.replayed).toEqual([]);
-    expect(r.evidence.later!.unverified).toMatch(/^slot 0x[0-9a-f]{4}\.\.[0-9a-f]{4} of 0x8335\.\.2913 moved in blocks \d+\.\.\d+ with no trade of the pool$/);
-    // the guard holds the dust there, not what it bought: its sale fails on that merge, which blocks nothing
+    const lone = "slot 0x[0-9a-f]{4}\\.\\.[0-9a-f]{4} of 0x8335\\.\\.2913 moved in blocks \\d+\\.\\.\\d+ with no trade of the pool; the sales ran with both its changes, Base's and the buy's";
+    expect(r.evidence.later!.unverified).toMatch(new RegExp(`^${lone}$`));
+    // the guard's balance holds what it bought plus the dust: its sale goes through, the resale not verified
     expect(r.verdict).toBe("warn");
-    expect(r.reasons).toMatch(/^resale not verified on Base's state of block \d+: slot 0x[0-9a-f]{4}\.\.[0-9a-f]{4} of 0x8335\.\.2913 moved in blocks \d+\.\.\d+ with no trade of the pool; there, merged with the buy's values, the sale refused \d+ blocks after the buy/);
+    expect(r.reasons).toMatch(new RegExp(`^resale not verified on Base's state of block \\d+: ${lone}`));
+    expect(r.reasons).not.toContain("sale refused");
+  });
+  // The same dust on a trap whose sale is refused on Base's later state: still a block.
+  test("dust sent to the guard during WethKey's check: its refusal on Base's later state is still a block, not listed", async () => {
+    const erc20 = parseAbi(["function transfer(address,uint256) returns (bool)"]);
+    const swap = parseAbi(["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256) payable"]);
+    await rpc(RPC, "anvil_impersonateAccount", [USERS[0]]);
+    await rpc(RPC, "eth_sendTransaction", [{ from: USERS[0], to: ROUTER, data: encodeFunctionData({ abi: swap, args: [0n, [WETH, tokens.weth_key as Address], USERS[0], 9_999_999_999n] }), value: toHex(parseEther("0.1")) }]);
+    await mine(RPC, 2); // before the check: not in its wait
+    const dust = async () => {
+      await rpc(RPC, "anvil_impersonateAccount", [USERS[0]]);
+      await rpc(RPC, "eth_sendTransaction", [{ from: USERS[0], to: tokens.weth_key, data: encodeFunctionData({ abi: erc20, functionName: "transfer", args: [GUARD_EVM, 1n] }) }]);
+    };
+    const r = await checkNow(tokens.weth_key, GUARD_EVM, probes, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(tokens.weth_key, GUARD_EVM) }, dust);
+    expect(r.evidence.later!.replayed).toEqual([]);
+    expect(r.evidence.later!.unverified).toMatch(/with no trade of the pool; the sales ran with both its changes, Base's and the buy's$/);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toMatch(/^sale refused \d+ s after the buy on Base's state of block \d+ \(.*\), merged with the buy's values: slot /);
+    expect(r.list_target).toBe(false);
+  });
+  // Review of 73a7ad2: a trap could force the fallback and turn its refusal there into a warn. More
+  // trades of its pool than can be re-executed: the refusal on the merged state stays a block.
+  test("WethKey with more trades of its pool than can be re-executed: its refusal there is still a block, not listed", async () => {
+    const swap = parseAbi(["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256) payable"]);
+    const busy = async () => {
+      await rpc(RPC, "evm_setAutomine", [false]);
+      try {
+        for (let i = 0; i < 11; i++) {
+          const from = USERS[i % USERS.length];
+          await rpc(RPC, "anvil_impersonateAccount", [from]);
+          await rpc(RPC, "eth_sendTransaction", [{ from, to: ROUTER, data: encodeFunctionData({ abi: swap, args: [0n, [WETH, tokens.weth_key as Address], from, 9_999_999_999n] }), value: toHex(parseEther("0.01")) }]);
+        }
+        await rpc(RPC, "evm_mine", []);
+      } finally {
+        await rpc(RPC, "evm_setAutomine", [true]);
+      }
+    };
+    const r = await checkNow(tokens.weth_key, GUARD_EVM, probes, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(tokens.weth_key, GUARD_EVM) }, busy);
+    expect(r.evidence.later!.unverified).toMatch(/^1[1-9] trades of the pool, more than 10 to re-execute$/);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toMatch(/^sale refused \d+ s after the buy on Base's state of block \d+ \(.*\), merged with the buy's values: 1[1-9] trades of the pool, more than 10 to re-execute/);
+    expect(r.list_target).toBe(false);
   });
 });
 
@@ -418,10 +481,10 @@ describe("a sale refused only early never lists", () => {
     }, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(token, GUARD_EVM) });
   // Cooldown60's 30 blocks are 6 s on Base, 30 s on the fork: its first sale (2 to 25 s) is refused
   // there, its late one (30 to 50 s) goes through.
-  test("Cooldown60, first sale 10 blocks after the buy: block, not listed (the late sale goes through)", async () => {
+  test("Cooldown60, first sale 10 blocks after the buy: block, not listed (the late and far sales go through)", async () => {
     const r = await checkFirst(tokens.cooldown_60, 10);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toBe("sale refused 10 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)"); // nothing from the later side
+    expect(r.reasons).toBe("sale refused 10 s after the buy (TransferHelper: TRANSFER_FROM_FAILED)"); // nothing from the later side
     expect(r.list_target).toBe(false);
   });
   test("Cooldown60, first sale 40 blocks after the buy: allow", async () => {
@@ -438,7 +501,7 @@ describe("a sale's tax is what the seller receives", () => {
   test("a token that swaps 90 % of each sale into the pool itself and sends that WETH to its owner: block", async () => {
     const r = await check(tokens.pair_pull_tax);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(/\d+ % tax on the sale \d+ blocks after the buy/);
+    expect(r.reasons).toMatch(/\d+ % tax on the sale \d+ s after the buy/);
     expect(r.reasons).toContain("the pool paid out more WETH than the seller received");
     expect(r.list_target).toBe(true);
   });
@@ -476,7 +539,7 @@ describe("what the agent's amount decides never lists the token", () => {
   test("the healthy demo token, 1 wei: block, the pool would pay 0 wei for its sale, not listed", async () => {
     const r = await at(tokens.safe, 1n);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toMatch(/sale refused \d+ blocks after the buy/);
+    expect(r.reasons).toMatch(/sale refused \d+ s after the buy/);
     expect(r.list_target).toBe(false);
   });
 });
@@ -493,7 +556,7 @@ describe("dust is the pool's quote for the amount, not what the token delivers (
   const judged = async (quoted: bigint, got: bigint) => {
     const p = localPreviews({ guard: w.guard, target: token, amount: AMOUNT });
     const txs = { buy: (await p.check(0n))[0], sales: [await p.sale(1n, 0n), await p.sale(1n, 0n)] as [Hex[], Hex[]] };
-    const sales = { first: 10, bps: 5001, late: 40 };
+    const sales = { first: 10, bps: 5001, late: 40, far: 400 };
     const full = got >= 10n ? { amounts: { guard: got, probe: got }, owner: null, sale: sales } : undefined; // under 10 units the check stops at the buy
     const labels = labelsOf(plan(token, w, 100n, AMOUNT, txs, full));
     const results = labels.map((l): Result => {
@@ -521,6 +584,41 @@ describe("dust is the pool's quote for the amount, not what the token delivers (
       expect(r.verdict).toBe("block");
       expect(r.list_target).toBe(false);
     }
+  });
+});
+
+// Review of 73a7ad2: when others' trades could not be re-executed, a sale refused on the merged state was
+// a warn, so a trap could force that fallback to escape a block. It is a block now; dust sent to the guard
+// no longer refuses an honest token's sale there (app/later.ts gives that lone slot both changes).
+describe("a resale not verified on Base's later state (pure)", () => {
+  const [token, buyer, stranger, pair] = ["0xa1", "0xa2", "0xa3", "0xa4"].map((a) => pad(a as Hex, { size: 20 })) as Address[];
+  const w = { token, guard: GUARD_EVM, buyer, stranger };
+  const ok: Result = { status: "0x1", returnData: "0x", logs: [] };
+  const refused: Result = { status: "0x0", returnData: "0x" };
+  const sales = { first: 10, bps: 5001, late: 40, far: 400 };
+  /** The later side's findings when the late sale passed on the reference block, and `sale` there. */
+  const of = (unverified: string | null, sale: Result = refused) =>
+    laterFindings(
+      { [`${GUARD}buy`]: ok, [`${GUARD}approve router late`]: ok, [`${GUARD}sale late`]: ok, [`${LATER}${GUARD}approve router late`]: ok, [`${LATER}${GUARD}sale late`]: sale },
+      w,
+      sales,
+      { block: 120, moved: [`${pair}:${toHex(8, { size: 32 })}`], reserves: ["1", "1"], replayed: [], unverified },
+      pair,
+      CADENCE,
+    );
+  test("more trades of the pool than can be re-executed, the sale refused there: block, not listed", () => {
+    expect(of("11 trades of the pool, more than 10 to re-execute")).toEqual([
+      { level: "block", text: "sale refused 40 s after the buy on Base's state of block 120 (revert without reason), merged with the buy's values: 11 trades of the pool, more than 10 to re-execute" },
+    ]);
+  });
+  test("a lone slot the buy wrote moved with no trade of the pool, the sales run with both its changes and refused there: block", () => {
+    expect(of("slot 0x0000..0008 of 0x0000..00a1 moved in blocks 101..120 with no trade of the pool; the sales ran with both its changes, Base's and the buy's")[0]?.level).toBe("block");
+  });
+  test("not verified, the sale going through there: warn, as before", () => {
+    expect(of("11 trades of the pool, more than 10 to re-execute", ok)).toEqual([{ level: "warn", text: "resale not verified on Base's state of block 120: 11 trades of the pool, more than 10 to re-execute" }]);
+  });
+  test("verified, the sale refused there: block", () => {
+    expect(of(null)).toEqual([{ level: "block", text: "sale refused 40 s after the buy on Base's state of block 120 (revert without reason)" }]);
   });
 });
 
@@ -709,8 +807,9 @@ describe("proof", () => {
   test("simulated blocks follow the cadence measured (the fork's 100 blocks in 100 s), the real base fee and coinbase, one prevrandao per L1 epoch of 12 s", async () => {
     const r = await check(tokens.safe);
     expect(r.evidence.cadence).toEqual(CADENCE);
-    /** Each request's base block: the reference block, the later side's real block for the 4th. */
-    const bases = [r.evidence.block, r.evidence.block, r.evidence.block, r.evidence.later!.block];
+    /** Each request's base block: the reference block, the later side's real block for the 4th; the far
+     *  sale's blocks (5th) count from the reference block too. */
+    const bases = [r.evidence.block, r.evidence.block, r.evidence.block, r.evidence.later!.block, r.evidence.block];
     for (const [i, q] of r.request.entries()) {
       const block = BigInt(bases[i]);
       expect(q.params[1]).toBe(toHex(block));
@@ -743,6 +842,15 @@ describe("proof", () => {
     expect(guardSide.filter((b) => b.calls.length).map((b) => BigInt(b.blockOverrides.number) - block)).toEqual([1n, first, first + 1n, late, late + 1n]);
     expect(guardSide.map((b) => BigInt(b.blockOverrides.number) - block)).toEqual(Array.from({ length: Number(late) + 1 }, (_, i) => BigInt(i + 1))); // no gap for the node to fill
     expect(new Set(guardSide.map((b) => b.blockOverrides.prevRandao)).size).toBe(Number(epochOf(block + late + 1n)) + 1);
+    // the far sale: the guard's late approve and swap, then the probe's, `far` blocks after the buy, mined
+    // on a local fork at those numbers and times (a block a second here), past eth_simulateV1's 256
+    expect(r.request[4].method).toBe(FAR_METHOD);
+    const far = (r.request[4].params[0] as { blockStateCalls: { blockOverrides: Record<string, string>; calls: { from: string; data: string }[] }[] }).blockStateCalls;
+    const f = BigInt(r.evidence.sales.far);
+    expect(far.map((b) => BigInt(b.blockOverrides.number) - block)).toEqual([f, f + 1n, f, f + 1n]);
+    expect(f).toBeGreaterThan(256n);
+    expect(far.map((b) => b.calls.map((c) => c.data.slice(0, 10)))).toEqual([["0x095ea7b3"], ["0x791ac947"], ["0x095ea7b3"], ["0x791ac947"]]);
+    expect(far[0].calls[0] as unknown).toEqual(guardSide[Number(late) - 1].calls[0]); // the late sale's very approve
   });
   test("carries a proxy's implementation (USDC)", async () => {
     const r = await check(tokens.usdc);

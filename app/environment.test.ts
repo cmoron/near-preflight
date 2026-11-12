@@ -106,8 +106,25 @@ describe("what the token's own code reaches, in its context, implementation incl
       const hash = await rpc<Hex>(RPC, "eth_sendTransaction", [{ from: caller, to: proxy, data: "0x", gas: toHex(100_000) }]);
       for (let i = 0; i < 50 && !(await rpc<unknown>(RPC, "eth_getTransactionReceipt", [hash])); i++) await Bun.sleep(100);
       const sorted = (x: [string, boolean][]) => x.map(([a, b]) => `${a}:${b}`).sort();
-      expect(sorted(await reachOf(RPC, hash, proxy))).toEqual(sorted([[impl, false], [caller, true], [WETH.toLowerCase(), false]]));
-      expect(await reachOf(RPC, hash, impl)).toEqual([]); // its code never runs in its own context
+      expect(sorted(await reachOf(RPC, hash, proxy, impl))).toEqual(sorted([[impl, false], [caller, true], [WETH.toLowerCase(), false]]));
+    } finally {
+      await rpc(RPC, "evm_revert", [snapshot]);
+    }
+  });
+  // Review of 73a7ad2: the tracer read only frames in the token's context, so a token could do the read in
+  // its implementation's own context, with a plain call to it (an expected address). Its code counts
+  // wherever it runs.
+  test("the same reads by the implementation in its own context, after a STATICCALL from the proxy: recorded", async () => {
+    const snapshot = await rpc<Hex>(RPC, "evm_snapshot", []);
+    try {
+      await rpc(RPC, "anvil_setCode", [impl, `0x73${caller.slice(2)}315073${WETH.slice(2)}3f5000`]); // BALANCE(caller), EXTCODEHASH(WETH)
+      await rpc(RPC, "anvil_setCode", [proxy, `0x6000600060006000${"73"}${impl.slice(2)}5afa5000`]); // STATICCALL(impl)
+      await rpc(RPC, "anvil_setBalance", [caller, toHex(parseEther("1"))]);
+      await rpc(RPC, "anvil_impersonateAccount", [caller]);
+      const hash = await rpc<Hex>(RPC, "eth_sendTransaction", [{ from: caller, to: proxy, data: "0x", gas: toHex(100_000) }]);
+      for (let i = 0; i < 50 && !(await rpc<unknown>(RPC, "eth_getTransactionReceipt", [hash])); i++) await Bun.sleep(100);
+      const sorted = (x: [string, boolean][]) => x.map(([a, b]) => `${a}:${b}`).sort();
+      expect(sorted(await reachOf(RPC, hash, proxy, impl))).toEqual(sorted([[impl, false], [caller, true], [WETH.toLowerCase(), false]]));
     } finally {
       await rpc(RPC, "evm_revert", [snapshot]);
     }

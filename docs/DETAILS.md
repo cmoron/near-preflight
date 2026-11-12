@@ -5,7 +5,7 @@ Each former section below points to its new place.
 
 ## Checks before a buy
 
-[Sentinel](sentinel.md): what a check reads, the four requests, sales drawn per check, the environment
+[Sentinel](sentinel.md): what a check reads, the four requests, sales drawn per check, the far sale, the environment
 rule, verdicts and listing, removable liquidity, template reputation.
 
 ## What NEAR enforces

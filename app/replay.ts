@@ -2,9 +2,9 @@
 // The file carries the exact `evidence` string posted on chain; all of its content is rechecked: the
 // requests are resent and must be the ones the sentinel builds, the verdict and list_target rejudged,
 // the trace, liquidity, index and code facts recomputed, the later side rebuilt on the real block it ran
-// on. With --check, everything is also compared with the guard on NEAR (GUARD), and what the sentinel
-// must not choose (the reference block, the probes, the sales, the later side's block) is derived again
-// from on-chain data. Replay comes after the fact: it shows a lie, it cannot prevent the buy it allowed.
+// on, the far sale mined again on a local fork. With --check, everything is also compared with the guard
+// on NEAR (GUARD), and what the sentinel must not choose (the reference block, the probes, the sales, the
+// later side's block) is derived again from on-chain data. Replay comes after the fact: it shows a lie, it cannot prevent the buy it allowed.
 // It needs a node that still serves the state of both blocks. docs/replay.md lists each line.
 // Usage: bun app/replay.ts <proof.json> [rpc] [--check]   (exit code 0 only if every line holds)
 import { decodeFunctionData, encodeFunctionData, keccak256, parseAbi, parseTransaction, serializeTransaction, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
@@ -21,6 +21,9 @@ import {
   deriveProbes,
   exitPlan,
   FACTORY,
+  FAR_METHOD,
+  farBlocks,
+  farRequest,
   FROZEN,
   GUARD,
   headAt,
@@ -41,6 +44,7 @@ import {
   saleAmounts,
   saleRanges,
   SALES,
+  secondsAfterBuy,
   stampOf,
   timeOf,
   WETH,
@@ -198,12 +202,14 @@ const isLater = (x: unknown, block: number): x is Later =>
 /** A cadence cadenceAt can give: CADENCE_BLOCKS blocks in a positive number of seconds. */
 const isCadence = (x: unknown): x is Cadence => isObj(x) && Object.keys(x).sort().join() === "blocks,seconds" && x.blocks === CADENCE_BLOCKS && Number.isSafeInteger(x.seconds) && (x.seconds as number) > 0;
 /** Sales deriveProbes can give at cadence `c` (saleRanges): the first 2 to 25 s after the buy, at
- *  least 2 blocks before the late one, 13 % to 87 %, never a whole percent; the rest 30 to 51 s after it. */
+ *  least 2 blocks before the late one, 13 % to 87 %, never a whole percent; the rest 30 to 51 s after it,
+ *  and again 301 to 900 s after it (the far sale). */
 const within = (x: unknown, [lo, hi]: readonly [number, number]) => Number.isSafeInteger(x) && (x as number) >= lo && (x as number) <= hi;
 const isSale = (x: unknown, c: Cadence): x is Sale =>
   isObj(x) &&
-  Object.keys(x).sort().join() === "bps,first,late" &&
+  Object.keys(x).sort().join() === "bps,far,first,late" &&
   within(x.late, saleRanges(c).late) &&
+  within(x.far, saleRanges(c).far) &&
   within(x.first, [saleRanges(c).first[0], Math.min(saleRanges(c).first[1], (x.late as number) - 2)]) &&
   Number.isSafeInteger(x.bps) &&
   (x.bps as number) > 1300 &&
@@ -212,17 +218,20 @@ const isSale = (x: unknown, c: Cadence): x is Sale =>
 
 /** Minimal shape of the requests, checked BEFORE anything is sent: only eth_simulateV1 requests
  *  (read-only), each at its block in `blocks` (evidence.block, and evidence.later's for the later side),
- *  go to the node. Returns the defect found, or null. */
-function shapeError(p: Proof, blocks: number[]): string | null {
+ *  go to the node; with `far` (the reference block), one more, the far sale's, under FAR_METHOD, which
+ *  replay mines on a local fork and never sends. Returns the defect found, or null. */
+function shapeError(p: Proof, blocks: number[], far: number | null = null): string | null {
   const rs = p.request as unknown;
-  const n = blocks.length;
-  if (!Array.isArray(rs) || rs.length !== n) return `request is not ${n} eth_simulateV1 request(s)`;
+  const at = far === null ? blocks : [...blocks, far];
+  const n = at.length;
+  if (!Array.isArray(rs) || rs.length !== n) return `request is not ${blocks.length} eth_simulateV1 request(s)${far === null ? "" : " and the far sale's"}`;
   for (const [i, r] of rs.entries()) {
-    if (!isObj(r) || r.method !== "eth_simulateV1") return "method is not eth_simulateV1";
+    const method = i < blocks.length ? "eth_simulateV1" : FAR_METHOD;
+    if (!isObj(r) || r.method !== method) return `method of request ${i + 1} is not ${method}`;
     if (!Array.isArray(r.params) || r.params.length !== 2) return "params is not [request, block]";
     const [req, blk] = r.params;
     if (!isObj(req) || !Array.isArray(req.blockStateCalls) || !req.blockStateCalls.length || !req.blockStateCalls.every((b) => isObj(b) && Array.isArray(b.calls))) return "params[0] has no blockStateCalls";
-    if (blk !== toHex(blocks[i])) return `params[1] of request ${i + 1} ${String(blk)} is not block ${toHex(blocks[i])} of the evidence`;
+    if (blk !== toHex(at[i])) return `params[1] of request ${i + 1} ${String(blk)} is not block ${toHex(at[i])} of the evidence`;
   }
   if (typeof p.target !== "string" || !Array.isArray(p.response) || p.response.length !== n || !p.response.every(Array.isArray)) return "malformed proof file";
   return null;
@@ -253,9 +262,10 @@ function guardOnly(bs: BlockStateCall[], c: Cadence): string | null {
   return null;
 }
 
-/** What rebuild confirms: the labels of every call, the parties, the guard's buy, and what the later side
- *  is rebuilt from (the guard side's layout, its fees, the reference block). */
-type Rebuilt = { labels: string[]; buyer: Address; guard: Address; stranger: Address | null; owner: Address | null; buy: Hex; sides: Sides; fees: Fees; head: Header };
+/** What rebuild confirms: the labels of every call, the parties, the guard's buy, what the later side
+ *  is rebuilt from (the guard side's layout, its fees, the reference block), and the far sale's request
+ *  (null when the check stopped at the buy). */
+type Rebuilt = { labels: string[]; buyer: Address; guard: Address; stranger: Address | null; owner: Address | null; buy: Hex; sides: Sides; fees: Fees; head: Header; far: Request | null };
 const NOBODY: Address = "0x0000000000000000000000000000000000000000";
 type RequestCall = { from: Address; to: Address; data: Hex; value?: Hex; nonce?: Hex; gas: Hex; maxFeePerGas: Hex; maxPriorityFeePerGas: Hex };
 const shape = parseAbi([
@@ -365,37 +375,50 @@ async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][]): P
       txs.sales = sales.map((sale) => sale.map((c) => unsignedOf(c!, e.chain_id))) as [Hex[], Hex[]];
       sides = plan(token, { guard, buyer, stranger }, block, amount, txs, { amounts: st.amounts, owner: st.owner, sale: e.sales });
       sides.later = laterBlocks(sides.guard, block, e.sales, BigInt(e.later!.block));
+      sides.far = farBlocks(sides, block, e.sales);
     }
     const bad = guardShape(txs, token, guard, amount, txs.sales ? saleAmounts(st.amounts.guard, e.sales.bps) : null);
     if (bad) return { error: bad };
     const owner = full ? st.owner : null;
     const want = await Promise.all(FROZEN.map(async (k) => buildRequest(head, e.cadence, await balances(url, head, sides[k], fees, guard, owner), sides[k], fees)));
     if (JSON.stringify(want) !== JSON.stringify(p.request.slice(0, 3))) return { error: "requests are not the ones checkToken builds for this target" };
+    const far = full ? farRequest(head, e.cadence, sides.far, fees) : null;
+    if (far && JSON.stringify(far) !== JSON.stringify(p.request[4])) return { error: `the far sale is not the late sale's approve and swap ${e.sales.far} blocks after the buy, the guard's then the probe's` };
     const labels = labelsOf(sides);
-    if (labels.length !== fresh.flat().length) return { error: `expected ${labels.length} calls, node returned ${fresh.flat().length}` };
-    return { labels, buyer, guard, stranger, owner: st.owner, buy: txs.buy, sides, fees, head };
+    const simulated = labels.length - sides.far.flatMap((b) => b.calls).length;
+    if (simulated !== fresh.flat().length) return { error: `expected ${simulated} calls, node returned ${fresh.flat().length}` };
+    return { labels, buyer, guard, stranger, owner: st.owner, buy: txs.buy, sides, fees, head, far };
   } catch (err) {
     return { error: `request cannot be parsed (${msg(err)})` };
   }
 }
 
 /** The guard side traced again (its request confirmed by rebuild first: no other input reaches the local
- *  fork), compared with evidence.touched, token_calls and token_balances; then the later side rebuilt on
- *  evidence.later's block from what the buy wrote there and the node's state, compared with the file's. */
-async function retrace(url: string, p: Proof, e: Evidence, r: Rebuilt): Promise<Line[]> {
+ *  fork), compared with evidence.touched, token_calls and token_balances; the far sale mined again on the
+ *  same fork, its results compared with the file's and returned (null without one) for the judgment; then
+ *  the later side rebuilt on evidence.later's block from what the buy wrote there and the node's state,
+ *  compared with the file's. */
+async function retrace(url: string, p: Proof, e: Evidence, r: Rebuilt): Promise<{ lines: Line[]; far: Result[] | null }> {
   const out: Line[] = [];
   const add = (ok: boolean, text: string) => out.push({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
-  let traced: Trace | null = null;
+  let traced: (Trace & { far: Result[] | null }) | null = null;
   try {
-    traced = e.liquidity ? await trace(url, p.request[0], e.block, p.target as Address) : null;
+    const far = r.far ? { probe: p.request[1], far: r.far, until: e.block + e.sales.late } : undefined;
+    traced = e.liquidity ? await trace(url, p.request[0], e.block, p.target as Address, e.implementation as Address | null, far) : null;
   } catch (err) {
-    return [{ ok: false, line: `ERROR    tracing the guard's transactions on a local fork: ${msg(err)}` }];
+    return { lines: [{ ok: false, line: `ERROR    tracing the guard's transactions and the far sale on a local fork: ${msg(err)}` }], far: null };
   }
   const [t, calls, read] = [traced?.touched ?? null, traced?.calls ?? null, traced?.balances ?? null].map((x) => JSON.stringify(x));
   add(t === JSON.stringify(e.touched), t === JSON.stringify(e.touched) ? `addresses the guard's transactions touch, traced again on a local fork at block ${e.block}: ${traced ? traced.touched.length : "none, no pool"}, identical to evidence.touched` : `addresses touched: evidence ${JSON.stringify(e.touched)}, traced ${t}`);
   add(calls === JSON.stringify(e.token_calls), calls === JSON.stringify(e.token_calls) ? `what the token's code calls or reads in them: ${traced?.calls.join(", ") || "nothing"}, identical to evidence.token_calls` : `token calls: evidence ${JSON.stringify(e.token_calls)}, traced ${calls}`);
   add(read === JSON.stringify(e.token_balances), read === JSON.stringify(e.token_balances) ? `ETH balances the token's code reads: ${traced?.balances.join(", ") || "none"}, identical to evidence.token_balances` : `token balances read: evidence ${JSON.stringify(e.token_balances)}, traced ${read}`);
-  if (!e.later || !traced) return out;
+  const far = traced?.far ?? null;
+  if (far) {
+    const same = JSON.stringify(far.map(outcome)) === JSON.stringify((p.response[4] ?? []).map(outcome));
+    const when = `${secondsAfterBuy(e.cadence, e.sales.far)} s (${e.sales.far} blocks) after the buy`;
+    add(same, same ? `far sale re-run on a local fork, the late sale again ${when}: status, return data and logs of its ${far.length} calls identical` : `far sale re-run on a local fork ${when}: its results differ from the proof's`);
+  }
+  if (!e.later || !traced) return { lines: out, far };
   try {
     const l = await laterSide(url, await headAt(url, toHex(e.later.block)), r.head, e.cadence, r.sides.later, traced.diff, r.fees, r.guard, p.target as Address, e.liquidity!.pair);
     const sameRequest = JSON.stringify(l.request) === JSON.stringify(p.request[3]);
@@ -414,7 +437,7 @@ async function retrace(url: string, p: Proof, e: Evidence, r: Rebuilt): Promise<
   } catch (err) {
     out.push({ ok: false, line: `ERROR    rebuilding the later side on block ${e.later.block}: ${msg(err)}` });
   }
-  return out;
+  return { lines: out, far };
 }
 
 /** The probes must be fresh addresses: not the router, WETH, target or owner(), without code
@@ -479,7 +502,7 @@ export async function replay(
   const hash = sha256(stringToHex(JSON.stringify(proof.request)));
   add(hash === e.request_sha256, `request hash ${hash === e.request_sha256 ? "matches evidence" : `${hash} != ${e.request_sha256}`}`);
 
-  const bad = shapeError(proof, e.later ? [e.block, e.block, e.block, e.later.block] : [e.block, e.block, e.block]);
+  const bad = shapeError(proof, e.later ? [e.block, e.block, e.block, e.later.block] : [e.block, e.block, e.block], e.later ? e.block : null);
   if (bad) {
     add(false, `request shape: ${bad} (nothing sent to the node)`);
     return out;
@@ -518,7 +541,7 @@ export async function replay(
   let fresh: Result[][] | null = null;
   let rebuilt: Rebuilt | null = null;
   // every request settled before going on: none left running once replay has answered
-  const sent = await Promise.allSettled(proof.request.map(async (q) => (await rpc<{ calls: Result[] }[]>(url, q.method, q.params)).flatMap((b) => b.calls)));
+  const sent = await Promise.allSettled(proof.request.filter((q) => q.method === "eth_simulateV1").map(async (q) => (await rpc<{ calls: Result[] }[]>(url, q.method, q.params)).flatMap((b) => b.calls)));
   const refused = sent.find((x) => x.status === "rejected");
   if (refused) fail(`resending the requests at ${blocks} (the node must still serve their state: an archive node once they are old)`, refused.reason);
   else {
@@ -527,7 +550,7 @@ export async function replay(
   }
   if (fresh) {
     const diffs: string[] = [];
-    const [now, old] = [fresh.flat(), proof.response.flat()];
+    const [now, old] = [fresh.flat(), proof.response.slice(0, fresh.length).flat()];
     if (now.length !== old.length) diffs.push(`call count ${old.length} -> ${now.length}`);
     const labels = e.calls.map((c) => c.replace(/: (ok|revert)$/, "")); // only to name the discrepancies
     old.forEach((o, i) => {
@@ -544,24 +567,27 @@ export async function replay(
       rebuilt = r;
       // (d2) only now, the guard-side request being the one checkToken builds, its transactions traced
       // again on a local fork of this node at the block: the addresses they touch, what the token's code
-      // reaches, and what the buy wrote; then the later side rebuilt on its block with that applied
-      out.push(...(await retrace(url, proof, e, r)));
+      // reaches, and what the buy wrote; the far sale mined there again; then the later side rebuilt on
+      // its block with the buy's change applied
+      const again = await retrace(url, proof, e, r);
+      out.push(...again.lines);
+      const all = [...now, ...(again.far ?? [])]; // the far sale judged on replay's own run
       try {
         const problems = await probeProblems(url, e, proof.target as Address, r);
         add(!problems.length, problems.length ? `probe addresses: ${problems.join(" ; ")}` : "probe addresses are fresh (no code, not router/WETH/target/owner(), distinct)");
       } catch (err) {
         fail("checking the probe addresses", err);
       }
-      const want = now.map((res, i) => `${r.labels[i]}: ${succeeded(res) ? "ok" : "revert"}`);
+      const want = all.map((res, i) => `${r.labels[i]}: ${succeeded(res) ? "ok" : "revert"}`);
       const same = JSON.stringify(want) === JSON.stringify(e.calls);
       add(same, same ? "call labels rebuilt from the requests match evidence.calls" : "call labels in evidence.calls differ from those rebuilt from the requests");
       const parties = { token: proof.target as Address, guard: r.guard, buyer: r.buyer, stranger: r.stranger ?? NOBODY };
-      const j = judge(r.labels, now, { ...e, code_hash: e.code_hash as Hex, implementation: e.implementation as Address | null }, parties);
+      const j = judge(r.labels, all, { ...e, code_hash: e.code_hash as Hex, implementation: e.implementation as Address | null }, parties);
       const ok = j.verdict === proof.verdict && j.reasons === proof.reasons;
       add(ok, ok ? `verdict ${j.verdict} rejudged identically (same reasons)` : `verdict/reasons differ: file "${proof.verdict}: ${proof.reasons}" vs rejudged "${j.verdict}: ${j.reasons}"`);
       const listOk = j.list_target === e.list_target;
       add(listOk, listOk ? `list_target ${j.list_target} rejudged identically` : `evidence.list_target ${e.list_target} != rejudged ${j.list_target}`);
-      const q = quoteOf(r.labels, now, parties).toString();
+      const q = quoteOf(r.labels, all, parties).toString();
       add(q === e.quote, q === e.quote ? `quote ${q} tokens for ${e.amount_wei} wei recomputed identically` : `quote in evidence ${e.quote} != recomputed ${q}`);
       const h = keccak256(r.buy);
       add(h === e.tx_hashes[0], h === e.tx_hashes[0] ? `the guard's buy simulated (calldata, value, nonce, gas, fees) hashes to evidence.tx_hashes ${h.slice(0, 10)}...` : `the guard's buy simulated hashes to ${h}, evidence says ${e.tx_hashes[0]}`);
@@ -773,7 +799,7 @@ async function derivation(url: string, id: number, r: Rebuilt, e: Evidence, c: N
   const want = deriveProbes({ guard: g.account, id, requested_ns: c.requested_ns }, blockHash, e.cadence);
   const sale = e.sales;
   const probesOk = same(r.buyer, want.buyer) && (r.stranger === null || same(r.stranger, want.stranger));
-  const saleOk = sale.first === want.sale.first && sale.bps === want.sale.bps && sale.late === want.sale.late;
+  const saleOk = sale.first === want.sale.first && sale.bps === want.sale.bps && sale.late === want.sale.late && sale.far === want.sale.far;
   const real = e.later ? Number(BigInt((await laterBlock(url, await headAt(url, toHex(e.block)), want.later, want.sale)).number)) : null;
   const laterOk = !e.later || e.later.block === real;
   const line = (ok: boolean, text: string): Line => ({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
@@ -781,7 +807,7 @@ async function derivation(url: string, id: number, r: Rebuilt, e: Evidence, c: N
     line(
       saleOk,
       saleOk
-        ? `sales derived like the probes: ${sale.bps / 100} % of the tokens bought ${sale.first} blocks after the buy, the rest ${sale.late} blocks after it, at ${e.cadence.blocks} blocks in ${e.cadence.seconds} s`
+        ? `sales derived like the probes: ${sale.bps / 100} % of the tokens bought ${sale.first} blocks after the buy, the rest ${sale.late} blocks after it and again ${sale.far} blocks after it (the far sale), at ${e.cadence.blocks} blocks in ${e.cadence.seconds} s`
         : `sales not derived from on-chain data: ${JSON.stringify(sale)} (derived ${JSON.stringify(want.sale)})`,
     ),
     ...(e.later

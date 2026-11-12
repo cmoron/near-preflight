@@ -30,7 +30,8 @@ if ! pgrep -x anvil >/dev/null; then rm -rf -- "${HOME:?}"/.foundry/anvil/tmp/an
 STATES=$(mktemp -d)
 anvil --fork-url "$FORK_URL" --fork-block-number "$FORK_BLOCK" --port 8545 --silent --prune-history 2000 --cache-path "$STATES" &
 ANVIL=$!
-trap 'kill $ANVIL 2>/dev/null; wait $ANVIL 2>/dev/null; rm -rf -- "${STATES:?}"' EXIT
+# `|| true`: under set -e a failing command ends the trap, and kill fails once anvil has already exited.
+trap 'kill $ANVIL 2>/dev/null || true; wait $ANVIL 2>/dev/null || true; rm -rf -- "${STATES:?}"' EXIT
 until cast block-number -r $RPC >/dev/null 2>&1; do sleep 0.5; done
 forge build --quiet
 

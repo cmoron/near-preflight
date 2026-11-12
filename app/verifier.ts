@@ -1,8 +1,8 @@
 // The check behind every verdict: read-only simulation (eth_simulateV1) on an EVM chain, Uniswap V2
 // route WETH -> token. Nothing is signed or sent on the EVM chain. checkToken runs a buy check (four
 // requests: guard side, probe side and synthetic calls on the reference block bound to the NEAR request,
-// then the later side on a real block mined after it; plus code, liquidity, environment and reputation
-// facts), checkExit an agent's exit quote; judge and judgeExit are pure, so app/replay.ts rejudges a
+// then the later side on a real block mined after it; the far sale, the late sale again minutes later on
+// a local fork; plus code, liquidity, environment and reputation facts), checkExit an agent's exit quote; judge and judgeExit are pure, so app/replay.ts rejudges a
 // proof with the same code. app/sentinel.ts posts the result; docs/sentinel.md explains it.
 import {
   concat,
@@ -37,10 +37,11 @@ export const FACTORY: Address = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"; //
 // block.basefee = 0 and gasleft() = block limit, where a token recognizes the simulation.
 export const FUND = parseEther("1"); // balance of the fresh probes beyond what they spend, for their gas
 /** eth_simulateV1 refuses blocks more than 256 above the base block: the late sale lands at most in
- *  that one (51 s at Base's 0.2 s). Every block up to the late sale is in the request, empty but for the
- *  guard's transactions, at the time a real block would have (timeOf): a node would fill a gap with 12 s
- *  blocks, and a timestamp that does not match the block number tells a simulation from the chain. The
- *  sales' swap deadline is past that block. */
+ *  that one (51 s at Base's 0.2 s); the far sale (FAR_S) goes past it on a local fork. Every block up to
+ *  the late sale is in the request, empty but for the guard's transactions, at the time a real block would
+ *  have (timeOf): a node would fill a gap with 12 s blocks, and a timestamp that does not match the block
+ *  number tells a simulation from the chain. The sales' swap deadline is 10,000 s past that block, past the
+ *  far sale too. */
 export const LATE_BLOCKS = 256n;
 // Slots of a proxy's implementation address: EIP-1967, then ZeppelinOS (USDC).
 const IMPL_SLOTS = [
@@ -163,7 +164,8 @@ export type Report = {
   };
   /** Full requests and responses, to replay the simulation at the same blocks: the guard side, the
    *  probe side, the synthetic calls (quote, owner(), takebacks) and the later side, four requests sharing
-   *  no state (the later side absent when the check stopped at the buy). */
+   *  no state, then the far sale's blocks (FAR_METHOD, mined on a local fork) and their results (the
+   *  later side and the far sale absent when the check stopped at the buy). */
   request: Request[];
   response: Result[][];
 };
@@ -315,10 +317,11 @@ export async function topUp(url: string, head: Header, who: Address, need: bigin
   return BigInt(await rpc<Hex>(url, "eth_getBalance", [who, head.number])) < need ? { [who]: need } : {};
 }
 
-/** The four requests of a check, in this order; they share no state. The later side is empty until the
- *  full proof, and runs on its own base block (laterSide). */
-export type Sides = { guard: Block[]; probe: Block[]; synthetic: Block[]; later: Block[] };
-export const SIDES = ["guard", "probe", "synthetic", "later"] as const;
+/** The five requests of a check, in this order; they share no state. The later side is empty until the
+ *  full proof, and runs on its own base block (laterSide). The far sale is empty until then too, and runs
+ *  on a local fork (farBlocks, app/environment.ts trace), never on the node. */
+export type Sides = { guard: Block[]; probe: Block[]; synthetic: Block[]; later: Block[]; far: Block[] };
+export const SIDES = ["guard", "probe", "synthetic", "later", "far"] as const;
 /** The sides simulated on the reference block. */
 export const FROZEN = ["guard", "probe", "synthetic"] as const;
 /** Labels of every call, guard side first, then the probe side, the synthetic calls, the later side. */
@@ -343,9 +346,10 @@ export type Amounts = { guard: bigint; probe: bigint };
 export type GuardTxs = { buy: Hex; sales?: [Hex[], Hex[]] };
 /** The two sales of a check, derived like the probes from the ticket and the block hash (deriveProbes),
  *  so a token cannot expect them: the first swap `first` blocks after the buy, of `bps` / 10,000 of the
- *  tokens bought (13 % to 87 %, never a whole percent); the rest swapped `late` blocks after the buy.
- *  Drawn in seconds (FIRST_S, LATE_S), in blocks at the check's cadence (saleRanges). */
-export type Sale = { first: number; bps: number; late: number };
+ *  tokens bought (13 % to 87 %, never a whole percent); the rest swapped `late` blocks after the buy, and
+ *  again `far` blocks after it on a local fork (the far sale, FAR_S). Drawn in seconds (FIRST_S, LATE_S,
+ *  FAR_S), in blocks at the check's cadence (saleRanges). */
+export type Sale = { first: number; bps: number; late: number; far: number };
 /** Seconds of real Base between the reference block and the block the later side runs on (the first
  *  block that late), drawn per check (deriveProbes): 16 to 24 s, 80 to 120 blocks on Base. Measured on
  *  Base mainnet on 2026-11-12: WETH's supply moved in 160 of 600 blocks (2 min), the V2 factory got 16
@@ -359,14 +363,26 @@ export const FIRST_S = [2, 25] as const;
  *  the 256 blocks eth_simulateV1 allows above a real block (51 s at 0.2 s). Nothing later is simulated:
  *  a second request further ahead needs a real base block that far ahead, which does not exist yet. */
 export const LATE_S = [30, 51] as const;
-/** The blocks after the buy each sale may land in at cadence `c`: FIRST_S and LATE_S in blocks, the
- *  first at least 2 (its approve after the buy's block), the late one at most LATE_BLOCKS - 1 (the buy is
- *  in the 1st block after the proof's). A cadence faster than 0.2 s caps the late sale there; the first
- *  then stays 2 blocks before it (deriveProbes). */
+/** The far sale: the late sale's own approve and swap again, 301 to 900 s after the buy (1,505 to 4,500
+ *  blocks on Base), past what eth_simulateV1 reaches. A token that refuses or taxes a sale from 5 min on
+ *  meets it. It runs on the local fork the trace starts (app/environment.ts trace), whose clock and block
+ *  number move: the buy and first sale as on the guard side, the empty blocks in between mined at once,
+ *  then the approve and swap at the numbers and times real blocks would have. A frozen copy: nothing of
+ *  Base after the reference block is in it. From the probe too, in a run of its own. */
+export const FAR_S = [301, 900] as const;
+/** The blocks after the buy each sale may land in at cadence `c`: FIRST_S, LATE_S and FAR_S in blocks,
+ *  the first at least 2 (its approve after the buy's block), the late one at most LATE_BLOCKS - 1 (the
+ *  buy is in the 1st block after the proof's). A cadence faster than 0.2 s caps the late sale there; the
+ *  first then stays 2 blocks before it (deriveProbes). */
 export const saleRanges = (c: Cadence) => ({
   first: [Math.max(2, blocksIn(c, FIRST_S[0])), blocksIn(c, FIRST_S[1])] as const,
   late: [Math.min(blocksIn(c, LATE_S[0]), Number(LATE_BLOCKS) - 1), Math.min(blocksIn(c, LATE_S[1]), Number(LATE_BLOCKS) - 1)] as const,
+  far: [blocksIn(c, FAR_S[0]), blocksIn(c, FAR_S[1])] as const,
 });
+/** Seconds between the buy's block and the block `n` after it, at cadence `c` (timeOf): what a reason
+ *  says, since a block is no fixed time (0.2 s on Base, 1 s on the local fork). */
+export const secondsAfterBuy = (c: Cadence, n: number) => Math.floor(((n + 1) * c.seconds) / c.blocks) - Math.floor(c.seconds / c.blocks);
+const afterBuy = (c: Cadence, n: number) => `${secondsAfterBuy(c, n)} s after the buy`;
 /** The sale amounts after buying `amount` tokens: `bps` / 10,000 of them, then the rest. */
 export const saleAmounts = (amount: bigint, bps: number): [bigint, bigint] => {
   const first = (amount * BigInt(bps)) / 10_000n;
@@ -467,7 +483,7 @@ export function plan(token: Address, who: Who, block: bigint, amount: bigint, tx
   const guardBuy = guardTx(`${GUARD}buy`, guard, txs.buy).call;
   const probeBuy = asProbe(guardBuy, "buy", buyer);
   const reads = [call("buy quote", buyer, ROUTER, router, "getAmountsOut", [amount, [WETH, token]]), call("owner()", buyer, token, erc20, "owner", [])];
-  if (!full) return { guard: [at(1n, [guardBuy])], probe: [at(1n, [probeBuy])], synthetic: [at(1n, reads)], later: [] };
+  if (!full) return { guard: [at(1n, [guardBuy])], probe: [at(1n, [probeBuy])], synthetic: [at(1n, reads)], later: [], far: [] };
   if (!txs.sales) throw new Error("the full proof needs the guard's two sales");
   const { amounts, owner } = full;
   const sale = (p: string, seller: Address, i: 0 | 1): Call[] => {
@@ -496,8 +512,27 @@ export function plan(token: Address, who: Who, block: bigint, amount: bigint, tx
     probe: side("", buyer, probeBuy),
     synthetic: [at(1n, [...reads, { ...guardBuy, label: `${GUARD}buy before takebacks` }, { ...probeBuy, label: "buy before takebacks" }, ...takebacks(GUARD, guard), ...takebacks("", buyer)])],
     later: [],
+    far: [],
   };
 }
+
+/** Label prefix of the far sale: the late sale's approve and swap again, `far` blocks after the buy. */
+export const FAR = "far: ";
+/** The method of the far sale's request: it is mined on a local fork (app/environment.ts trace), never
+ *  sent to a node, whose eth_simulateV1 refuses a block more than 256 past its base block. */
+export const FAR_METHOD = "local_fork_mine";
+/** The far sale's blocks: the late sale's approve and swap of the guard side, then of the probe side,
+ *  each moved to `sale.far` blocks after the buy (its approve the block before), relabelled. Each party's
+ *  pair runs in a run of its own on the fork, after that side's buy and first sale (trace). */
+export function farBlocks(s: Sides, block: bigint, sale: Sale): Block[] {
+  const [approve, swap] = [block + BigInt(sale.late), block + BigInt(sale.late) + 1n];
+  return [s.guard, s.probe].flatMap((side) =>
+    [approve, swap].map((n, i) => ({ number: block + BigInt(sale.far) + BigInt(i), calls: side.find((b) => b.number === n)!.calls.map((c) => ({ ...c, label: `${FAR}${c.label}` })) })),
+  );
+}
+/** The far sale's request as the fork mines it: its blocks at the cadence measured (the time and number
+ *  a real block would have), the reference block's base fee and coinbase, under FAR_METHOD. */
+export const farRequest = (head: Header, c: Cadence, blocks: Block[], fees: Fees): Request => ({ ...buildRequest(head, c, {}, blocks, fees), method: FAR_METHOD });
 
 /** The simulated call succeeded. */
 export const ok = (r: Result) => r.status === "0x1";
@@ -529,7 +564,7 @@ export type Ticket = { guard: string; id: number; requested_ns: string };
  *  amount or the later side's block, in advance; replay --check recomputes them. */
 export function deriveProbes(t: Ticket, blockHash: Hex, c: Cadence): Probe {
   const digest = (role: string) => sha256(stringToHex(`goblin-near probe|${t.guard}|${t.id}|${t.requested_ns}|${blockHash.toLowerCase()}|${role}`));
-  const { first, late } = saleRanges(c);
+  const { first, late, far } = saleRanges(c);
   const x = BigInt(digest("sale"));
   const span = BigInt(first[1] - first[0] + 1);
   // 13.01 % to 86.99 %: a whole percent (74 choices) plus 1 to 99 basis points.
@@ -538,7 +573,7 @@ export function deriveProbes(t: Ticket, blockHash: Hex, c: Cadence): Probe {
   return {
     buyer: `0x${digest("buyer").slice(-40)}` as Address,
     stranger: `0x${digest("stranger").slice(-40)}` as Address,
-    sale: { first: Math.min(first[0] + Number(x % span), lateBlock - 2), bps: Number(bps), late: lateBlock },
+    sale: { first: Math.min(first[0] + Number(x % span), lateBlock - 2), bps: Number(bps), late: lateBlock, far: far[0] + Number(BigInt(digest("far")) % BigInt(far[1] - far[0] + 1)) },
     later: LATER_S[0] + Number(BigInt(digest("later")) % BigInt(LATER_S[1] - LATER_S[0] + 1)),
   };
 }
@@ -681,8 +716,8 @@ export function nearFindings(n: NearFacts, codeHash: Hex, implementation: Addres
  *  block (the sentinel passes deriveProbes of its ticket); `ctx` gives the request time, the index, the
  *  guard's NEAR facts, the amount stated at the check and the guard's previews. A first simulation
  *  measures the buys; the full one (plan) runs the guard's buy as it would sign it on that quote, then its
- *  two sales; the trace gives what the buy wrote, and the later side runs the sales again on Base's later
- *  state with it applied. Throws when the index window is not bound to the block: no verdict rather than
+ *  two sales; the trace gives what the buy wrote and runs the far sale on its fork, and the later side
+ *  runs the sales again on Base's later state with the buy's change applied. Throws when the index window is not bound to the block: no verdict rather than
  *  an unknown reputation. */
 export async function checkToken(url: string, token: Address, guard: Address, probes: (head: Header, c: Cadence) => Probe, ctx: Context): Promise<Report> {
   const head = await refBlock(url, ctx.requested_ns);
@@ -714,7 +749,7 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const first = await simulate(url, head, cadence, first1, sameFees([buy0]), guard, null);
   const st = buyStages(byLabel(labelsOf(first1), first.response.flat()), { token, ...who });
   if (st.stop || !liquidity) {
-    const t = liquidity ? await trace(url, first.request[0], Number(block), token) : null;
+    const t = liquidity ? await trace(url, first.request[0], Number(block), token, implementation) : null;
     return report({ ...proof, touched: t?.touched ?? null, token_calls: t?.calls ?? null, token_balances: t?.balances ?? null, later: null }, first, labelsOf(first1), [keccak256(buy0)], { token, ...who });
   }
 
@@ -728,13 +763,16 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const sides = plan(token, who, block, amount, { buy, sales }, { amounts: st.amounts, owner: st.owner, sale });
   const sim = await simulate(url, head, cadence, sides, fees, guard, st.owner);
   // The guard side replayed on a local fork: the addresses it touches, the token's calls, the buy's
-  // state change; then the sales again on the first real block `later` seconds on, with that change applied.
-  const t = await trace(url, sim.request[0], Number(block), token);
+  // state change; on the same fork, the far sale of each side; then the sales again on the first real
+  // block `later` seconds on, with the buy's change applied.
+  sides.far = farBlocks(sides, block, sale);
+  const far = farRequest(head, cadence, sides.far, fees);
+  const t = await trace(url, sim.request[0], Number(block), token, implementation, { probe: sim.request[1], far, until: Number(block) + sale.late });
   const real = await laterBlock(url, head, later, sale);
   sides.later = laterBlocks(sides.guard, block, sale, BigInt(real.number));
   const l = await laterSide(url, real, head, cadence, sides.later, t.diff, fees, guard, token, liquidity.pair);
   const out = await rpc<{ calls: Result[] }[]>(url, l.request.method, l.request.params);
-  const both = { request: [...sim.request, l.request], response: [...sim.response, out.flatMap((b) => b.calls)] };
+  const both = { request: [...sim.request, l.request, far], response: [...sim.response, out.flatMap((b) => b.calls), t.far!] };
   const { request: _, ...found } = l;
   const facts = { ...proof, touched: t.touched, token_calls: t.calls, token_balances: t.balances, later: { block: Number(real.number), ...found } };
   return report(facts, both, labelsOf(sides), [keccak256(buy)], { token, ...who });
@@ -801,8 +839,9 @@ export function buyStages(f: Record<string, Result>, w: Parties) {
 
 /** Findings of one side (prefix "" or GUARD, seller `who`): buy, takebacks, sales. A sale is judged on
  *  the ETH that reached the seller (traceTransfers logs) against the pool's quote before its approve
- *  (last Sync), and blocked when the pool paid out more WETH than the seller received. */
-function sideFindings(r: Record<string, Result>, p: string, w: Parties, pair: Address | null, stop: boolean, sales: Sale): Finding[] {
+ *  (last Sync), and blocked when the pool paid out more WETH than the seller received. The far sale (the
+ *  late one again, after the buy and the first sale, FAR) is judged the same way, when it ran. */
+function sideFindings(r: Record<string, Result>, p: string, w: Parties, pair: Address | null, stop: boolean, sales: Sale, c: Cadence): Finding[] {
   const who = p === GUARD ? w.guard : w.buyer;
   const { findings, amount, owner, quoted } = buyStage(r, w.token, who, p);
   // A buy that failed blocks and never lists (the agent's amount can make it fail); one that received
@@ -825,23 +864,34 @@ function sideFindings(r: Record<string, Result>, p: string, w: Parties, pair: Ad
     else if (tax >= TAX_WARN) findings.push({ level: "warn", text });
   };
   taxed(amount, quoted, "on the buy");
-  // Per sale, when it happens (reason texts).
-  const when = [`${sales.first} blocks after the buy`, `${sales.late} blocks after the buy`];
-  const steps = SALES.map((s) => [r[`${p}approve router${s}`], r[`${p}sale${s}`]]);
-  SALES.forEach((s, i) => {
-    const sale = r[`${p}sale${s}`];
-    const before = [r[`${p}buy`], ...steps.slice(0, i).flat()];
-    const quote = pair ? saleQuote(before, pair, w.token, saleAmounts(amount, sales.bps)[i]) : 0n;
-    // A sale the pool quotes at less than DUST wei can fail or look taxed by rounding alone: not listed.
-    // Nor is a refusal the late sale does not share: one that clears with time (an honest cooldown)
-    // blocks this check, and listing it would let any agent repeat checks until one draws it.
-    const late = r[`${p}sale${SALES[1]}`];
-    if (!ok(sale)) return findings.push({ level: "block", text: `sale refused ${when[i]} (${revertReason(sale)})`, list: listable && quote >= DUST && !ok(late) });
-    const got = moves(steps[i], ETH_LOGS, who, "to");
-    taxed(got, quote, `on the sale ${when[i]}`);
+  // Each sale: its approve and swap, the calls before its approve (the pool's quote), what it sells, when.
+  const buy = r[`${p}buy`];
+  const sold = saleAmounts(amount, sales.bps);
+  const step = (q: string, s: string) => [r[`${q}approve router${s}`], r[`${q}sale${s}`]];
+  const [first, late, far] = [step(p, SALES[0]), step(p, SALES[1]), step(`${FAR}${p}`, SALES[1])];
+  const plays = [
+    { step: first, before: [buy], x: sold[0], n: sales.first },
+    { step: late, before: [buy, ...first], x: sold[1], n: sales.late },
+    ...(far[1] ? [{ step: far, before: [buy, ...first], x: sold[1], n: sales.far }] : []),
+  ];
+  // A sale the pool quotes at less than DUST wei can fail or look taxed by rounding alone: not listed.
+  // Nor is a refusal the last sale (the far one, or the late one when it did not run) does not share: one
+  // that clears with time (an honest cooldown) blocks this check, and listing it would let any agent
+  // repeat checks until one draws it.
+  const last = plays.at(-1)!.step[1];
+  for (const { step, before, x, n } of plays) {
+    const sale = step[1];
+    const when = afterBuy(c, n);
+    const quote = pair ? saleQuote(before, pair, w.token, x) : 0n;
+    if (!ok(sale)) {
+      findings.push({ level: "block", text: `sale refused ${when} (${revertReason(sale)})`, list: listable && quote >= DUST && !ok(last) });
+      continue;
+    }
+    const got = moves(step, ETH_LOGS, who, "to");
+    taxed(got, quote, `on the sale ${when}`);
     // Not listed: a fee swap the buy's own fees can trigger (amount-dependent) does it too.
-    if (pair && moves(steps[i], WETH, pair, "from") > got) findings.push({ level: "block", text: `the pool paid out more WETH than the seller received ${when[i]}` });
-  });
+    if (pair && moves(step, WETH, pair, "from") > got) findings.push({ level: "block", text: `the pool paid out more WETH than the seller received ${when}` });
+  }
   return findings;
 }
 
@@ -852,11 +902,13 @@ function sideFindings(r: Record<string, Result>, p: string, w: Parties, pair: Ad
  *  the late one). Never listed: Base's state, not the token's behaviour alone.
  *  When others wrote what the buy wrote and their transactions could not be re-executed after it
  *  (`unverified`, app/later.ts), the later sales ran on Base's values for those slots and the buy's for
- *  the rest, a state no chain had: the resale is not verified, a warn naming why, and a sale refused there
- *  only says so. It blocks nothing: anyone who sends the token to the guard's public address during a
- *  check would otherwise block an honest token (the guard then holds the dust, not what it bought). So
- *  too a warn when no sale ran again. */
-function laterFindings(r: Record<string, Result>, w: Parties, sales: Sale, later: Later | null, pair: Address | null): Finding[] {
+ *  the rest, a state no chain had: the resale is not verified, a warn naming why. A sale refused or paying
+ *  less there is still a block, not listed, or a trap could force that fallback (a write outside its pool
+ *  to a slot the buy wrote, more trades than MAX_REPLAYED) to escape one. Dust sent to the guard's public
+ *  address during a check, which anyone can do to an honest token, does not block it: that lone slot gets
+ *  both changes (app/later.ts laterSide), and the guard holds what it bought plus the dust. So too a warn
+ *  when no sale ran again. */
+export function laterFindings(r: Record<string, Result>, w: Parties, sales: Sale, later: Later | null, pair: Address | null, c: Cadence): Finding[] {
   if (!later || !pair) return [];
   const at = `on Base's state of block ${later.block}`;
   if (!SALES.some((s) => r[`${LATER}${GUARD}sale${s}`])) return [{ level: "warn", text: `resale not verified ${at}: no sale after it` }];
@@ -868,7 +920,7 @@ function laterFindings(r: Record<string, Result>, w: Parties, sales: Sale, later
     for (const i of [0, 1] as const) {
       const [frozen, real] = steps.map((side) => side[i]);
       if (!frozen[1] || !real[1] || !ok(frozen[1])) continue;
-      const when = `${i ? sales.late : sales.first} blocks after the buy`;
+      const when = afterBuy(c, i ? sales.late : sales.first);
       if (!ok(real[1])) return { when, refused: revertReason(real[1]), pct: 100 };
       const x = saleAmounts(bought, sales.bps)[i];
       const quoteFrozen = saleQuote([r[`${GUARD}buy`], ...steps[0].slice(0, i).flat()], pair, w.token, x);
@@ -884,9 +936,10 @@ function laterFindings(r: Record<string, Result>, w: Parties, sales: Sale, later
   };
   const d = differs();
   const sale = d && (d.refused !== null ? `refused ${d.when}` : `${d.when} pays ${d.pct} % less`);
-  if (later.unverified !== null) return [{ level: "warn", text: `resale not verified ${at}: ${later.unverified}${d ? `; there, merged with the buy's values, the sale ${sale}` : ""}` }];
+  if (later.unverified !== null && !d) return [{ level: "warn", text: `resale not verified ${at}: ${later.unverified}` }];
   if (!d) return [];
-  return [{ level: "block", text: d.refused !== null ? `sale ${sale} ${at} (${d.refused})` : `sale ${sale} ${at}` }];
+  const merged = later.unverified === null ? "" : `, merged with the buy's values: ${later.unverified}`;
+  return [{ level: "block", text: `${d.refused !== null ? `sale ${sale} ${at} (${d.refused})` : `sale ${sale} ${at}`}${merged}` }];
 }
 
 /** Pure judgment: depends only on the call labels and their results, hence replayable
@@ -896,7 +949,7 @@ export function judge(labels: string[], results: Result[], facts: Facts, w: Part
   const r = byLabel(labels, results);
   const { stop } = buyStages(r, w);
   const pair = facts.liquidity?.pair ?? null;
-  const findings = sideFindings(r, "", w, pair, stop, facts.sales);
+  const findings = sideFindings(r, "", w, pair, stop, facts.sales, facts.cadence);
   // Only a block on the probe side lists the token: the probes are fresh addresses derived from a
   // block hash, so their findings are the token's own behaviour. The guard's address is public and a
   // third party can change its state (send it tokens, get it frozen): a failure there blocks this
@@ -904,8 +957,8 @@ export function judge(labels: string[], results: Result[], facts: Facts, w: Part
   // The amount is the agent's: a buy that fails, and what the pool quotes as dust, block without listing.
   const list_target = findings.some((f) => f.level === "block" && f.list);
   const seen = new Set(findings.map((f) => f.text));
-  for (const f of sideFindings(r, GUARD, w, pair, stop, facts.sales)) if (!seen.has(f.text)) findings.push({ ...f, text: `guard address only, not listed: ${f.text}` });
-  findings.push(...laterFindings(r, w, facts.sales, facts.later, pair));
+  for (const f of sideFindings(r, GUARD, w, pair, stop, facts.sales, facts.cadence)) if (!seen.has(f.text)) findings.push({ ...f, text: `guard address only, not listed: ${f.text}` });
+  findings.push(...laterFindings(r, w, facts.sales, facts.later, pair, facts.cadence));
   findings.push(...liquidityFindings(facts.liquidity, facts.block), ...environmentFindings(facts, w));
   findings.unshift(...nearFindings(facts.near, facts.code_hash, facts.implementation), ...reputationFindings(facts.reputation));
   const rank = { block: 0, warn: 1, allow: 2 }; // an "allow" finding is a note: it changes no verdict
