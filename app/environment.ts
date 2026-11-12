@@ -3,7 +3,8 @@
 // rewrites the L1Block predeploy, the fee vaults' credits) and cannot know a future block's fields. Rather
 // than guess the next tell, three facts close the class, all in the evidence and recomputed by replay:
 // - `touched`: every address the guard's own transactions read or call, at any depth (BALANCE,
-//   EXTCODESIZE, EXTCODEHASH, EXTCODECOPY, CALL, STATICCALL, DELEGATECALL, CALLCODE). Anything outside the
+//   EXTCODESIZE, EXTCODEHASH, EXTCODECOPY, CALL, STATICCALL, DELEGATECALL, CALLCODE), on the reference
+//   block and the far sales (trace) and on the later side's block (traceLater). Anything outside the
 //   token, its implementation, its pool, the router, WETH, the factory, the guard and the precompiles is a
 //   block: L1Block, a fee vault, the coinbase, a helper contract, a library. The code that runs during
 //   the guard's transactions is then only the token's, its implementation's and the Uniswap contracts'.
@@ -18,8 +19,9 @@
 // - `opcodes`: the opcodes of the token's and its implementation's reachable code whose value no
 //   simulation can guarantee: at least a warn, the owner decides.
 // TIMESTAMP and NUMBER stay allowed: the simulated blocks follow the cadence measured at the check up to
-// the late sale (30 to 51 s after the buy), and the far sale's blocks (301 to 900 s, on the local fork
-// trace starts) get the number and time real ones would have; the sales there exercise them.
+// the late sale (30 to 51 s after the buy), and the far sales' blocks (301 s, 900 s and a drawn delay
+// between, on the local fork trace starts) get the number and time real ones would have; the sales there
+// exercise them.
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -67,6 +69,14 @@ export function envOpcodes(code: Hex): string[] {
 /** The precompiles (0x01 to 0x11, and P256VERIFY at 0x100 on Base): pure functions of their input. */
 const PRECOMPILES = new Set([...Array.from({ length: 0x11 }, (_, i) => i + 1), 0x100].map((n) => toHex(n, { size: 20 })));
 
+/** The addresses whose state the token's own code may read with no finding, lowercase: itself, its
+ *  implementation, its pool, the router (no storage) and the guard (no code). The rule expects them, and
+ *  WETH and the factory, which only the router may reach; any other address touched is a block. So a
+ *  token keeps what it reads in these alone: the later side carries every slot of theirs that others'
+ *  transactions, re-executed after the buy, leave different (app/later.ts carry). */
+export const ownedBy = (token: Address, implementation: Address | null, pair: Address | null, guard: Address) =>
+  new Set([token, implementation, pair, ROUTER, guard].filter((a) => a).map((a) => a!.toLowerCase()));
+
 /** Pure: the environment findings of a check (replay rejudges them). `touched`, `token_calls` and
  *  `token_balances` are null when nothing was traced (no pool: the check stopped before any sale). */
 export function environmentFindings(
@@ -76,7 +86,7 @@ export function environmentFindings(
   const out: Finding[] = [];
   if (f.opcodes.length) out.push({ level: "warn", text: `code reads ${f.opcodes.join(", ")}: values no simulation can match` });
   if (f.liquidity && !f.touched) out.push({ level: "warn", text: "the guard's transactions were not traced" });
-  const expected = new Set([w.token, f.implementation, f.liquidity?.pair, ROUTER, WETH, FACTORY, w.guard].filter((a) => a).map((a) => a!.toLowerCase()));
+  const expected = new Set([...ownedBy(w.token, f.implementation, f.liquidity?.pair ?? null, w.guard), WETH.toLowerCase(), FACTORY.toLowerCase()]);
   const odd = (f.touched ?? []).filter((a) => !expected.has(a) && !PRECOMPILES.has(a as Hex));
   if (odd.length) {
     const named = odd.slice(0, 3).map(short).join(", ") + (odd.length > 3 ? ` and ${odd.length - 3} more` : "");
@@ -90,7 +100,7 @@ export function environmentFindings(
 }
 
 type SimCall = { from: Address; to: Address; data: Hex; value?: Hex; nonce?: Hex; gas: Hex; maxFeePerGas: Hex; maxPriorityFeePerGas: Hex };
-type SimBlock = { blockOverrides: { number: Hex; time: Hex; baseFeePerGas: Hex; feeRecipient: Address }; stateOverrides?: Record<string, { balance: Hex }>; calls: SimCall[] };
+type SimBlock = { blockOverrides: { number: Hex; time: Hex; baseFeePerGas: Hex; feeRecipient: Address }; stateOverrides?: Record<string, { balance?: Hex; stateDiff?: Record<string, Hex> }>; calls: SimCall[] };
 /** Balance the trace adds to each sender beyond the simulation's: the local fork bills Base's L1 data fee
  *  on top of the gas, which eth_simulateV1 does not ask a balance for. */
 export const TRACE_MARGIN = 10n ** 18n;
@@ -103,18 +113,28 @@ export type Diff = { storage: Record<string, Record<string, [Hex, Hex]>>; balanc
  *  reaches in them (REACH); `balances`: the addresses whose ETH balance it reads, itself aside; `diff`:
  *  what its buy wrote. */
 export type Trace = { touched: Address[]; calls: Address[]; balances: Address[]; diff: Diff };
+/** What a run's calls touch and what the token's code reaches in them (Trace without the buy's diff). */
+export type Reach = Pick<Trace, "touched" | "calls" | "balances">;
 type Account = { balance?: Hex; storage?: Record<string, Hex> };
 /** A JS tracer (anvil runs geth's API) of what the token's code reaches: the target of each CALL,
  *  CALLCODE, DELEGATECALL, STATICCALL ("c:"), EXTCODESIZE, EXTCODECOPY, EXTCODEHASH ("c:") and BALANCE
  *  ("b:"), in every frame run in TOKEN's context (a proxy's implementation runs there) or running TOKEN's
  *  or IMPL's code, whatever its context: a plain call from the token to its implementation (an expected
- *  address) runs the implementation in its own. `code` holds each frame's code address (enter, exit). */
-const REACH = `{seen: {}, code: [], enter: function (f) { this.code.push(toHex(f.getTo())); }, exit: function () { this.code.pop(); }, step: function (log) {
+ *  address) runs the implementation in its own. `code` holds each depth's code address: a frame's first
+ *  step is one level below the step before it, and runs the code of the frame entered last (`next`, the
+ *  transaction's own target at the top). A frame that runs no code (an EOA, a precompile, a call that
+ *  fails before it starts, a SELFDESTRUCT) has no step: its `next` is dropped at the next step, and no
+ *  enter without an exit can shift what the reads after it are charged to. */
+const REACH = `{seen: {}, code: {}, next: null, last: -1, enter: function (f) { this.next = toHex(f.getTo()); }, exit: function () {}, step: function (log) {
+  var depth = log.getDepth();
+  if (depth > this.last) this.code[depth] = this.next === null ? toHex(log.contract.getAddress()) : this.next;
+  this.last = depth;
+  this.next = null;
   var op = log.op.toNumber();
   var at = op == 0x31 || op == 0x3b || op == 0x3c || op == 0x3f ? 0 : op == 0xf1 || op == 0xf2 || op == 0xf4 || op == 0xfa ? 1 : -1;
   if (at < 0) return;
   var context = toHex(log.contract.getAddress());
-  var code = this.code.length ? this.code[this.code.length - 1] : context;
+  var code = this.code[depth];
   if (context != "TOKEN" && code != "TOKEN" && code != "IMPL") return;
   this.seen[(op == 0x31 ? "b:" : "c:") + toHex(toAddress(log.stack.peek(at).toString(16)))] = true;
 }, fault: function () {}, result: function () { return Object.keys(this.seen); }}`;
@@ -126,33 +146,17 @@ export async function reachOf(url: string, hash: Hex, token: Address, implementa
   return seen.map((k) => [k.slice(2), k.startsWith("b:")]);
 }
 
-/** The far sale's runs (app/verifier.ts farBlocks, farRequest): the probe-side request, the far
+/** The far sales' runs (app/verifier.ts farBlocks, farRequest): the probe-side request, the far
  *  request, and `until`, the block of the late sale's approve: each side's blocks before it run first. */
 export type FarRuns = { probe: Request; far: Request; until: number };
 
-/** The guard side's transactions run for real on a throwaway fork. `guard` is the guard-side
- *  eth_simulateV1 request as sent (app/verifier.ts buildRequest), `block` its base block, `token` the
- *  target and `implementation` its own. A throwaway anvil forks `url` at that block and replays the
- *  request: before each block, its time, base fee and coinbase; each call's access list taken at
- *  "pending" (the state after the calls before it, in that block), then the call sent as is (calldata,
- *  value, gas, fees) and what the token's code reaches traced (REACH); every block mined at its listed
- *  time, the empty ones too. So the sales run at their simulated block numbers and times on the state the
- *  buy left. The buy's own state change comes from prestateTracer's diff, its values read before and after
- *  its block. Not reproduced, and read only through ENV_OPCODES: the prevrandao, the gas price an access
- *  list sees, block hashes.
- *  With `far`, the far sale on the same fork: back before the guard's late approve, the empty blocks up to
- *  the far sale mined at once (anvil_mine: in memory, the last 300 states kept), then the guard's far
- *  approve and swap at their numbers and times, traced as above; then back at `block`, the probe side's
- *  buy and first sale at their blocks and times, the empty blocks mined at once, and its far approve and
- *  swap, not traced. `far` holds their four results, as eth_simulateV1 gives them
- *  (resultOf). */
-export async function trace(url: string, guard: Request, block: number, token: Address, implementation: Address | null, far?: FarRuns): Promise<Trace & { far: Result[] | null }> {
-  const blocksOf = (q: Request) => (q.params as [{ blockStateCalls: SimBlock[] }])[0].blockStateCalls;
-  const blocks = blocksOf(guard);
-  const fork = await forkAt(url, block);
-  const local = fork.url;
+const blocksOf = (q: Request) => (q.params as [{ blockStateCalls: SimBlock[] }])[0].blockStateCalls;
+const same = (a: string | undefined, b: string) => a?.toLowerCase() === b.toLowerCase();
+
+/** Runs eth_simulateV1 blocks for real on the throwaway fork at `local`, recording what they touch and
+ *  what the code of `token` and of its `implementation` reaches (Reach, `reach()`). */
+function runner(local: string, token: Address, implementation: Address | null) {
   const call = <T>(method: string, params: unknown[]) => rpc<T>(local, method, params);
-  const same = (a: string | undefined, b: string) => a?.toLowerCase() === b.toLowerCase();
   const touched = new Set<string>();
   const [called, balances] = [new Set<string>(), new Set<string>()];
   /** Mines `run` on the fork from where it stands, its senders funded and impersonated as `side`'s first
@@ -176,7 +180,7 @@ export async function trace(url: string, guard: Request, block: number, token: A
       const n = BigInt(b.blockOverrides.number);
       if (n <= at) throw new Error(`trace: block ${n} does not follow block ${at}`);
       if (n === pause) paused = await call<Hex>("evm_snapshot", []);
-      // the far sale's gap: empty blocks, mined at once, their times the clock's (only BLOCKHASH, a
+      // a far sale's gap: empty blocks, mined at once, their times the clock's (only BLOCKHASH, a
       // flagged opcode, sees them); the next block gets its own time below
       if (n > at + 1n) await call("anvil_mine", [toHex(n - at - 1n), "0x0"]);
       at = n;
@@ -211,6 +215,31 @@ export async function trace(url: string, guard: Request, block: number, token: A
     }
     return { sent, paused };
   };
+  const reach = (): Reach => ({ touched: [...touched].sort() as Address[], calls: [...new Set([...called, ...balances])].sort() as Address[], balances: [...balances].sort() as Address[] });
+  return { call, mine, reach };
+}
+
+/** The guard side's transactions run for real on a throwaway fork. `guard` is the guard-side
+ *  eth_simulateV1 request as sent (app/verifier.ts buildRequest), `block` its base block, `token` the
+ *  target and `implementation` its own. A throwaway anvil forks `url` at that block and replays the
+ *  request: before each block, its time, base fee and coinbase; each call's access list taken at
+ *  "pending" (the state after the calls before it, in that block), then the call sent as is (calldata,
+ *  value, gas, fees) and what the token's code reaches traced (REACH); every block mined at its listed
+ *  time, the empty ones too. So the sales run at their simulated block numbers and times on the state the
+ *  buy left. The buy's own state change comes from prestateTracer's diff, its values read before and after
+ *  its block. Not reproduced, and read only through ENV_OPCODES: the prevrandao, the gas price an access
+ *  list sees, block hashes.
+ *  With `far`, the far sales on the same fork, each from where its run starts: for the guard, back before
+ *  its late approve, the empty blocks up to the far sale mined at once (anvil_mine: in memory, the last
+ *  300 states kept), then its far approve and swap at their numbers and times, traced as above; then back
+ *  at `block`, the probe side's buy and first sale at their blocks and times, and from there each of its
+ *  far approves and swaps after its gap, not traced. `far` holds their results in farBlocks' order, as
+ *  eth_simulateV1 gives them (resultOf). */
+export async function trace(url: string, guard: Request, block: number, token: Address, implementation: Address | null, far?: FarRuns): Promise<Trace & { far: Result[] | null }> {
+  const blocks = blocksOf(guard);
+  const fork = await forkAt(url, block);
+  const local = fork.url;
+  const { call, mine, reach } = runner(local, token, implementation);
   try {
     const start = await call<Hex>("evm_snapshot", []);
     const guardSide = await mine(blocks, blocks, true, far ? BigInt(far.until) : -1n);
@@ -234,18 +263,50 @@ export async function trace(url: string, guard: Request, block: number, token: A
     let results: Result[] | null = null;
     if (far) {
       results = [];
-      const [guardFar, probeFar] = [blocksOf(far.far).slice(0, 2), blocksOf(far.far).slice(2)]; // farBlocks' order
-      // The guard: back before its late approve (the state fetched so far kept), the far sale after a gap.
-      await call("evm_revert", [guardSide.paused]);
-      for (const { hash } of (await mine(guardFar, blocks, true)).sent) results.push(await resultOf(local, hash));
-      // The probe: back at `block`, its buy and first sale at their blocks, the empty blocks before them and
-      // up to the far sale mined at once.
+      const all = blocksOf(far.far);
+      const pairs = (bs: SimBlock[]) => bs.flatMap((b, i) => (i % 2 ? [] : [bs.slice(i, i + 2)])); // an approve, its swap
+      const [guardFar, probeFar] = [pairs(all.slice(0, all.length / 2)), pairs(all.slice(all.length / 2))]; // farBlocks' order
+      // The guard: back before its late approve (the state fetched so far kept), each far sale after a gap.
+      let mark = guardSide.paused;
+      for (const run of guardFar) {
+        await call("evm_revert", [mark]);
+        mark = await call<Hex>("evm_snapshot", []);
+        for (const { hash } of (await mine(run, blocks, true)).sent) results.push(await resultOf(local, hash));
+      }
+      // The probe: back at `block`, its buy and first sale at their blocks, then each far sale from there.
       const probe = blocksOf(far.probe);
       await call("evm_revert", [start]);
-      const run = [...probe.filter((b) => b.calls.length && BigInt(b.blockOverrides.number) < BigInt(far.until)), ...probeFar];
-      for (const { hash } of (await mine(run, probe, false)).sent.slice(-2)) results.push(await resultOf(local, hash));
+      await mine(probe.filter((b) => b.calls.length && BigInt(b.blockOverrides.number) < BigInt(far.until)), probe, false);
+      for (const run of probeFar) {
+        mark = await call<Hex>("evm_snapshot", []);
+        for (const { hash } of (await mine(run, probe, false)).sent) results.push(await resultOf(local, hash));
+        await call("evm_revert", [mark]);
+      }
     }
-    return { touched: [...touched].sort() as Address[], calls: [...new Set([...called, ...balances])].sort() as Address[], balances: [...balances].sort() as Address[], diff, far: results };
+    return { ...reach(), diff, far: results };
+  } finally {
+    await fork.stop();
+  }
+}
+
+/** The later side's request (app/later.ts laterSide) run for real like the guard side, on a throwaway
+ *  fork of `url` at its base block, its state overrides set first (the buy's footprint, the balances):
+ *  what its sales touch on Base's later state and what the token's code reaches there, joined to `seen`
+ *  (the guard side's and the far sales'). A token that acts otherwise on that state alone is judged by
+ *  the same rule. */
+export async function traceLater(url: string, later: Request, token: Address, implementation: Address | null, seen: Reach): Promise<Reach> {
+  const blocks = blocksOf(later);
+  const fork = await forkAt(url, Number(BigInt(later.params[1] as Hex)));
+  try {
+    const { call, mine, reach } = runner(fork.url, token, implementation);
+    for (const [a, o] of Object.entries(blocks[0].stateOverrides ?? {})) {
+      if (o.balance) await call("anvil_setBalance", [a, o.balance]);
+      for (const [s, v] of Object.entries(o.stateDiff ?? {})) await call("anvil_setStorageAt", [a, s, v]);
+    }
+    await mine(blocks, blocks, true);
+    const r = reach();
+    const join = (x: Address[], y: Address[]) => [...new Set([...x, ...y])].sort() as Address[];
+    return { touched: join(seen.touched, r.touched), calls: join(seen.calls, r.calls), balances: join(seen.balances, r.balances) };
   } finally {
     await fork.stop();
   }

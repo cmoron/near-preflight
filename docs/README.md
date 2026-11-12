@@ -26,7 +26,8 @@ version; each page below covers one part and stays short. Read them in this orde
 
 - [Reproduce](reproduce.md): read this if you want to run the demo, fix a setup error, or check the
   deployed code.
-- [Status page](https://cmoron.github.io/near-preflight/): the live journal of the demo guard (its source
-  is [`index.html`](index.html) and [`app.js`](app.js) in this folder).
+- [Site](https://cmoron.github.io/near-preflight/): the landing page ([`index.html`](index.html),
+  [`landing.js`](landing.js)) and the [journal](https://cmoron.github.io/near-preflight/journal.html) of the
+  demo guard's checks ([`journal.html`](journal.html), [`app.js`](app.js)), in this folder.
 
 The former single page, [DETAILS.md](DETAILS.md), now points to these.

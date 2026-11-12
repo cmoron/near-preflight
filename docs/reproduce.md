@@ -34,8 +34,8 @@ bun app/attest.ts app/fixtures/decision.json --check 1
 #   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)
 ```
 
-- `replay` resends check #96 (USDC on Base mainnet) to `mainnet.base.org`, traces it on a throwaway anvil
-  fork, mines its far sale there again, rejudges it and compares everything with the guard
+- `replay` resends check #103 (USDC on Base mainnet) to `mainnet.base.org`, traces it on throwaway anvil
+  forks, mines its far sales there again, rejudges it and compares everything with the guard
   ([what it checks](replay.md#what-replay-recomputes)).
 - `attest` verifies the model's decision behind check #1; it calls Intel and NVIDIA
   ([what it checks](replay.md#what-attest-verifies)).
@@ -44,7 +44,7 @@ Then every trap on a local Base fork, as CI runs it:
 
 ```sh
 echo GUARD=$GUARD > .env && evm/fork.sh    # Base fork at block 55836672 ready on http://127.0.0.1:8545 (about 30 s)
-bun test --timeout 30000                   # in another terminal: 299 pass, 0 fail (3 to 5 min)
+bun test --timeout 30000                   # in another terminal: 308 pass, 0 fail (5 to 6 min)
 ```
 
 `evm/fork.sh` starts anvil on a copy of Base at block 55,836,672 and deploys the demo tokens at fixed
@@ -66,9 +66,9 @@ reverts the fork; `demo.sh` mines one a second (`bun app/testkit.ts live`).
 3. **Deploy.** `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard
    and creates `agent.`, `agent2.`, `sentinel.` and `armer.`, each with a function-call key limited to the
    guard. The armer, a key apart from the agent's, opens the agent's armed budget.
-4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`299 pass`) and
+4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`308 pass`) and
    `bunx tsc --noEmit` (exit 0).
-5. **Run the demo.** `./demo.sh` exits 0 in about 3 min (161 s here; each check waits for Base blocks), in four moments:
+5. **Run the demo.** `./demo.sh` exits 0 in 3 to 5 min (255 and 290 s here with the live model; each check waits for Base blocks), in four moments:
    - a poisoned inbox message pushes the agent to a trap: `BLOCK (sale refused N s after the buy …)`,
      and the contract refuses the buy (`verdict does not allow the purchase`);
    - a farm token whose simulation is clean: `BLOCK (template 0x9c69..94c8: 5 of 5 earlier pools drained …)`;
@@ -79,23 +79,23 @@ reverts the fork; `demo.sh` mines one a second (`bun app/testkit.ts live`).
    commands; each exits 0.
 7. **Optional.** With `NEAR_AI_API_KEY=...` in `.env.llm` ([cloud.near.ai](https://cloud.near.ai)), moment 1
    runs the live model (0.0003 USD here); without it, a recorded decision is verified.
-   `./demo.sh --full` (315 s here) adds an exit, a `warn` the owner approves, a trap aimed at the guard's
+   `./demo.sh --full` (479 s here) adds an exit, a `warn` the owner approves, a trap aimed at the guard's
    address, a second agent, three concurrent model runs, the emergency stop and a withdrawal.
 8. **Real Base.** `./check-mainnet.sh`, below.
 
-The status page reads any guard: `https://cmoron.github.io/near-preflight/?guard=guard.<you>.testnet`.
+The journal reads any guard: `https://cmoron.github.io/near-preflight/journal.html?guard=guard.<you>.testnet`.
 
 ## Real Base
 
-`./check-mainnet.sh` exits 0 in about 50 s (44 to 51 s, five runs). The armer arms; the sentinel simulates USDC on Base
+`./check-mainnet.sh` exits 0 in about a minute (62 and 63 s here; longer when its pool trades during the wait). The armer arms; the sentinel simulates USDC on Base
 mainnet (`mainnet.base.org`, read only, nothing broadcast), traces it on an anvil forked from it, waits
 for the later side's block and posts the verdict; then the proof is replayed with `--check`.
 
 The verdict is `warn`: there is no template index for mainnet. When USDC/WETH traded during the wait,
 the trades are re-executed after the buy, or a second reason says the resale was not verified (4 of 7
 such windows, [sentinel](sentinel.md#others-trades-during-the-wait)). Check #70's pool traded, its trade
-was re-executed. Check #96's proof ships as `app/fixtures/usdc-base-mainnet.json` (nobody traded its pool
-during its wait; its far sale ran 771 s after the buy).
+was re-executed. Check #103's proof ships as `app/fixtures/usdc-base-mainnet.json` (nobody traded its pool
+during its wait; its far sales ran 301 s, 456 s and 900 s after the buy).
 
 To build an index, use a node that serves `eth_getLogs` (`mainnet.base.org` does not):
 `bun app/index.ts <rpc> <from> <to> <out.json> --pace-ms 1000`. The measurements are in
@@ -107,12 +107,13 @@ To build an index, use a node that serves `eth_getLogs` (`mainnet.base.org` does
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Faucet: `429 Too Many Requests`                  | it rate-limits by IP. A failed call leaves `~/.near-credentials/testnet/<you>.testnet.json` and the folder `<you>.testnet/` beside it: delete both before retrying.                                                                        |
 | No faucet at all                                 | create the account from any account holding 7.5 NEAR: `near account create-account fund-myself <you>.testnet '7.5 NEAR' autogenerate-new-keypair save-to-keychain sign-as <funded>.testnet network-config testnet sign-with-keychain send` |
-| A role logs `429 Rate limits exceeded`           | the NEAR RPC is limiting your IP: wait a few minutes                                                                                                                                                                                       |
+| A role or `replay --check` fails on `429 Rate limits exceeded` | the NEAR RPC limits your IP. Every role, `replay --check` and `attest --check` wait out a 429 (1 s, doubling up to 64 s: about 2 min) and send the same request again; past that, wait a few minutes or read another endpoint: `NEAR_RPC=https://rpc.testnet.near.org bun app/replay.ts … --check` |
 | `Not enough allowance for access key`            | the role's gas allowance is spent: replace its key ([contract](contract.md#roles-and-keys))                                                                                                                                                |
 | `port 8545 already serves a node: stop it first` | another anvil runs: stop it before `evm/fork.sh`                                                                                                                                                                                           |
 | `../.env missing`                                | `evm/fork.sh` needs `GUARD` in `.env` (or `GUARD_EVM`)                                                                                                                                                                                     |
 | `transaction differs from the one simulated`     | another signature or a gas change happened since the verdict: request a new check                                                                                                                                                          |
 | `verdict expired`                                | more than 120 s since the verdict: request a new check                                                                                                                                                                                     |
+| `./demo.sh` was interrupted                      | run it again: a check it left pending is judged first, and the owner unlists a trap that check lists again |
 | A check never gets a verdict                     | the sentinel is not running, or its key's allowance is spent; after 300 s, `refund_check`                                                                                                                                                  |
 
 ## Deployment
@@ -133,3 +134,5 @@ its metadata names the git commit it was built from, so it can be published only
 
 CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs on every push to `main`: `cargo fmt`,
 `clippy`, `cargo test`, `bunx tsc --noEmit`, then the fork and `bun test`.
+
+The public pages open on `docs/snapshot.json`, then read only what changed: regenerate it with `bun app/snapshot.ts docs/snapshot.json` after a demo run (`demo.sh` does it) or a redeploy, and commit it.

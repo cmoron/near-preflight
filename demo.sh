@@ -43,8 +43,8 @@ echo "0. The armer (own process, function-call key limited to arm/disarm) arms t
 LLM=()
 [[ -f .env.llm ]] && LLM=(--env-file=.env.llm)
 
-# The fork mines nothing on its own: a block every 2 s with others' WETH and ETH transfers, as on Base,
-# for the blocks each check waits for (its reference block, then the later side's).
+# The fork mines nothing on its own: a block a second (app/testkit.ts FORK_S) with others' WETH and ETH transfers,
+# as on Base, for the blocks each check waits for (its reference block, then the later side's).
 bun app/testkit.ts live &
 MINER=$!
 # The sentinel builds the template index from the fork's first block up to each check's block.
@@ -71,6 +71,8 @@ if [[ $FULL ]]; then
   echo "$out" # not tee /dev/stderr: reopening it truncates a log file the output is redirected to
   bun --env-file=.env app/relay.ts exit "$(sed -n 's/.*relay.ts exit \([0-9]*\).*/\1/p' <<<"$out")" || status=1
 fi
+# The public pages open on this snapshot: refresh it. A rate-limited RPC leaves the old file (nothing partial) and does not fail the demo.
+bun --env-file=.env app/snapshot.ts docs/snapshot.json || echo "snapshot not refreshed: run bun app/snapshot.ts docs/snapshot.json later"
 echo
 cat proofs/verify.txt 2>/dev/null || status=1
 exit $status

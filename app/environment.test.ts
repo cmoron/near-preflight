@@ -129,6 +129,39 @@ describe("what the token's own code reaches, in its context, implementation incl
       await rpc(RPC, "evm_revert", [snapshot]);
     }
   });
+  // Automated review of 100ceaf: a stack of code addresses pushed on enter and popped on exit loses its
+  // place if a frame enters without exiting (a call that fails before it runs, a SELFDESTRUCT); the reads
+  // after it would be charged to the wrong code. Frames are now told apart by their depth.
+  test("the same reads by the implementation in its own context, after a call that fails early, one to a precompile or an EOA, a SELFDESTRUCT or a failed CREATE: recorded", async () => {
+    const dier = "0x00000000000000000000000000000000000c0de3" as Address;
+    const bad = "0x0000000000000000000000000000000000000bad";
+    /** CALL(gas, to, value, 0, 0, 0, 0), POP; `value` a PUSH. */
+    const callTo = (to: string, value: string) => `6000600060006000${value}73${to.slice(2).padStart(40, "0")}5af150`;
+    const before = {
+      "value above the balance": callTo(bad, "68010000000000000000"), // PUSH9 2^64 wei: fails before it runs
+      precompile: callTo("0x0000000000000000000000000000000000000001", "6000"),
+      EOA: callTo(bad, "6000"),
+      "SELFDESTRUCT in a sub-call": callTo(dier, "6000"),
+      "CREATE above the balance": "6000600068010000000000000000f050",
+      "CREATE2 collision": "6000600060006000f5506000600060006000f550",
+    };
+    for (const [name, prefix] of Object.entries(before)) {
+      const snapshot = await rpc<Hex>(RPC, "evm_snapshot", []);
+      try {
+        await rpc(RPC, "anvil_setCode", [impl, `0x${prefix}73${caller.slice(2)}315073${WETH.slice(2)}3f5000`]); // ..., BALANCE(caller), EXTCODEHASH(WETH)
+        await rpc(RPC, "anvil_setCode", [dier, `0x73${caller.slice(2)}ff`]); // SELFDESTRUCT(caller)
+        await rpc(RPC, "anvil_setCode", [proxy, `0x6000600060006000600073${impl.slice(2)}5af15000`]); // CALL(impl): its own context
+        await rpc(RPC, "anvil_setBalance", [caller, toHex(parseEther("1"))]);
+        await rpc(RPC, "anvil_impersonateAccount", [caller]);
+        const hash = await rpc<Hex>(RPC, "eth_sendTransaction", [{ from: caller, to: proxy, data: "0x", gas: toHex(200_000) }]);
+        for (let i = 0; i < 50 && !(await rpc<unknown>(RPC, "eth_getTransactionReceipt", [hash])); i++) await Bun.sleep(100);
+        const seen = (await reachOf(RPC, hash, proxy, impl)).map(([a, b]) => `${a}:${b}`);
+        expect([name, seen.includes(`${caller}:true`) && seen.includes(`${WETH.toLowerCase()}:false`)]).toEqual([name, true]);
+      } finally {
+        await rpc(RPC, "evm_revert", [snapshot]);
+      }
+    }
+  });
 });
 
 // What the simulation cannot see, on the fork's real chain: an EOA buys and sells as a user would.

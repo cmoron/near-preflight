@@ -176,6 +176,10 @@ cast rpc -r $RPC anvil_setBalance $DEPLOYER 0x56BC75E2D63100000 >/dev/null # 100
 side() { # forge create arguments -> token address, 5 ETH against 500,000 tokens, LP burned
   local token
   token=$(forge create --rpc-url $RPC --unlocked --from $DEPLOYER --broadcast --json "$@" | jq -r .deployedTo)
+  pooled "$token"
+}
+pooled() { # token -> token address, 5 ETH against 500,000 of the deployer's tokens, LP burned
+  local token=$1
   cast send -r $RPC --unlocked --from $DEPLOYER "$token" 'approve(address,uint256)' $ROUTER 500000ether >/dev/null
   cast send -r $RPC --unlocked --from $DEPLOYER --value 5ether $ROUTER \
     'addLiquidityETH(address,uint256,uint256,uint256,address,uint256)' "$token" 500000ether 0 0 $DEPLOYER 9999999999 >/dev/null
@@ -216,6 +220,15 @@ COOLDOWN_60=$(side src/Cooldown60.sol:Cooldown60)
 APPROVE_KEY=$(side src/ApproveKey.sol:ApproveKey)
 BUSY_TELL=$(side src/BusyTell.sol:BusyTell)
 
+# Deployed last, every address above stays: judge pass 9's J9ImplMark (behind a proxy, each buy marks
+# the previous buyer in its implementation's own storage, and a marked address never sells) and
+# J9GuardLater (sales closed for the guard's address only, 8 minutes after its buy), unchanged.
+MARK_IMPL=$(forge create --rpc-url $RPC --unlocked --from $DEPLOYER --broadcast --json src/J9ImplMark.sol:J9ImplMark | jq -r .deployedTo)
+IMPL_MARK=$(forge create --rpc-url $RPC --unlocked --from $DEPLOYER --broadcast --json src/J9ImplMark.sol:J9Proxy --constructor-args "$MARK_IMPL" | jq -r .deployedTo)
+cast send -r $RPC --unlocked --from $DEPLOYER "$IMPL_MARK" 'init(address)' $DEPLOYER >/dev/null
+IMPL_MARK=$(pooled "$IMPL_MARK")
+GUARD_LATER=$(side src/J9GuardLater.sol:J9GuardLater --constructor-args "$GUARD_EVM")
+
 # Users without a key whose WETH and ETH transfers fill the blocks the tests and demo.sh mine
 # (app/testkit.ts USERS): 1,000 ETH each.
 for i in 1 2 3 4 5; do cast rpc -r $RPC anvil_setBalance "0x0000000000000000000000000000000000b10c0$i" 0x3635C9ADC5DEA00000 >/dev/null; done
@@ -232,7 +245,7 @@ jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked
   --arg judgetrap "$JUDGE_TRAP" --arg untouched "$UNTOUCHED" --arg strangerkey "$STRANGER_KEY" --arg pairpull "$PAIR_PULL" \
   --arg redl1 "$RED_L1" --arg basefee "$BASEFEE_TRAP" --arg helper "$HELPER_TRAP" \
   --arg nbk "$NEXT_BLOCK_KEY" --arg amount "$AMOUNT_TRAP" --arg wethkey "$WETH_KEY" --arg cooldown "$COOLDOWN_60" \
-  --arg approvekey "$APPROVE_KEY" --arg busytell "$BUSY_TELL" \
+  --arg approvekey "$APPROVE_KEY" --arg busytell "$BUSY_TELL" --arg implmark "$IMPL_MARK" --arg guardlater "$GUARD_LATER" \
   '{fork_block: $block, usdc: $usdc, safe: $safe, owner_reclaim: $reclaim, sell_blocked: $blocked,
     sell_blocked_later: $later, sell_tax: $tax, sell_tax_later: $taxlater, hold_one_block: $hold, sim_detector: $sim,
     guard_frozen: $frozen, sell_tax_20: $tax20, late_liquidity: $late, lp_burned: $lpburned, lp_held: $lpheld,
@@ -240,7 +253,7 @@ jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked
     usdc_copies: $copies, judge_trap: $judgetrap, untouched_buyer: $untouched, stranger_key: $strangerkey,
     pair_pull_tax: $pairpull, red_l1_trap: $redl1, basefee_trap: $basefee, helper_trap: $helper,
     next_block_key: $nbk, amount_trap: $amount, weth_key: $wethkey, cooldown_60: $cooldown,
-    approve_key: $approvekey, busy_tell: $busytell}' > tokens.json
+    approve_key: $approvekey, busy_tell: $busytell, impl_mark: $implmark, guard_later: $guardlater}' > tokens.json
 cp tokens.json ../docs/tokens.json
 echo "guard_frozen freezes $GUARD_EVM"
 echo "Base fork at block $FORK_BLOCK ready on $RPC; tokens in evm/tokens.json:"

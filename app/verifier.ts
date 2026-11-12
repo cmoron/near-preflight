@@ -1,8 +1,8 @@
 // The check behind every verdict: read-only simulation (eth_simulateV1) on an EVM chain, Uniswap V2
 // route WETH -> token. Nothing is signed or sent on the EVM chain. checkToken runs a buy check (four
 // requests: guard side, probe side and synthetic calls on the reference block bound to the NEAR request,
-// then the later side on a real block mined after it; the far sale, the late sale again minutes later on
-// a local fork; plus code, liquidity, environment and reputation facts), checkExit an agent's exit quote; judge and judgeExit are pure, so app/replay.ts rejudges a
+// then the later side on a real block mined after it; the far sales, the late sale again 301 s, 900 s
+// and a drawn delay after the buy on a local fork; plus code, liquidity, environment and reputation facts), checkExit an agent's exit quote; judge and judgeExit are pure, so app/replay.ts rejudges a
 // proof with the same code. app/sentinel.ts posts the result; docs/sentinel.md explains it.
 import {
   concat,
@@ -21,7 +21,7 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import { environmentFindings, envOpcodes, trace } from "./environment";
+import { environmentFindings, envOpcodes, trace, traceLater } from "./environment";
 import { laterSide } from "./later";
 import { beforeBlock, ownFunding, reputationFindings, reputationOf, templateOf, windowProblem, type Index, type Reputation } from "./index";
 
@@ -164,8 +164,8 @@ export type Report = {
   };
   /** Full requests and responses, to replay the simulation at the same blocks: the guard side, the
    *  probe side, the synthetic calls (quote, owner(), takebacks) and the later side, four requests sharing
-   *  no state, then the far sale's blocks (FAR_METHOD, mined on a local fork) and their results (the
-   *  later side and the far sale absent when the check stopped at the buy). */
+   *  no state, then the far sales' blocks (FAR_METHOD, mined on a local fork) and their results (the
+   *  later side and the far sales absent when the check stopped at the buy). */
   request: Request[];
   response: Result[][];
 };
@@ -202,24 +202,30 @@ function asProbe(c: Call, label: string, probe: Address, amount = 0n): Call {
   return { label, from: probe, to: c.to, data, ...(c.value ? { value: c.value } : {}) };
 }
 
-/** One JSON-RPC call with a timeout (RPC_TIMEOUT_MS, 20 s by default); throws on an error or no result.
- *  A public node's rate limit (HTTP 429) is waited out 3 times (2, 4, 6 s), then thrown like any error. */
-export async function rpc<T>(url: string, method: string, params: unknown[]): Promise<T> {
-  for (let attempt = 1; ; attempt++) {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-      signal: AbortSignal.timeout(Number(process.env.RPC_TIMEOUT_MS ?? 20_000)), // never wait forever
-    });
-    if (res.status === 429 && attempt <= 3) {
-      await Bun.sleep(2000 * attempt);
-      continue;
-    }
-    const body = (await res.json()) as { result?: T; error?: { message: string } };
-    if (body.error || body.result === undefined) throw new Error(`${method} : ${body.error?.message ?? res.status}`);
-    return body.result;
+/** Waits after each HTTP 429 (a public node's rate limit) before the request is sent again: about 2 min in
+ *  all, as the NEAR RPC limited the full demo for more than 31 s (it runs three model runs at once). */
+export const RATE_WAITS_MS = [1000, 2000, 4000, 8000, 16000, 32000, 64000];
+const rawFetch = globalThis.fetch; // app/near.ts replaces the process's fetch with patientFetch
+/** fetch through a public node's rate limit, for every role: an HTTP 429 is waited out (`waits`), the
+ *  request sent again byte for byte (a NEAR transaction keeps its bytes, hence its hash: a retry never
+ *  makes a second one), then the last answer returned as is. Each try has a timeout (RPC_TIMEOUT_MS, 20 s
+ *  by default) unless `init` brings a signal: a node that never answers does not hang a role. EVM calls go
+ *  through it (rpc), NEAR RPC calls too (app/near.ts makes it the process's fetch). */
+export async function patientFetch(input: string | URL | globalThis.Request, init: RequestInit = {}, waits = RATE_WAITS_MS): Promise<Response> {
+  for (let i = 0; ; i++) {
+    const res = await rawFetch(input instanceof globalThis.Request ? input.clone() : input, { ...init, signal: init.signal ?? AbortSignal.timeout(Number(process.env.RPC_TIMEOUT_MS ?? 20_000)) });
+    if (res.status !== 429 || i >= waits.length) return res;
+    await res.body?.cancel();
+    await Bun.sleep(waits[i]);
   }
+}
+
+/** One JSON-RPC call (patientFetch: timeout, rate limit waited out); throws on an error or no result. */
+export async function rpc<T>(url: string, method: string, params: unknown[]): Promise<T> {
+  const res = await patientFetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+  const body = (await res.json()) as { result?: T; error?: { message: string } };
+  if (body.error || body.result === undefined) throw new Error(`${method} : ${body.error?.message ?? res.status}`);
+  return body.result;
 }
 
 /** A simulated block: its number fixes its time (timeOf) and its prevrandao. */
@@ -363,12 +369,13 @@ export const FIRST_S = [2, 25] as const;
  *  the 256 blocks eth_simulateV1 allows above a real block (51 s at 0.2 s). Nothing later is simulated:
  *  a second request further ahead needs a real base block that far ahead, which does not exist yet. */
 export const LATE_S = [30, 51] as const;
-/** The far sale: the late sale's own approve and swap again, 301 to 900 s after the buy (1,505 to 4,500
- *  blocks on Base), past what eth_simulateV1 reaches. A token that refuses or taxes a sale from 5 min on
- *  meets it. It runs on the local fork the trace starts (app/environment.ts trace), whose clock and block
- *  number move: the buy and first sale as on the guard side, the empty blocks in between mined at once,
- *  then the approve and swap at the numbers and times real blocks would have. A frozen copy: nothing of
- *  Base after the reference block is in it. From the probe too, in a run of its own. */
+/** The far sales: the late sale's own approve and swap again, 301 s and 900 s after the buy and at a
+ *  delay drawn between (1,505 to 4,500 blocks on Base), past what eth_simulateV1 reaches (farDelays). A
+ *  token that refuses or taxes a sale from 5 to 15 min on meets one at every check: a re-draw cannot move
+ *  either end. Each runs on the local fork the trace starts (app/environment.ts trace), whose clock and
+ *  block number move: the buy and first sale as on the guard side, the empty blocks in between mined at
+ *  once, then the approve and swap at the numbers and times real blocks would have. A frozen copy: nothing
+ *  of Base after the reference block is in it. From the probe too, in runs of its own. */
 export const FAR_S = [301, 900] as const;
 /** The blocks after the buy each sale may land in at cadence `c`: FIRST_S, LATE_S and FAR_S in blocks,
  *  the first at least 2 (its approve after the buy's block), the late one at most LATE_BLOCKS - 1 (the
@@ -516,18 +523,25 @@ export function plan(token: Address, who: Who, block: bigint, amount: bigint, tx
   };
 }
 
-/** Label prefix of the far sale: the late sale's approve and swap again, `far` blocks after the buy. */
-export const FAR = "far: ";
-/** The method of the far sale's request: it is mined on a local fork (app/environment.ts trace), never
+/** Label prefixes of the far sales, in the order they run: 301 s after the buy, at the drawn delay, 900 s. */
+export const FARS = [`far ${FAR_S[0]} s: `, "far: ", `far ${FAR_S[1]} s: `] as const;
+/** Label prefix of the far sale at the drawn delay. */
+export const FAR = FARS[1];
+/** Blocks after the buy of the far sales (FARS' order) at cadence `c`: both ends of FAR_S, which no
+ *  re-draw moves, and the delay drawn per check between them. */
+export const farDelays = (c: Cadence, sale: Sale) => [saleRanges(c).far[0], sale.far, saleRanges(c).far[1]];
+/** The method of the far sales' request: it is mined on a local fork (app/environment.ts trace), never
  *  sent to a node, whose eth_simulateV1 refuses a block more than 256 past its base block. */
 export const FAR_METHOD = "local_fork_mine";
-/** The far sale's blocks: the late sale's approve and swap of the guard side, then of the probe side,
- *  each moved to `sale.far` blocks after the buy (its approve the block before), relabelled. Each party's
- *  pair runs in a run of its own on the fork, after that side's buy and first sale (trace). */
-export function farBlocks(s: Sides, block: bigint, sale: Sale): Block[] {
+/** The far sales' blocks: the late sale's approve and swap of the guard side at each of farDelays, then
+ *  of the probe side, each approve the block before its swap, relabelled (FARS). Each pair runs in a run
+ *  of its own on the fork, after that side's buy and first sale (trace). */
+export function farBlocks(s: Sides, block: bigint, sale: Sale, c: Cadence): Block[] {
   const [approve, swap] = [block + BigInt(sale.late), block + BigInt(sale.late) + 1n];
   return [s.guard, s.probe].flatMap((side) =>
-    [approve, swap].map((n, i) => ({ number: block + BigInt(sale.far) + BigInt(i), calls: side.find((b) => b.number === n)!.calls.map((c) => ({ ...c, label: `${FAR}${c.label}` })) })),
+    farDelays(c, sale).flatMap((far, k) =>
+      [approve, swap].map((n, i) => ({ number: block + BigInt(far) + BigInt(i), calls: side.find((b) => b.number === n)!.calls.map((x) => ({ ...x, label: `${FARS[k]}${x.label}` })) })),
+    ),
   );
 }
 /** The far sale's request as the fork mines it: its blocks at the cadence measured (the time and number
@@ -763,18 +777,18 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const sides = plan(token, who, block, amount, { buy, sales }, { amounts: st.amounts, owner: st.owner, sale });
   const sim = await simulate(url, head, cadence, sides, fees, guard, st.owner);
   // The guard side replayed on a local fork: the addresses it touches, the token's calls, the buy's
-  // state change; on the same fork, the far sale of each side; then the sales again on the first real
-  // block `later` seconds on, with the buy's change applied.
-  sides.far = farBlocks(sides, block, sale);
+  // state change; on the same fork, the far sales of each side; then the sales again on the first real
+  // block `later` seconds on, with the buy's change applied, simulated and traced like the guard side.
+  sides.far = farBlocks(sides, block, sale, cadence);
   const far = farRequest(head, cadence, sides.far, fees);
   const t = await trace(url, sim.request[0], Number(block), token, implementation, { probe: sim.request[1], far, until: Number(block) + sale.late });
   const real = await laterBlock(url, head, later, sale);
   sides.later = laterBlocks(sides.guard, block, sale, BigInt(real.number));
-  const l = await laterSide(url, real, head, cadence, sides.later, t.diff, fees, guard, token, liquidity.pair);
-  const out = await rpc<{ calls: Result[] }[]>(url, l.request.method, l.request.params);
+  const l = await laterSide(url, real, head, cadence, sides.later, t.diff, fees, guard, token, liquidity.pair, implementation);
+  const [out, seen] = await Promise.all([rpc<{ calls: Result[] }[]>(url, l.request.method, l.request.params), traceLater(url, l.request, token, implementation, t)]);
   const both = { request: [...sim.request, l.request, far], response: [...sim.response, out.flatMap((b) => b.calls), t.far!] };
   const { request: _, ...found } = l;
-  const facts = { ...proof, touched: t.touched, token_calls: t.calls, token_balances: t.balances, later: { block: Number(real.number), ...found } };
+  const facts = { ...proof, touched: seen.touched, token_calls: seen.calls, token_balances: seen.balances, later: { block: Number(real.number), ...found } };
   return report(facts, both, labelsOf(sides), [keccak256(buy)], { token, ...who });
 }
 
@@ -839,8 +853,8 @@ export function buyStages(f: Record<string, Result>, w: Parties) {
 
 /** Findings of one side (prefix "" or GUARD, seller `who`): buy, takebacks, sales. A sale is judged on
  *  the ETH that reached the seller (traceTransfers logs) against the pool's quote before its approve
- *  (last Sync), and blocked when the pool paid out more WETH than the seller received. The far sale (the
- *  late one again, after the buy and the first sale, FAR) is judged the same way, when it ran. */
+ *  (last Sync), and blocked when the pool paid out more WETH than the seller received. The far sales (the
+ *  late one again, after the buy and the first sale, FARS) are judged the same way, when they ran. */
 function sideFindings(r: Record<string, Result>, p: string, w: Parties, pair: Address | null, stop: boolean, sales: Sale, c: Cadence): Finding[] {
   const who = p === GUARD ? w.guard : w.buyer;
   const { findings, amount, owner, quoted } = buyStage(r, w.token, who, p);
@@ -868,15 +882,17 @@ function sideFindings(r: Record<string, Result>, p: string, w: Parties, pair: Ad
   const buy = r[`${p}buy`];
   const sold = saleAmounts(amount, sales.bps);
   const step = (q: string, s: string) => [r[`${q}approve router${s}`], r[`${q}sale${s}`]];
-  const [first, late, far] = [step(p, SALES[0]), step(p, SALES[1]), step(`${FAR}${p}`, SALES[1])];
+  const [first, late] = [step(p, SALES[0]), step(p, SALES[1])];
+  // the far sales that ran, each delay once (the drawn one may be an end)
+  const fars = FARS.map((f, k) => ({ step: step(`${f}${p}`, SALES[1]), n: farDelays(c, sales)[k] })).filter((f, k, all) => f.step[1] && all.findIndex((g) => g.n === f.n) === k);
   const plays = [
     { step: first, before: [buy], x: sold[0], n: sales.first },
     { step: late, before: [buy, ...first], x: sold[1], n: sales.late },
-    ...(far[1] ? [{ step: far, before: [buy, ...first], x: sold[1], n: sales.far }] : []),
+    ...fars.map((f) => ({ step: f.step, before: [buy, ...first], x: sold[1], n: f.n })),
   ];
   // A sale the pool quotes at less than DUST wei can fail or look taxed by rounding alone: not listed.
-  // Nor is a refusal the last sale (the far one, or the late one when it did not run) does not share: one
-  // that clears with time (an honest cooldown) blocks this check, and listing it would let any agent
+  // Nor is a refusal the last sale (the far one at 900 s, or the late one when none ran) does not share:
+  // one that clears with time (an honest cooldown) blocks this check, and listing it would let any agent
   // repeat checks until one draws it.
   const last = plays.at(-1)!.step[1];
   for (const { step, before, x, n } of plays) {

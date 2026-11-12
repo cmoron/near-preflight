@@ -8,7 +8,7 @@
 // It needs a node that still serves the state of both blocks. docs/replay.md lists each line.
 // Usage: bun app/replay.ts <proof.json> [rpc] [--check]   (exit code 0 only if every line holds)
 import { decodeFunctionData, encodeFunctionData, keccak256, parseAbi, parseTransaction, serializeTransaction, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
-import { ENV_OPCODES, trace, type Trace } from "./environment";
+import { ENV_OPCODES, trace, traceLater, type Reach, type Trace } from "./environment";
 import { laterSide, MAX_REPLAYED } from "./later";
 import { beforeBlock, buildIndex, INDEX_SPAN_S, indexSha256, ownFunding, reputationOf, templateOf, windowProblem, type Reputation } from "./index";
 import {
@@ -375,7 +375,7 @@ async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][]): P
       txs.sales = sales.map((sale) => sale.map((c) => unsignedOf(c!, e.chain_id))) as [Hex[], Hex[]];
       sides = plan(token, { guard, buyer, stranger }, block, amount, txs, { amounts: st.amounts, owner: st.owner, sale: e.sales });
       sides.later = laterBlocks(sides.guard, block, e.sales, BigInt(e.later!.block));
-      sides.far = farBlocks(sides, block, e.sales);
+      sides.far = farBlocks(sides, block, e.sales, e.cadence);
     }
     const bad = guardShape(txs, token, guard, amount, txs.sales ? saleAmounts(st.amounts.guard, e.sales.bps) : null);
     if (bad) return { error: bad };
@@ -383,7 +383,7 @@ async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][]): P
     const want = await Promise.all(FROZEN.map(async (k) => buildRequest(head, e.cadence, await balances(url, head, sides[k], fees, guard, owner), sides[k], fees)));
     if (JSON.stringify(want) !== JSON.stringify(p.request.slice(0, 3))) return { error: "requests are not the ones checkToken builds for this target" };
     const far = full ? farRequest(head, e.cadence, sides.far, fees) : null;
-    if (far && JSON.stringify(far) !== JSON.stringify(p.request[4])) return { error: `the far sale is not the late sale's approve and swap ${e.sales.far} blocks after the buy, the guard's then the probe's` };
+    if (far && JSON.stringify(far) !== JSON.stringify(p.request[4])) return { error: `the far sales are not the late sale's approve and swap 301 s, ${e.sales.far} blocks and 900 s after the buy, the guard's then the probe's` };
     const labels = labelsOf(sides);
     const simulated = labels.length - sides.far.flatMap((b) => b.calls).length;
     if (simulated !== fresh.flat().length) return { error: `expected ${simulated} calls, node returned ${fresh.flat().length}` };
@@ -394,10 +394,10 @@ async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][]): P
 }
 
 /** The guard side traced again (its request confirmed by rebuild first: no other input reaches the local
- *  fork), compared with evidence.touched, token_calls and token_balances; the far sale mined again on the
- *  same fork, its results compared with the file's and returned (null without one) for the judgment; then
- *  the later side rebuilt on evidence.later's block from what the buy wrote there and the node's state,
- *  compared with the file's. */
+ *  fork); the far sales mined again on the same fork, their results compared with the file's and returned
+ *  (null without them) for the judgment; then the later side rebuilt on evidence.later's block from what
+ *  the buy wrote there and the node's state, compared with the file's, and traced in turn. What all of
+ *  them touch is compared with evidence.touched, token_calls and token_balances. */
 async function retrace(url: string, p: Proof, e: Evidence, r: Rebuilt): Promise<{ lines: Line[]; far: Result[] | null }> {
   const out: Line[] = [];
   const add = (ok: boolean, text: string) => out.push({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
@@ -406,21 +406,30 @@ async function retrace(url: string, p: Proof, e: Evidence, r: Rebuilt): Promise<
     const far = r.far ? { probe: p.request[1], far: r.far, until: e.block + e.sales.late } : undefined;
     traced = e.liquidity ? await trace(url, p.request[0], e.block, p.target as Address, e.implementation as Address | null, far) : null;
   } catch (err) {
-    return { lines: [{ ok: false, line: `ERROR    tracing the guard's transactions and the far sale on a local fork: ${msg(err)}` }], far: null };
+    return { lines: [{ ok: false, line: `ERROR    tracing the guard's transactions and the far sales on a local fork: ${msg(err)}` }], far: null };
   }
-  const [t, calls, read] = [traced?.touched ?? null, traced?.calls ?? null, traced?.balances ?? null].map((x) => JSON.stringify(x));
-  add(t === JSON.stringify(e.touched), t === JSON.stringify(e.touched) ? `addresses the guard's transactions touch, traced again on a local fork at block ${e.block}: ${traced ? traced.touched.length : "none, no pool"}, identical to evidence.touched` : `addresses touched: evidence ${JSON.stringify(e.touched)}, traced ${t}`);
-  add(calls === JSON.stringify(e.token_calls), calls === JSON.stringify(e.token_calls) ? `what the token's code calls or reads in them: ${traced?.calls.join(", ") || "nothing"}, identical to evidence.token_calls` : `token calls: evidence ${JSON.stringify(e.token_calls)}, traced ${calls}`);
-  add(read === JSON.stringify(e.token_balances), read === JSON.stringify(e.token_balances) ? `ETH balances the token's code reads: ${traced?.balances.join(", ") || "none"}, identical to evidence.token_balances` : `token balances read: evidence ${JSON.stringify(e.token_balances)}, traced ${read}`);
   const far = traced?.far ?? null;
   if (far) {
     const same = JSON.stringify(far.map(outcome)) === JSON.stringify((p.response[4] ?? []).map(outcome));
-    const when = `${secondsAfterBuy(e.cadence, e.sales.far)} s (${e.sales.far} blocks) after the buy`;
-    add(same, same ? `far sale re-run on a local fork, the late sale again ${when}: status, return data and logs of its ${far.length} calls identical` : `far sale re-run on a local fork ${when}: its results differ from the proof's`);
+    const when = `301 s, ${secondsAfterBuy(e.cadence, e.sales.far)} s (${e.sales.far} blocks) and 900 s after the buy`;
+    add(same, same ? `far sales re-run on a local fork, the late sale again ${when}: status, return data and logs of their ${far.length} calls identical` : `far sales re-run on a local fork ${when}: their results differ from the proof's`);
   }
-  if (!e.later || !traced) return { lines: out, far };
+  const seen: Reach | null = traced && e.later ? await laterLines(url, p, e, r, traced, add, out) : traced;
+  const [t, calls, read] = [seen?.touched ?? null, seen?.calls ?? null, seen?.balances ?? null].map((x) => JSON.stringify(x));
+  const where = `traced again on local forks at block ${e.block}${e.later ? ` and block ${e.later.block}` : ""}`;
+  add(t === JSON.stringify(e.touched), t === JSON.stringify(e.touched) ? `addresses the guard's transactions touch, ${where}: ${seen ? seen.touched.length : "none, no pool"}, identical to evidence.touched` : `addresses touched: evidence ${JSON.stringify(e.touched)}, traced ${t}`);
+  add(calls === JSON.stringify(e.token_calls), calls === JSON.stringify(e.token_calls) ? `what the token's code calls or reads in them: ${seen?.calls.join(", ") || "nothing"}, identical to evidence.token_calls` : `token calls: evidence ${JSON.stringify(e.token_calls)}, traced ${calls}`);
+  add(read === JSON.stringify(e.token_balances), read === JSON.stringify(e.token_balances) ? `ETH balances the token's code reads: ${seen?.balances.join(", ") || "none"}, identical to evidence.token_balances` : `token balances read: evidence ${JSON.stringify(e.token_balances)}, traced ${read}`);
+  return { lines: out, far };
+}
+
+/** The later side rebuilt on evidence.later's block and compared with the file's, then the rebuilt
+ *  request (replay's own, from the node: no other input reaches the fork) traced; returns what the guard
+ *  side, the far sales and it touch, or the guard side's alone when it cannot be rebuilt (an ERROR line). */
+async function laterLines(url: string, p: Proof, e: Evidence, r: Rebuilt, traced: Trace, add: (ok: boolean, text: string) => void, out: Line[]): Promise<Reach> {
+  if (!e.later) return traced;
   try {
-    const l = await laterSide(url, await headAt(url, toHex(e.later.block)), r.head, e.cadence, r.sides.later, traced.diff, r.fees, r.guard, p.target as Address, e.liquidity!.pair);
+    const l = await laterSide(url, await headAt(url, toHex(e.later.block)), r.head, e.cadence, r.sides.later, traced.diff, r.fees, r.guard, p.target as Address, e.liquidity!.pair, e.implementation as Address | null);
     const sameRequest = JSON.stringify(l.request) === JSON.stringify(p.request[3]);
     add(sameRequest, sameRequest ? `later side's request rebuilt on block ${e.later.block}: the guard's sales with the buy's footprint applied` : `request shape: the later side is not the guard's sales on block ${e.later.block} with the buy's footprint applied`);
     // every trade of the pool the node shows between the two blocks, in order: none left out, none added
@@ -434,10 +443,11 @@ async function retrace(url: string, p: Proof, e: Evidence, r: Rebuilt): Promise<
     const { request: _, replayed: _r, ...facts } = l;
     const same = JSON.stringify(facts) === JSON.stringify((({ block: _b, replayed: _x, ...f }) => f)(e.later));
     add(same, same ? `later side's facts rebuilt: ${e.later.moved.length} slot(s) the buy wrote that Base also wrote, ${e.later.unverified === null ? "the resale verified" : "the resale not verified"}, the pool's reserves as in evidence.later` : `later side on block ${e.later.block}: evidence ${JSON.stringify(e.later)}, rebuilt ${JSON.stringify(facts)}`);
+    return await traceLater(url, l.request, p.target as Address, e.implementation as Address | null, traced);
   } catch (err) {
-    out.push({ ok: false, line: `ERROR    rebuilding the later side on block ${e.later.block}: ${msg(err)}` });
+    out.push({ ok: false, line: `ERROR    rebuilding or tracing the later side on block ${e.later.block}: ${msg(err)}` });
+    return traced;
   }
-  return { lines: out, far };
 }
 
 /** The probes must be fresh addresses: not the router, WETH, target or owner(), without code

@@ -21,7 +21,22 @@ test("a NEAR view on a silent RPC fails within the timeout", async () => {
   }
 }, 10_000);
 
-// Placed after the previous test: that one sets NEAR_RPC before the first import of near.ts.
+// Judge pass 9: replay --check, the armer and the agent's wrapper failed on the NEAR RPC's rate limit.
+// Every role's NEAR calls go through the process's fetch, which near.ts makes wait out a 429.
+test("a NEAR RPC call through a rate limit (HTTP 429 twice): waited out, the same request resent", async () => {
+  await import("./near");
+  const bodies: string[] = [];
+  const node = Bun.serve({ port: 0, fetch: async (req) => (bodies.push(await req.text()), bodies.length <= 2 ? new Response("", { status: 429 }) : Response.json({ jsonrpc: "2.0", id: 1, result: 1 })) });
+  try {
+    const res = await fetch(`http://127.0.0.1:${node.port}`, { method: "POST", body: '{"method":"send_tx"}' });
+    expect(res.status).toBe(200);
+    expect(bodies).toEqual(Array(3).fill('{"method":"send_tx"}')); // a transaction keeps its bytes, hence its hash
+  } finally {
+    node.stop(true);
+  }
+}, 10_000);
+
+// Placed after the first test: that one sets NEAR_RPC before the first import of near.ts.
 test("a key file is written as 0600, new or already present as 0664", async () => {
   const { mkdtemp, rm, stat, writeFile } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");

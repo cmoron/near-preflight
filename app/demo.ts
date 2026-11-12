@@ -104,14 +104,33 @@ let tools: Awaited<ReturnType<typeof guardTools>> | null = null;
 let trapCheck: number | undefined;
 let witness: { id: number; signed: string | null } | null = null;
 
+/** The owner removes `token`'s entry from the shared blocklist (app/human.ts unlist, own process, the
+ *  owner's key), so that this run shows its check again. */
+async function unlist(token: Address): Promise<void> {
+  const p = Bun.spawn(["bun", "--env-file=.env", "app/human.ts", "unlist", token], { env: spawnEnv, stdout: "inherit", stderr: "inherit" });
+  if ((await p.exited) !== 0) throw new Error(`unlist ${token} failed`);
+}
+
+/** request_check on `token`. A run interrupted before its verdicts leaves checks that the sentinel judges
+ *  first in this run: one of them can list the trap again after setup. The owner then unlists it again. */
+async function requestUnlisted(token: Address): Promise<number> {
+  for (let tries = 1; ; tries++) {
+    try {
+      return await requestCheck(token, WEI);
+    } catch (e) {
+      if (tries === 3 || !reason(e).includes("target is on the shared blocklist")) throw e;
+      console.log(`[demo] ${token} was listed again, by a check an earlier run left pending: the owner removes the entry`);
+      await unlist(token);
+    }
+  }
+}
+
 await moment("setup", async () => {
-  // A previous run listed the trap on the shared blocklist: the owner removes the entry (unlist, own
-  // process) so that this run shows the check again.
+  // A previous run listed the trap on the shared blocklist: the owner removes the entry.
   for (const token of [TRAP, GUARD_TRAP, FRESH, USDC]) {
     if (!(await view<Entry | null>("get_entry", { token }))) continue;
     console.log(`[demo] ${token} is still listed by a previous run: the owner removes the entry`);
-    const p = Bun.spawn(["bun", "--env-file=.env", "app/human.ts", "unlist", token], { env: spawnEnv, stdout: "inherit", stderr: "inherit" });
-    if ((await p.exited) !== 0) throw new Error(`unlist ${token} failed`);
+    await unlist(token);
   }
   tools = KEY ? await guardTools(inbox(TRAP, USDC), WEI) : null;
 });
@@ -152,7 +171,7 @@ await moment("moment 1", async () => {
     }
   }
   console.log(`  [simulated agent] A compromised agent (scripted, not an LLM) obeys the message: it checks ${TRAP}, then calls buy anyway.`);
-  const trapId = trapCheck ?? (await requestCheck(TRAP, WEI));
+  const trapId = trapCheck ?? (await requestUnlisted(TRAP));
   const trapVerdict = await waitVerdict(trapId);
   console.log(`  [sentinel] #${trapId}: ${trapVerdict?.verdict?.toUpperCase()} (${trapVerdict?.reasons})`);
   if (trapVerdict?.verdict !== "block") process.exitCode = 1;

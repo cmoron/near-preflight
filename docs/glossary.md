@@ -20,7 +20,7 @@ One line per term, in alphabetical order. Links go to the page that explains it.
 | **escrow**             | NEAR the guard holds for nobody yet: checks awaiting a verdict, signatures in progress                                     |
 | **evidence**           | the facts a verdict rests on, posted with it; the guard stores its sha256                                                  |
 | **exit quote**         | the sentinel's simulation of an agent's sale; it sets the sale's floor                                                     |
-| **far sale**           | the late sale again, 301 to 900 s after the buy, on a local fork whose clock moves ([sentinel](sentinel.md#the-far-sale)) |
+| **far sale**           | the late sale again, 301 s and 900 s after the buy and at a delay drawn between, on a local fork whose clock moves ([sentinel](sentinel.md#the-far-sale)) |
 | **farm**               | someone who launches copies of one code, funds each pool, then pulls the liquidity                                         |
 | **first sale**         | the check's first simulated sale: 2 to 25 s after the buy, 13 % to 87 % of the tokens                                      |
 | **footprint**          | the slots whose value the buy changed, carried through others' trades of the pool re-executed after it ([sentinel](sentinel.md#others-trades-during-the-wait)) |
@@ -30,7 +30,7 @@ One line per term, in alphabetical order. Links go to the page that explains it.
 | **guard**              | the NEAR contract that holds the rules, the money and the verdicts, and builds every Base transaction                      |
 | **holding**            | tokens at the guard's address that one agent may sell                                                                      |
 | **index**              | the list of Uniswap V2 WETH pools by code template over a block window ([sentinel](sentinel.md#template-reputation))       |
-| **horizon**            | how far past the buy a check sells: `eth_simulateV1` reaches 256 blocks (51 s on Base), the far sale its drawn delay (301 to 900 s) |
+| **horizon**            | how far past the buy a check sells: `eth_simulateV1` reaches 256 blocks (51 s on Base), the far sales 900 s |
 | **index window**       | the blocks an index covers: from at least 2 h before the check's block to that block                                       |
 | **late sale**          | the check's last `eth_simulateV1` sale, of the rest: 30 to 51 s after the buy                                              |
 | **later side**         | the guard's sales again on a real block 16 to 24 s after the reference block, the buy's footprint set ([sentinel](sentinel.md#the-four-requests)) |

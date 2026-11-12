@@ -70,11 +70,14 @@ async function activity(url: string): Promise<Record<string, Hex>> {
 }
 
 const swap = parseAbi(["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256) payable"]);
-/** A third party's trade of `token`'s pool: a USERS address buys 0.01 to 0.5 ETH of it through the router. */
+/** A third party's trade of `token`'s pool: a USERS address buys 0.01 to 0.5 ETH of it through the router,
+ *  with 400,000 gas, a wallet's margin over the estimate. A trade re-executed after the guard's buy keeps
+ *  its gas limit: one estimated to the unit (anvil's default) can run out where the token does more after
+ *  the buy, and the resale is then not verified (app/later.ts). */
 function trade(token: Address): Record<string, Hex> {
   const from = pick(USERS);
   const value = 10n ** 16n + BigInt(Math.floor(Math.random() * 49e16));
-  return { from, to: ROUTER, data: encodeFunctionData({ abi: swap, args: [0n, [WETH, token], from, 9_999_999_999n] }), value: toHex(value) };
+  return { from, to: ROUTER, data: encodeFunctionData({ abi: swap, args: [0n, [WETH, token], from, 9_999_999_999n] }), value: toHex(value), gas: toHex(400_000n) };
 }
 
 /** Mines `n` blocks on the fork at `url`, each FORK_S after the one before (no sooner than now with

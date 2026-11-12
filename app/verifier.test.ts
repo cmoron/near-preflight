@@ -13,7 +13,9 @@ import {
   FACTORY,
   FAR,
   FAR_METHOD,
+  FARS,
   GUARD,
+  implementationAt,
   judge,
   judgeExit,
   labelsOf,
@@ -28,6 +30,7 @@ import {
   rpc,
   saleRanges,
   secondsAfterBuy,
+  short,
   specialOf,
   timeOf,
   WETH,
@@ -108,16 +111,17 @@ describe("sentinel verdict", () => {
     expect(r.list_target).toBe(true);
   });
   // Since Base mines five blocks a second, eth_simulateV1's 256 blocks reach 51 s past the reference
-  // block. These two traps act at 5 minutes: the far sale, the late one again 5 to 15 min after the buy
-  // on a local fork whose clock moves, meets them.
-  test("sale closed 5 minutes after the buy: block on the far sale, listed (the late sale at 51 s at most went through)", async () => {
+  // block. These two traps act at 5 minutes: the far sales, the late one again 301 s, 900 s and a drawn
+  // delay between after the buy on a local fork whose clock moves, meet them.
+  test("sale closed 5 minutes after the buy: block on the far sales, listed (the late sale at 51 s at most went through)", async () => {
     const r = await check(tokens.sell_blocked_later);
     expect(r.verdict).toBe("block");
     const far = secondsAfterBuy(CADENCE, r.evidence.sales.far);
     expect(far).toBeGreaterThan(300);
-    expect(r.reasons).toBe(`sale refused ${far} s after the buy (TransferHelper: TRANSFER_FROM_FAILED)`);
+    const refused = (s: number) => `sale refused ${s} s after the buy (TransferHelper: TRANSFER_FROM_FAILED)`;
+    expect(r.reasons).toBe([...new Set([refused(301), refused(far), refused(900)])].join(" ; "));
     expect(r.evidence.calls).toContain("sale late: ok");
-    expect(r.evidence.calls).toContain(`${FAR}sale late: revert`);
+    for (const f of FARS) expect(r.evidence.calls).toContain(`${f}sale late: revert`);
     expect(r.evidence.calls).toContain(`${FAR}${GUARD}sale late: revert`);
     expect(r.list_target).toBe(true);
   });
@@ -130,7 +134,8 @@ describe("sentinel verdict", () => {
   test("90 % tax from 5 minutes after the buy: block on the far sale, listed", async () => {
     const r = await check(tokens.sell_tax_later);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toBe(`90 % tax on the sale ${secondsAfterBuy(CADENCE, r.evidence.sales.far)} s after the buy`);
+    const taxed = (s: number) => `90 % tax on the sale ${s} s after the buy`;
+    expect(r.reasons).toBe([...new Set([taxed(301), taxed(secondsAfterBuy(CADENCE, r.evidence.sales.far)), taxed(900)])].join(" ; "));
     expect(r.list_target).toBe(true);
   });
   test("a token that freezes only the guard's public EVM address: block, but not listed (it rests on the guard's own state)", async () => {
@@ -252,6 +257,21 @@ describe("a token whose transfers read what the simulation cannot reproduce", ()
     // the fork's base fee falls by about 2 wei a block; on Base it sits at its floor in most blocks (a warn)
     expect(r.verdict).toBe("block");
     expect(r.reasons).toMatch(new RegExp(`^sale refused \\d+ s after the buy on Base's state of block ${r.evidence.later!.block}`));
+  });
+  // Review of 967d618: the later side was not traced, so a token could act there unseen. A proxy upgraded
+  // during the wait to a twin of its implementation sells as before, through an address nobody checked.
+  test("USDC upgraded during the check to a copy of its implementation at a new address: the later side traced, that address touched there, block", async () => {
+    const twin = rand();
+    const upgrade = async () => {
+      const impl = (await implementationAt(RPC, tokens.usdc as Address, BigInt(await rpc<Hex>(RPC, "eth_blockNumber", []))))!;
+      await rpc(RPC, "anvil_setCode", [twin, await rpc<Hex>(RPC, "eth_getCode", [impl, "latest"])]);
+      await rpc(RPC, "anvil_setStorageAt", [tokens.usdc, "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3", pad(twin)]); // ZeppelinOS implementation slot
+    };
+    const r = await checkNow(tokens.usdc, GUARD_EVM, probes, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(tokens.usdc, GUARD_EVM) }, upgrade);
+    expect(r.evidence.calls).toContain(`${LATER}${GUARD}sale late: ok`); // it sells there as before
+    expect(r.evidence.touched).toContain(twin.toLowerCase());
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toStartWith(`reads ${short(twin.toLowerCase())} during a transfer`);
   });
   test("USDC touches its proxy, its implementation, its pool, the router and WETH only: allow", async () => {
     const r = await check(tokens.usdc);
@@ -409,41 +429,66 @@ describe("others trade the token's pool while the check waits", () => {
       expect(r.evidence.calls.some((c) => c.startsWith(`${LATER}${GUARD}sale`) && c.endsWith("revert"))).toBe(true);
     });
   }
-  test("a slot the buy wrote moved by someone who did not trade the pool (USDC sent to the guard's address): the resale not verified, a warn that says so", async () => {
-    const erc20 = parseAbi(["function transfer(address,uint256) returns (bool)", "function balanceOf(address) view returns (uint256)"]);
-    const swap = parseAbi(["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256) payable"]);
-    await rpc(RPC, "anvil_impersonateAccount", [USERS[0]]);
-    await rpc(RPC, "eth_sendTransaction", [{ from: USERS[0], to: ROUTER, data: encodeFunctionData({ abi: swap, args: [0n, [WETH, tokens.usdc as Address], USERS[0], 9_999_999_999n] }), value: toHex(parseEther("0.1")) }]);
-    await mine(RPC, 2); // before the check: not in its wait
-    const dust = async () => {
-      await rpc(RPC, "anvil_impersonateAccount", [USERS[0]]);
-      await rpc(RPC, "eth_sendTransaction", [{ from: USERS[0], to: tokens.usdc, data: encodeFunctionData({ abi: erc20, functionName: "transfer", args: [GUARD_EVM, 1n] }) }]);
-    };
-    const r = await checkNow(tokens.usdc, GUARD_EVM, probes, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(tokens.usdc, GUARD_EVM) }, dust);
-    expect(r.evidence.later!.replayed).toEqual([]);
-    const lone = "slot 0x[0-9a-f]{4}\\.\\.[0-9a-f]{4} of 0x8335\\.\\.2913 moved in blocks \\d+\\.\\.\\d+ with no trade of the pool; the sales ran with both its changes, Base's and the buy's";
-    expect(r.evidence.later!.unverified).toMatch(new RegExp(`^${lone}$`));
-    // the guard's balance holds what it bought plus the dust: its sale goes through, the resale not verified
-    expect(r.verdict).toBe("warn");
-    expect(r.reasons).toMatch(new RegExp(`^resale not verified on Base's state of block \\d+: ${lone}`));
-    expect(r.reasons).not.toContain("sale refused");
-  });
-  // The same dust on a trap whose sale is refused on Base's later state: still a block.
-  test("dust sent to the guard during WethKey's check: its refusal on Base's later state is still a block, not listed", async () => {
+  // Review of 100ceaf: dust sent to the guard was merged as a sum (Base's change plus the buy's), exact for
+  // a balance only. A transfer to or from the guard is now re-executed after the buy, like a trade.
+  /** A check of `token` while USERS[0], holding some since before the check, sends 1 unit to the guard. */
+  const dusted = async (token: string) => {
     const erc20 = parseAbi(["function transfer(address,uint256) returns (bool)"]);
     const swap = parseAbi(["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256) payable"]);
     await rpc(RPC, "anvil_impersonateAccount", [USERS[0]]);
-    await rpc(RPC, "eth_sendTransaction", [{ from: USERS[0], to: ROUTER, data: encodeFunctionData({ abi: swap, args: [0n, [WETH, tokens.weth_key as Address], USERS[0], 9_999_999_999n] }), value: toHex(parseEther("0.1")) }]);
+    await rpc(RPC, "eth_sendTransaction", [{ from: USERS[0], to: ROUTER, data: encodeFunctionData({ abi: swap, args: [0n, [WETH, token as Address], USERS[0], 9_999_999_999n] }), value: toHex(parseEther("0.1")) }]);
     await mine(RPC, 2); // before the check: not in its wait
     const dust = async () => {
       await rpc(RPC, "anvil_impersonateAccount", [USERS[0]]);
-      await rpc(RPC, "eth_sendTransaction", [{ from: USERS[0], to: tokens.weth_key, data: encodeFunctionData({ abi: erc20, functionName: "transfer", args: [GUARD_EVM, 1n] }) }]);
+      await rpc(RPC, "eth_sendTransaction", [{ from: USERS[0], to: token, data: encodeFunctionData({ abi: erc20, functionName: "transfer", args: [GUARD_EVM, 1n] }) }]);
     };
-    const r = await checkNow(tokens.weth_key, GUARD_EVM, probes, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(tokens.weth_key, GUARD_EVM) }, dust);
-    expect(r.evidence.later!.replayed).toEqual([]);
-    expect(r.evidence.later!.unverified).toMatch(/with no trade of the pool; the sales ran with both its changes, Base's and the buy's$/);
+    return checkNow(token, GUARD_EVM, probes, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(token, GUARD_EVM) }, dust);
+  };
+  test("USDC sent to the guard's address during the check: that transfer re-executed after the buy, the resale verified, allow", async () => {
+    const r = await dusted(tokens.usdc);
+    expect(r.evidence.later!.moved.length).toBeGreaterThan(0);
+    expect(r.evidence.later!.replayed.length).toBe(1);
+    expect(r.evidence.later!.unverified).toBeNull();
+    expect(r.evidence.calls).toContain(`${LATER}${GUARD}sale late: ok`);
+    expect(r.verdict).toBe("allow");
+  });
+  // The same dust on a trap whose sale is refused on Base's later state: still a block.
+  test("dust sent to the guard during WethKey's check: re-executed, its refusal on Base's later state still a block, not listed", async () => {
+    const r = await dusted(tokens.weth_key);
+    expect(r.evidence.later!.replayed.length).toBe(1);
+    expect(r.evidence.later!.unverified).toBeNull();
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toMatch(/^sale refused \d+ s after the buy on Base's state of block \d+ \(/);
+    expect(r.list_target).toBe(false);
+  });
+  // A slot the buy wrote, moved by no transaction the check can re-execute (here the guard's balance of the
+  // healthy demo token, as an owner's write without a Transfer log): the sales run on Base's value of it,
+  // never on a sum of two changes, a state no chain had. Its sale is refused there: a block, not listed.
+  test("the guard's balance moved during the check with no transfer at all: Base's value kept, its sale refused there, block, not listed", async () => {
+    const slot = keccak256(encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [GUARD_EVM, 4n])); // DemoToken's balanceOf: slot 4
+    const seize = async () => void (await rpc(RPC, "anvil_setStorageAt", [tokens.safe, slot, toHex(1n, { size: 32 })]));
+    const r = await checkNow(tokens.safe, GUARD_EVM, probes, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(tokens.safe, GUARD_EVM) }, seize);
+    expect(r.evidence.later!.moved).toEqual([`${tokens.safe.toLowerCase()}:${slot}`]);
+    expect(r.evidence.later!.unverified).toMatch(/moved in blocks \d+\.\.\d+ with no trade of the pool nor transfer of the guard's$/);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toMatch(/^sale refused \d+ s after the buy on Base's state of block \d+ \(.*\), merged with the buy's values: slot /);
+    expect(r.list_target).toBe(false);
+  });
+  // Judge pass 9: J9ImplMark marks the previous buyer through a plain call to its implementation, in the
+  // implementation's own storage, which the later side did not carry: allow, and the real sale failed.
+  test("J9ImplMark, others buy after the guard and mark it in the implementation's own storage: re-executed, the mark carried, its sale refused there, block, not listed", async () => {
+    const swap = parseAbi(["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256) payable"]);
+    const buys = async () => {
+      for (const from of USERS.slice(1, 3)) {
+        await rpc(RPC, "anvil_impersonateAccount", [from]);
+        await rpc(RPC, "eth_sendTransaction", [{ from, to: ROUTER, data: encodeFunctionData({ abi: swap, args: [0n, [WETH, tokens.impl_mark as Address], from, 9_999_999_999n] }), value: toHex(parseEther("0.05")), gas: toHex(400_000) }]);
+      }
+    };
+    const r = await checkNow(tokens.impl_mark, GUARD_EVM, probes, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(tokens.impl_mark, GUARD_EVM) }, buys);
+    expect(r.evidence.later!.replayed.length).toBe(2);
+    expect(r.evidence.later!.unverified).toBeNull();
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toMatch(new RegExp(`^sale refused \\d+ s after the buy on Base's state of block ${r.evidence.later!.block} `));
     expect(r.list_target).toBe(false);
   });
   // Review of 73a7ad2: a trap could force the fallback and turn its refusal there into a warn. More
@@ -495,6 +540,27 @@ describe("a sale refused only early never lists", () => {
     expect(r.verdict).toBe("block");
     expect(r.list_target).toBe(true);
   });
+});
+
+// Judge pass 9: J9GuardLater closes the guard's sales 8 minutes after its buy. A block for the guard's
+// address alone lists nothing and nothing remembers it, so an agent could request checks until the far
+// sale was drawn before 8 minutes. The late sale also runs at both ends of the far range, 301 and 900 s.
+describe("a sale closed for the guard alone, minutes after its buy", () => {
+  test("J9GuardLater, the far sale drawn at 301 s: block on the sale 900 s after the buy, not listed", async () => {
+    const r = await checkNow(tokens.guard_later, GUARD_EVM, (h, c) => {
+      const p = probes(h, c);
+      return { ...p, sale: { ...p.sale, far: saleRanges(c).far[0] } };
+    }, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(tokens.guard_later, GUARD_EVM) });
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toContain("guard address only, not listed: sale refused 900 s after the buy (");
+    expect(r.list_target).toBe(false);
+  });
+  test("J9GuardLater, four checks, each with its own draws: block at every one", async () => {
+    for (let i = 0; i < 4; i++) {
+      const r = await check(tokens.guard_later);
+      expect(`${r.verdict}: ${r.reasons}`).toStartWith("block: guard address only, not listed: sale refused ");
+    }
+  }, 120_000);
 });
 
 describe("a sale's tax is what the seller receives", () => {
@@ -611,8 +677,8 @@ describe("a resale not verified on Base's later state (pure)", () => {
       { level: "block", text: "sale refused 40 s after the buy on Base's state of block 120 (revert without reason), merged with the buy's values: 11 trades of the pool, more than 10 to re-execute" },
     ]);
   });
-  test("a lone slot the buy wrote moved with no trade of the pool, the sales run with both its changes and refused there: block", () => {
-    expect(of("slot 0x0000..0008 of 0x0000..00a1 moved in blocks 101..120 with no trade of the pool; the sales ran with both its changes, Base's and the buy's")[0]?.level).toBe("block");
+  test("a slot the buy wrote moved with no transaction to re-execute, the sales refused on Base's value of it: block", () => {
+    expect(of("slot 0x0000..0008 of 0x0000..00a1 moved in blocks 101..120 with no trade of the pool nor transfer of the guard's")[0]?.level).toBe("block");
   });
   test("not verified, the sale going through there: warn, as before", () => {
     expect(of("11 trades of the pool, more than 10 to re-execute", ok)).toEqual([{ level: "warn", text: "resale not verified on Base's state of block 120: 11 trades of the pool, more than 10 to re-execute" }]);
@@ -842,14 +908,15 @@ describe("proof", () => {
     expect(guardSide.filter((b) => b.calls.length).map((b) => BigInt(b.blockOverrides.number) - block)).toEqual([1n, first, first + 1n, late, late + 1n]);
     expect(guardSide.map((b) => BigInt(b.blockOverrides.number) - block)).toEqual(Array.from({ length: Number(late) + 1 }, (_, i) => BigInt(i + 1))); // no gap for the node to fill
     expect(new Set(guardSide.map((b) => b.blockOverrides.prevRandao)).size).toBe(Number(epochOf(block + late + 1n)) + 1);
-    // the far sale: the guard's late approve and swap, then the probe's, `far` blocks after the buy, mined
-    // on a local fork at those numbers and times (a block a second here), past eth_simulateV1's 256
+    // the far sales: the guard's late approve and swap 301 s, `far` blocks and 900 s after the buy, then the
+    // probe's, mined on a local fork at those numbers and times (a block a second here), past eth_simulateV1's 256
     expect(r.request[4].method).toBe(FAR_METHOD);
     const far = (r.request[4].params[0] as { blockStateCalls: { blockOverrides: Record<string, string>; calls: { from: string; data: string }[] }[] }).blockStateCalls;
     const f = BigInt(r.evidence.sales.far);
-    expect(far.map((b) => BigInt(b.blockOverrides.number) - block)).toEqual([f, f + 1n, f, f + 1n]);
+    const side = [301n, 302n, f, f + 1n, 900n, 901n];
+    expect(far.map((b) => BigInt(b.blockOverrides.number) - block)).toEqual([...side, ...side]);
     expect(f).toBeGreaterThan(256n);
-    expect(far.map((b) => b.calls.map((c) => c.data.slice(0, 10)))).toEqual([["0x095ea7b3"], ["0x791ac947"], ["0x095ea7b3"], ["0x791ac947"]]);
+    expect(far.map((b) => b.calls.map((c) => c.data.slice(0, 10)))).toEqual(Array(6).fill([["0x095ea7b3"], ["0x791ac947"]]).flat());
     expect(far[0].calls[0] as unknown).toEqual(guardSide[Number(late) - 1].calls[0]); // the late sale's very approve
   });
   test("carries a proxy's implementation (USDC)", async () => {

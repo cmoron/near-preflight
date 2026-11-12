@@ -244,7 +244,7 @@ describe("replay of the environment facts", () => {
     expect(proof.verdict).toBe("block");
     const lines = await replay(proof, RPC);
     expect(failed(lines)).toEqual([]);
-    expect(lines.some((l) => l.ok && l.line.includes("traced again on a local fork"))).toBe(true);
+    expect(lines.some((l) => l.ok && l.line.includes("traced again on local forks"))).toBe(true);
   });
   test("evidence that omits L1Block from the addresses touched, verdict rejudged allow: detected", async () => {
     const forged = withEvidence(await proofOf(tokens.red_l1_trap as Address), (e) => {
@@ -601,18 +601,18 @@ describe("replay: the far sale", () => {
     expect(proof.request[4].method).toBe(FAR_METHOD);
     const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) });
     expect(failed(lines)).toEqual([]);
-    expect(lines.some((l) => l.ok && l.line.includes("far sale re-run on a local fork"))).toBe(true);
+    expect(lines.some((l) => l.ok && l.line.includes("far sales re-run on a local fork"))).toBe(true);
   });
   test("a far sale's result forged (refused into a pass): MISMATCH", async () => {
     const proof = structuredClone(await proofOf(tokens.sell_blocked_later as Address));
     proof.response[4] = proof.response[4].map((r) => ({ ...r, status: "0x1" as Hex }));
-    expect(failed(await replay(proof, RPC))).toEqual([expect.stringContaining("far sale re-run on a local fork")]);
+    expect(failed(await replay(proof, RPC))).toEqual([expect.stringContaining("far sales re-run on a local fork")]);
   });
   test("a far sale moved off the late sale's own transactions: refused", async () => {
     const proof = structuredClone(await proofOf(tokens.safe as Address));
     const [approve] = (proof.request as any)[4].params[0].blockStateCalls[0].calls;
     approve.data = approve.data.slice(0, -2) + "00"; // another amount approved
-    expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("request shape: the far sale is not the late sale"))).toBe(true);
+    expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("request shape: the far sales are not the late sale"))).toBe(true);
   });
   test("a far request sent as eth_simulateV1: refused before anything is sent", async () => {
     const proof = structuredClone(await proofOf(tokens.safe as Address));

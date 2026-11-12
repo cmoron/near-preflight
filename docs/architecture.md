@@ -153,9 +153,9 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 | File                                                             | Implements                                                                            |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | [`src/lib.rs`](../src/lib.rs)                                    | the guard contract and its unit tests ([contract](contract.md))                       |
-| [`app/verifier.ts`](../app/verifier.ts)                          | the check: the four requests and the far sale, judging, listing, exit quotes ([sentinel](sentinel.md)) |
-| [`app/environment.ts`](../app/environment.ts)                    | the environment rule: addresses touched, opcodes                                      |
-| [`app/later.ts`](../app/later.ts)                                | the later side: others' trades of the pool re-executed after the buy                  |
+| [`app/verifier.ts`](../app/verifier.ts)                          | the check: the four requests and the far sales, judging, listing, exit quotes ([sentinel](sentinel.md)) |
+| [`app/environment.ts`](../app/environment.ts)                    | the environment rule: addresses touched (guard side, far sales, later side), opcodes  |
+| [`app/later.ts`](../app/later.ts)                                | the later side: others' trades of the pool, and transfers to the guard, re-executed after the buy |
 | [`app/index.ts`](../app/index.ts)                                | template index and reputation; CLI to build an index                                  |
 | [`app/sentinel.ts`](../app/sentinel.ts)                          | the sentinel's loop: read checks, judge, post                                         |
 | [`app/replay.ts`](../app/replay.ts)                              | replay of a proof ([replay](replay.md))                                               |
@@ -172,7 +172,8 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 | [`app/near.ts`](../app/near.ts)                                  | NEAR access shared by every role                                                      |
 | [`app/testkit.ts`](../app/testkit.ts)                            | the guard's previews rebuilt in TypeScript, the fork's blocks and trades for the tests |
 | [`evm/fork.sh`](../evm/fork.sh), [`evm/src/`](../evm/src/)       | the local Base fork and its trap tokens                                               |
-| [`docs/index.html`](index.html), [`docs/app.js`](app.js)         | the status page                                                                       |
+| [`docs/index.html`](index.html), [`docs/landing.js`](landing.js) | the site's landing page                                                               |
+| [`docs/journal.html`](journal.html), [`docs/app.js`](app.js)     | the journal: every check of a guard and its verdict                                   |
 | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)        | CI                                                                                    |
 
 Each TypeScript module opens with a comment saying what it is for; each exported function says its

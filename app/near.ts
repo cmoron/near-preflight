@@ -2,13 +2,13 @@
 import { Account, getTransactionLastResult, JsonRpcProvider, yoctoToNear } from "near-api-js";
 import { chmod, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
+import { patientFetch } from "./verifier";
 
-// near-api-js calls fetch without a timeout: a response that never arrives used to hang a role
-// forever (seen on the sentinel). Every fetch of the process gets a timeout, unless a signal is already given.
-export const RPC_TIMEOUT_MS = Number(process.env.RPC_TIMEOUT_MS ?? 20_000);
-const rawFetch = globalThis.fetch;
-globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) =>
-  rawFetch(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(RPC_TIMEOUT_MS) })) as typeof fetch;
+// near-api-js calls fetch without a timeout (a response that never arrives hung the sentinel) and throws
+// on the RPC's rate limit (HTTP 429: replay --check, the armer and the agent failed on it). Every fetch of
+// a process that loads this file goes through patientFetch: a timeout per try, a 429 waited out and the
+// same bytes sent again.
+globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => patientFetch(input, init)) as typeof fetch;
 
 export const RPC = process.env.NEAR_RPC ?? "https://test.rpc.fastnear.com";
 export const provider = new JsonRpcProvider({ url: RPC });

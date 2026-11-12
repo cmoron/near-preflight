@@ -17,9 +17,9 @@ deploys on a local copy of Base. Each `bun test -t` needs that fork running ([re
 | Attack                                                                          | Answer (exact reason)                                                                                             | Reproduce                                |
 | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | Every sale refused after the buy, a honeypot (`sell_blocked`)                   | 🔴 listed: `sale refused N s after the buy (TransferHelper: TRANSFER_FROM_FAILED)`                                | `bun test -t "sale closed from the buy"` |
-| Sales refused from 5 min after the buy (`sell_blocked_later`)                   | 🔴 listed: `sale refused N s after the buy (…)`, on the far sale (301 to 900 s after the buy)                     | `bun test -t "sale closed 5 minutes"`    |
+| Sales refused from 5 min after the buy (`sell_blocked_later`)                   | 🔴 listed: `sale refused N s after the buy (…)`, on the far sales (301 s, 900 s, a delay drawn between)           | `bun test -t "sale closed 5 minutes"`    |
 | A 90 % tax on the sale (`sell_tax`)                                             | 🔴 listed: `90 % tax on the sale N s after the buy`                                                               | `bun test -t "90 % tax on the sale"`     |
-| A 90 % tax from 5 min after the buy (`sell_tax_later`)                          | 🔴 listed: `90 % tax on the sale N s after the buy`, on the far sale                                              | `bun test -t "90 % tax from 5 minutes"`  |
+| A 90 % tax from 5 min after the buy (`sell_tax_later`)                          | 🔴 listed: `90 % tax on the sale N s after the buy`, on the far sales                                             | `bun test -t "90 % tax from 5 minutes"`  |
 | A token that sells for itself into its pool (`pair_pull_tax`)                   | 🔴 listed: `the pool paid out more WETH than the seller received N s after the buy`                               | `bun test -t "swaps 90 % of each sale"`  |
 | A buy that delivers almost nothing                                              | 🔴 listed: `simulated buy received no tokens` or `100 % tax on the buy`, when the pool quotes 1,000 units or more | `bun test -t "delivers 500 units"`       |
 
@@ -49,7 +49,7 @@ A trap can try to sell only when it detects a simulation, or only at the moment 
 | Sells only after an approve of 2^256 - 1, or a buy of exactly 0.01 ETH (`approve_max_only`, `buy_001_only`)                | 🔴 listed: the check runs the exact bytes the guard signs                                                         | `bun test -t "Trap2"`                                 |
 | Sells only in the block right after the buy (`next_block_key`)                                                             | 🔴 listed: the first sale lands 2 to 25 s after the buy (10 to 125 blocks on Base)                                | `bun test -t "NextBlockKey"`                          |
 | Sells only half or all of the balance (`amount_trap`)                                                                      | 🔴 listed: the first sale sells 13 % to 87 %                                                                      | `bun test -t "AmountTrap"`                            |
-| Sells only at the check's late block, or only at its far block                                                             | 🔴 the late sale is drawn 30 to 51 s after the buy, the far sale 301 to 900 s; `replay --check` refuses a schedule the sentinel chose | `bun test -t "drawn in seconds"`, `-t "late sale chosen"`, `-t "far sale drawn"` |
+| Sells only at the check's late block, or only at its far block                                                             | 🔴 the late sale is drawn 30 to 51 s after the buy, a far sale 301 to 900 s, beside the far sales at 301 s and 900 s; `replay --check` refuses a schedule the sentinel chose | `bun test -t "drawn in seconds"`, `-t "late sale chosen"`, `-t "far sale drawn"` |
 | Tells a simulated block by its timestamp against its number                                                                | 🔴 not a tell: simulated blocks get the times real ones would have at the cadence measured, five a second on Base | `bun test -t "five share each second"`                |
 
 Every draw comes from the check and the hash of its reference block, the first Base block 4 s after the
@@ -67,6 +67,8 @@ record of Ethereum), the fee vaults, WETH's supply, the base fee, the Uniswap fa
 | The same, unless a pair was created between the approve and the swap, as the busy side did (`busy_tell`) | 🔴 not listed: the same, and `token calls or reads WETH and the V2 factory during a transfer: state all of Base moves` | `bun test -t "BusyTell"`                   |
 | Reads WETH's or the guard's state without a call (BALANCE, EXTCODE*), in its own code or its implementation's, in the proxy's context or the implementation's own | 🔴 not listed: `token calls or reads WETH …`, `token reads the ETH balance of the guard during a transfer …`  | `bun test -t "reads an ETH balance"`, `-t "implementation in the proxy"`, `-t "STATICCALL from the proxy"` |
 | Any of these, its pool traded by others during the check                                                 | 🔴 still blocked: others' trades are re-executed after the buy; when they cannot be, a sale refused there is a block | `bun test -t "its pool traded too"`, `-t "more trades of its pool"` |
+| Marks the guard in its implementation's own storage when someone buys after it, then refuses its sale (`impl_mark`, judge pass 9) | 🔴 not listed: `sale refused N s after the buy on Base's state of block B (…)`: every slot of the token's own addresses is carried | `bun test -t "J9ImplMark"` |
+| Upgraded during the check to code at a new address, which sells as before                               | 🔴 not listed: `reads 0x… during a transfer`: the later side is traced like the guard side | `bun test -t "upgraded during the check"` |
 
 The first row is the [environment rule](sentinel.md#environment-rule). The others meet two answers:
 
@@ -90,6 +92,8 @@ The guard's Base address is public: anyone can send it tokens or get a token to 
 | Attack                                                              | Answer (exact reason)                                                         | Reproduce                               |
 | ------------------------------------------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------- |
 | A token that freezes only the guard's address (`guard_frozen`)      | 🔴 not listed: `guard address only, not listed: sale refused …`               | `bun test -t "freezes only the guard"`  |
+| Closes the guard's sales only, 8 min after its buy (`guard_later`, judge pass 9) | 🔴 not listed, at every check: `guard address only, not listed: sale refused 900 s after the buy (…)` | `bun test -t "J9GuardLater"` |
+| Sends the guard tokens during a check                               | 🟢 USDC stays `allow`: the transfer is re-executed after the buy              | `bun test -t "USDC sent to the guard"` |
 | A sale that needs more gas than the guard signs with (`gas_hungry`) | 🔴 the simulation uses the guard's gas limit; the owner can raise it and sell | `bun test -t "more gas than the guard"` |
 
 ### Agent bypasses
@@ -129,11 +133,11 @@ The owner replaces a compromised key with `set_sentinel`; verdicts it already po
 | An honest 30-block cooldown (`cooldown_60`) | 🟢 `allow`; 🔴 not listed when the first sale is drawn within 30 blocks (about 1 check in 6 on Base, every check on the fork) | `bun test -t "Cooldown60"`                 |
 | USDC on Base mainnet                        | 🟠 `warn`: no template index covers mainnet; its pool's trades during the check re-executed (check #70), or, when that cannot be built, a second reason: resale not verified | `./check-mainnet.sh`                       |
 
-A refused sale lists the token only if the far sale is refused too: a refusal that clears with time
-blocks that check alone, or any agent could repeat checks until one lists an honest token. The price:
-a trap that sells only in the far sale's window (5 to 15 min after the buy) is blocked at every check,
-since the first and late sales always come earlier, but never reaches the shared blocklist; an honest
-token that refuses sales for more than 5 min after a buy is listed when the far sale lands within it.
+A refused sale lists the token only if the far sale at 900 s is refused too: a refusal that clears with
+time blocks that check alone, or any agent could repeat checks until one lists an honest token. The
+price: a trap that refuses sales only until 15 min after the buy is blocked at every check but never
+reaches the shared blocklist; an honest token that refuses sales for more than 15 min after a buy is
+listed.
 
 ## What it does not stop
 
@@ -141,26 +145,28 @@ token that refuses sales for more than 5 min after a buy is listed when the far 
   simulation, a block or draw it chose, or an index window not bound to the check, only afterwards, and
   only from the proof file (the sentinel may withhold it) and a node that still serves both blocks' state.
 - **A lying exit quote.** It gives the agent a lower floor (minimum output); replay catches it afterwards.
-- **What a token does after the far sale.** `eth_simulateV1` reaches 256 blocks past a real block, 51 s
-  at Base's five blocks a second; the far sale plays the late sale again 301 to 900 s after the buy, drawn
-  per check, on a local fork. A sale closed or taxed from 5 min on is caught (`bun test -t "5 minutes"`),
-  from 10 min on in about 1 check in 2, from 20 min on never. Nor is an owner action after the buy
-  (pause, tax, blacklist; any admin, not only `owner()`).
-- **What Base does during those minutes.** The far sale runs on a frozen copy of the reference block:
+- **What a token does after 900 s.** `eth_simulateV1` reaches 256 blocks past a real block, 51 s at
+  Base's five blocks a second; the far sales play the late sale again 301 s and 900 s after the buy, and
+  at a delay drawn between, on a local fork. A sale closed or taxed from 5 to 15 min on, for anyone or for
+  the guard alone, is caught at every check (`bun test -t "5 minutes"`, `-t "J9GuardLater"`); from 15 min
+  on, never. Nor is an owner action after the buy (pause, tax, blacklist; any admin, not only `owner()`).
+- **What Base does during those minutes.** The far sales run on a frozen copy of the reference block:
   others' trades, WETH, L1Block and the base fee stay as they were. A token keyed on time and on state
-  Base moves together passes it; the later side sees 16 to 24 s of real Base.
-- **Sizes and delays the check did not draw.** A sale refused only below some share, or only between 51 s
-  and the far sale's delay, passes. An agent's exit sells its holding when it chooses.
+  Base moves together passes them; the later side sees 16 to 24 s of real Base.
+- **Sizes and delays the check did not draw.** A sale refused only below some share, or only during a
+  window that reopens before 900 s and misses the drawn delays, passes. A `block` that lists nothing is
+  not remembered, so an agent may request checks until the draws miss such a window; a refusal in
+  force at 301 s or at 900 s is met at every check. An agent's exit sells its holding when it chooses.
 - **State that does not move within the later side's window.** A token keyed on its own pool or storage
   passes when nobody touched them during those 16 to 24 s, and fails once someone does. Others' trades of
   the pool are re-executed after the buy, without the transactions before them in their block; when that
   cannot be built (on Base's USDC/WETH pool, in 4 of 7 windows with a trade; in the one inspected, an
   arbitrage contract whose balance other transactions of the block also moved), the resale is not
-  verified: a `warn` when it goes through there, a `block` (not listed) when it does not. Dust sent to
-  the guard (a lone slot moved, no trade) gets both changes, Base's and the buy's: an honest token's sale
-  goes through, a trap whose slot is no balance may too (a `warn`); dust plus eleven trades of an honest
-  token's pool block that check. The later side is not traced: an address its sales touch only there
-  goes unseen.
+  verified: a `warn` when it goes through there, a `block` (not listed) when it does not. A trap can force
+  that `warn`: eleven trades of its pool, or others' trades whose gas runs out once it does more after the
+  buy. Dust sent to the guard is re-executed like a trade; dust plus ten trades of an honest token's pool
+  block that check. A transaction that touched neither the pool nor a footprint slot stays as Base ran
+  it, even if it would have acted otherwise after the buy.
 - **Front-running.** The signing request and the signed transaction are public on NEAR before anyone
   broadcasts them: a token owner can react before the swap's 300 s deadline.
 - **Template evasion.** A template is the code with `PUSH32` operands and metadata masked: changing any
@@ -180,7 +186,7 @@ Each limit, with the code that sets it: [contract](contract.md#limits), [sentine
 
 ## Closed after review
 
-Eight judge runs, a red team, automated reviews and our own security passes found the bypasses below.
+Nine judge runs, a red team, automated reviews and our own security passes found the bypasses below.
 Each now has a test.
 
 | Found                                                                                             | Closed by                                                                                                 |
@@ -237,3 +243,8 @@ Each now has a test.
 | Base's 0.2 s blocks cut the check's last sale to 51 s: a sale closed or taxed from 5 min got `allow` | the far sale: the late sale again 301 to 900 s after the buy, drawn per check, on the trace's local fork |
 | A trap forcing that merge (a write to a slot the buy wrote, eleven trades of its pool) turned its refusal there into a `warn` | a refusal there is a `block`, not listed; a lone slot moved with no trade (dust sent to the guard) gets both changes, decided by no value the token returns |
 | A token reading WETH or a balance from its implementation's own context (a plain call to it) escaped the rule | the tracer records every frame running the token's or its implementation's code, whatever the context |
+| Judge pass 9's J9ImplMark: a mark written in the implementation's own storage when others traded was not carried to the later side | every slot of the addresses the token's code may read with no finding is carried, the rule's own set |
+| Judge pass 9's J9GuardLater: a refusal for the guard alone from 8 min on was escaped by requesting checks until the far sale was drawn earlier | the far sale also runs at both ends of its range, 301 s and 900 s, at every check |
+| The later side was not traced: a token could act differently there unseen (a proxy upgraded during the check) | the later side runs on a local fork too, traced by the same rule |
+| Dust sent to the guard was merged as a sum, exact for a balance only: another slot could turn a block into a warn | no value is summed: transfers to or from the guard are re-executed after the buy; any other slot keeps Base's value |
+| The tracer's stack of code addresses could lose its place on a frame that enters without exiting | a frame's code is found by its depth |

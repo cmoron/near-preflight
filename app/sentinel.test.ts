@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Check } from "./near";
 import { step } from "./sentinel";
-import { rpc } from "./verifier";
+import { patientFetch, rpc } from "./verifier";
 
 const check = (verdict: Check["verdict"]): Check => ({
   agent: "agent.test",
@@ -43,16 +43,16 @@ test("already judged: skipped", () => {
 // Batch 9: the later side reads 100 blocks of receipts from Base's public node, which answers HTTP 429
 // to a burst; a check or a replay then failed on the first one.
 describe("rpc: a public node's rate limit", () => {
-  test("429 twice, then an answer: waited out (2 s, then 4 s); a fourth 429 is an error", async () => {
+  test("429 twice, then an answer: waited out (1 s, then 2 s); a 429 after the last wait is returned, an error for rpc", async () => {
     let calls = 0;
     const limit = { n: 2 };
     const node = Bun.serve({ port: 0, fetch: () => (++calls <= limit.n ? new Response("{}", { status: 429 }) : Response.json({ jsonrpc: "2.0", id: 1, result: "0x1" })) });
     try {
       expect(await rpc<string>(`http://127.0.0.1:${node.port}`, "eth_chainId", [])).toBe("0x1");
       expect(calls).toBe(3);
-      [calls, limit.n] = [0, 4];
-      await expect(rpc(`http://127.0.0.1:${node.port}`, "eth_chainId", [])).rejects.toThrow("eth_chainId : 429");
-      expect(calls).toBe(4);
+      [calls, limit.n] = [0, 3];
+      expect((await patientFetch(`http://127.0.0.1:${node.port}`, { method: "POST", body: "{}" }, [10, 10])).status).toBe(429); // two waits, three tries
+      expect(calls).toBe(3);
     } finally {
       node.stop(true);
     }

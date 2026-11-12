@@ -78,7 +78,7 @@ Each method's contract is its doc comment in `src/lib.rs`.
 ## Events
 
 NEP-297 logs (`EVENT_JSON:`), standard `goblin_guard`. The
-[status page](https://cmoron.github.io/near-preflight/) reads them.
+[journal](https://cmoron.github.io/near-preflight/journal.html) reads them.
 
 | About     | Events                                                                                                          |
 | --------- | --------------------------------------------------------------------------------------------------------------- |

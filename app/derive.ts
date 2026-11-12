@@ -5,6 +5,7 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha3_256 } from "@noble/hashes/sha3.js";
 import bs58 from "bs58";
 import { keccak256, toHex, getAddress, type Hex } from "viem";
+import { patientFetch } from "./verifier";
 
 export const MPC_CONTRACT = "v1.signer-prod.testnet";
 /** Guard derivation path, fixed by the contract (DERIVATION_PATH in src/lib.rs). */
@@ -30,9 +31,9 @@ export function deriveEvmAddress(masterPublicKey: string, predecessor: string, p
   return getAddress("0x" + keccak256(toHex(uncompressed.slice(1))).slice(26));
 }
 
-/** The MPC contract's master public key (view `public_key`), read from the NEAR RPC. */
+/** The MPC contract's master public key (view `public_key`), read from the NEAR RPC (a 429 waited out). */
 export async function fetchMasterPublicKey(): Promise<string> {
-  const r = await fetch(RPC, {
+  const r = await patientFetch(RPC, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
