@@ -127,7 +127,7 @@ To build an index, use a node that serves `eth_getLogs` (`mainnet.base.org` does
 | Fact       | Value                                                         |
 | ---------- | ------------------------------------------------------------- |
 | Guard      | `guard.goblin-guard-69369.testnet`                            |
-| Source     | `src/` as committed with this page                             |
+| Source     | `src/` at commit `62f0a49`                             |
 | Build      | `cargo near build non-reproducible-wasm`, near-sdk 5          |
 | Wasm       | 387,314 bytes, sha256 `0fdc4f6a…89d1`, the code hash on chain |
 | Sentinels  | `sentinel.` and `sentinel2.goblin-guard-69369.testnet`, quorum 2 of 2 |
