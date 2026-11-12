@@ -15,6 +15,7 @@ const log = (s: string) => console.log(`  [wrapper] ${s}`);
 const VERDICT_TTL_MS = 120_000; // an allow verdict expires 120 s after it is posted (same rule as the contract)
 const FRESH_MS = 180_000; // and buys only within 180 s of the check's request: the state judged is that old
 const TIMEOUT_MS = 300_000; // contract delay before refunding a request without a verdict
+const EXIT_WAIT_MS = 75_000; // an exit quote sells at the latest 60 s after its request, on one vote (exit_ready)
 
 /** Asks the guard for a verdict on buying `wei` of `target`: the sentinel simulates that very buy,
  *  and the guard signs no other amount on it. `decision`: sha256 of the model's decision package
@@ -116,11 +117,12 @@ const erc20 = parseAbi(["function balanceOf(address) view returns (uint256)"]);
 
 /** Exit: sells all of the token the guard bought for the agent's check `buyId`, back to ETH on the
  *  guard's address. The agent never picks the floor: it asks the sentinel for an exit quote
- *  (request_exit, the sale simulated from the guard's address), then sell_quoted has NEAR sign
+ *  (request_exit, the sale each sentinel simulates from the guard's address), waits until the guard
+ *  takes the quote as final (exit_ready), then sell_quoted has NEAR sign
  *  approve and swap with the floor set by the guard (quote minus the owner's 3 %), charged to the
- *  prepaid credit alone (a sale never needs buying budget). Returns the nonce of the first signed
- *  transaction and the transactions. */
-export async function sellAll(buyId: number): Promise<{ nonce: number; signed: Hex[] }> {
+ *  prepaid credit alone (a sale never needs buying budget). Returns the exit quote's id, the nonce of
+ *  the first signed transaction and the transactions. */
+export async function sellAll(buyId: number): Promise<{ id: number; nonce: number; signed: Hex[] }> {
   const bought = await view<Check>("get_check", { id: buyId });
   const token = bought.target as Address;
   const { address } = await view<{ address: Address }>("evm_config");
@@ -134,14 +136,26 @@ export async function sellAll(buyId: number): Promise<{ nonce: number; signed: H
   const amount = balance < BigInt(held) ? balance : BigInt(held);
   const { value: id, tx: asked } = await call<number>(agent, "request_exit", { buy_id: buyId, amount: amount.toString() });
   log(`request #${id} : exit quote for ${amount} ${token} (bought by #${buyId}), its price taken from credit  ${asked}`);
-  const quote = await waitVerdict(id);
+  // Every sentinel quotes, and the guard sells on the median of three quotes (the highest of fewer): at
+  // once when all quoted, 15 s after the request on the quorum's quotes, 60 s after it on one vote. The
+  // guard says when (view exit_ready); the quote that stands may change until then, so it is read after.
+  let quote = await waitVerdict(id);
+  for (const end = Date.now() + EXIT_WAIT_MS; quote && Date.now() < end; await Bun.sleep(1500)) {
+    try {
+      if (await view<boolean>("exit_ready", { id })) break;
+    } catch (e) {
+      log(`#${id} : reading exit_ready failed, will retry (${e instanceof Error ? e.message.split("\n")[0] : e})`);
+    }
+  }
+  quote = quote && (await view<Check>("get_check", { id }));
   if (quote?.verdict !== "allow") {
     log(`#${id} : no exit quote (${quote?.reasons ?? "no verdict"}): no sale by the agent; the owner's own exit stays open`);
-    return { nonce: -1, signed: [] };
+    return { id, nonce: -1, signed: [] };
   }
+  const quotes = quote.votes.filter((v) => v.quote != null).length;
   const started = Date.now();
   const { value: signed, tx, burnt } = await call<Hex[]>(agent, "sell_quoted", { id }, 0n, SELL_GAS);
   const secs = ((Date.now() - started) / 1000).toFixed(1);
-  log(`#${id} : exit quote ${formatEther(BigInt(quote.quote))} ETH; floor set by the guard at the quote minus 3 %, not by the agent: ${signed.length}/2 transactions signed by NEAR in ${secs} s (${burnt})  ${tx}`);
-  return { nonce: signed.length ? (parseTransaction(signed[0]).nonce ?? 0) : -1, signed };
+  log(`#${id} : exit quote ${formatEther(BigInt(quote.quote))} ETH (${quotes === 3 ? "the median of 3 sentinels' quotes" : `the highest of ${quotes}`}); floor set by the guard at the quote minus 3 %, not by the agent: ${signed.length}/2 transactions signed by NEAR in ${secs} s (${burnt})  ${tx}`);
+  return { id, nonce: signed.length ? (parseTransaction(signed[0]).nonce ?? 0) : -1, signed };
 }

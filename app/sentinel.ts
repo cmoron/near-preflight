@@ -12,7 +12,9 @@
 // A buy check waits for the real Base block its later side runs on: the first block 16 to 24 s after
 // the reference block, itself the first block 4 s after the request.
 // The guard takes votes: an allow or a warn needs the quorum of its sentinels to post the same one, any
-// one of them blocks. Each sentinel is this program with its own account, key and, ideally, Base node.
+// one of them blocks, and every sentinel quotes an exit (the median of three quotes stands). The guard
+// says whether a vote can still count (view vote_due). Each sentinel is this program with its own
+// account, key and, ideally, Base node.
 // Usage: [INDEX_RPC=<rpc>] [INDEX_FROM=<block>|none] bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts   (EVM_RPC: the node)
 import { formatEther, type Address, type Hex } from "viem";
 import { buildIndex, indexSha256, INDEX_SPAN_S, windowStart, type Index } from "./index";
@@ -45,21 +47,24 @@ export function indexer(e: Record<string, string | undefined>, log: (s: string) 
  *  height `lastAt`. Absent at a height >= lastAt: it existed at lastAt and no longer does, so it was
  *  erased by refund_check (ids never come back), skip it. Absent at a lower
  *  height: the node read is behind, reread it on the next round without advancing.
- *  Present: sentinel `me` judges it while its vote can still count: it has not voted, the check is
- *  undecided or blocked (a block takes votes up to the quorum: listing needs them), and fewer than
- *  `quorum` votes are in (one for an exit quote); and only if it was requested at or after `since` (ns,
- *  this sentinel's start): an older check is another run's, perhaps on another chain (a fork and Base
- *  share chain id 8453 and the demo guard), and a vote on it is either useless or wrong. Left undecided,
- *  it times out (300 s) and its agent gets its price back (refund_check). */
-export function step(check: Check | null, readAt: number, lastAt: number, me = "", quorum = 1, since = 0n): "judge" | "skip" | "retry" {
+ *  Present: this sentinel judges it when the guard says its vote can still count (`due`, the view
+ *  vote_due read at height `dueAt`: false once it voted, once the check is decided beyond a block's
+ *  reach, 300 s old, signed, or once this account is no longer a sentinel). A false read on a node
+ *  behind the one that showed the check is that node's ignorance: reread.
+ *  And only if it was requested at or after `since` (ns, this sentinel's start), which the guard cannot
+ *  know: an older check is another run's, perhaps on another chain (a fork and Base share chain id 8453
+ *  and the demo guard), and a vote on it would be of the wrong chain's state while it is still due. Left
+ *  undecided, it times out (300 s) and its agent gets its price back (refund_check). */
+export function step(check: Check | null, readAt: number, lastAt: number, due = true, dueAt = readAt, since = 0n): "judge" | "skip" | "retry" {
   if (!check) return readAt >= lastAt ? "skip" : "retry";
   if (BigInt(check.requested_ns) < since) return "skip";
-  const open = (check.verdict === null || check.verdict === "block") && check.votes.length < (check.exit_amount ? 1 : quorum);
-  return open && !check.votes.some((v) => v.sentinel === me) ? "judge" : "skip";
+  if (due) return "judge";
+  return dueAt < readAt ? "retry" : "skip";
 }
 
 /** Why the guard refused a vote, when the sentinel set or the quorum read at startup explains it:
- *  `settled`, the check took no more votes (another sentinel's decided it, or a quorum lowered since);
+ *  `settled`, the check took no more votes (the quorum's allow or warn came while this one simulated:
+ *  only a block is taken after it; or the check was sent to signing, or is 300 s old);
  *  `not a sentinel`, this account was removed from the set. Then the set and quorum are read again.
  *  Any other refusal is a failure, retried. */
 export function refusal(reason: string): "settled" | "not a sentinel" | null {
@@ -134,6 +139,11 @@ if (import.meta.main) {
 
   const judge = async (id: number, check: Check) => {
     const target = check.target as Address;
+    // Where the time goes, for the latency budget (docs/sentinel.md): from the request (NEAR's block
+    // clock) to this sentinel reading it, the check itself, then the vote's transaction.
+    const seen = Date.now();
+    const timing = (judged: number) =>
+      `read ${((seen - Number(BigInt(check.requested_ns) / 1_000_000n)) / 1000).toFixed(1)} s after the request, judged in ${((judged - seen) / 1000).toFixed(1)} s, vote included in ${((Date.now() - judged) / 1000).toFixed(1)} s`;
     // What the guard would sign for this check, built by the guard itself: the guard side simulates
     // exactly these transactions, and the guard signs only those whose hashes the verdict carries.
     const preview: Previews = {
@@ -147,8 +157,9 @@ if (import.meta.main) {
       const r = await checkExit(EVM, target, GUARD_EVM, BigInt(check.exit_amount), preview.check);
       const proof = toProof(id, target, r, NODES);
       await Bun.write(proofPath(id), JSON.stringify(proof, null, 2));
+      const judged = Date.now();
       const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code: null, list_target: false, tx_hashes: unprefixed(r.evidence.tx_hashes) });
-      log(`#${id} : exit quote ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.quote} wei for ${check.exit_amount} tokens, block ${r.evidence.block}, proof ${proofPath(id)}  ${tx}`);
+      log(`#${id} : exit quote ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.quote} wei for ${check.exit_amount} tokens, block ${r.evidence.block}, proof ${proofPath(id)}; ${timing(judged)}  ${tx}`);
       return;
     }
     log(`#${id} : ${check.agent} wants to buy ${formatEther(BigInt(check.amount_wei))} ETH of ${target}: the guard's own buy and sales simulated, liquidity, template reputation, blocklist...`);
@@ -158,12 +169,13 @@ if (import.meta.main) {
     const proof = toProof(id, target, r, NODES);
     await Bun.write(proofPath(id), JSON.stringify(proof, null, 2));
     const code = { code_hash: r.evidence.code_hash, implementation: r.evidence.implementation };
+    const judged = Date.now();
     // list_target: the guard lists the token only on a block the probe side shows after a buy that
     // succeeded, never on what the agent's amount decides (judge).
     const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code, list_target: r.list_target, tx_hashes: unprefixed(r.evidence.tx_hashes) });
     const failed = r.evidence.calls.filter((c) => c.endsWith("revert")).length;
     const later = r.evidence.later ? `, sales again on block ${r.evidence.later.block}` : "";
-    log(`#${id} : ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.calls.length} simulated calls (${failed} reverted, takeback probes included), quote ${r.evidence.quote} for ${r.evidence.amount_wei} wei, guard tx ${r.evidence.tx_hashes[0].slice(0, 10)}..., block ${r.evidence.block}${later}, proof ${proofPath(id)} (simulated on ${NODES.simulation}, logs from ${NODES.logs}), vote posted (an allow or a warn takes ${quorum})  ${tx}`);
+    log(`#${id} : ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.calls.length} simulated calls (${failed} reverted, takeback probes included), quote ${r.evidence.quote} for ${r.evidence.amount_wei} wei, guard tx ${r.evidence.tx_hashes[0].slice(0, 10)}..., block ${r.evidence.block}${later}, proof ${proofPath(id)} (simulated on ${NODES.simulation}, logs from ${NODES.logs}), vote posted (an allow or a warn takes ${quorum} of ${sentinels.length}); ${timing(judged)}  ${tx}`);
     // An entry is never overwritten: a token already listed keeps its first entry. Listing takes the
     // quorum's identical block votes: this one asks for it.
     if (r.list_target && !r.evidence.near.listed.length) log(`#${id} : this block vote asks to list ${target} on the guard's shared blocklist: listed once ${quorum === 1 ? "posted" : `${quorum} sentinels' identical votes are in`}`);
@@ -173,7 +185,10 @@ if (import.meta.main) {
     const { value: last, height: lastAt } = await viewAt<number>("last_check_id");
     while (next <= last) {
       const { value: check, height } = await viewAt<Check | null>("get_check", { id: next });
-      const what = step(check, height, lastAt, ME, quorum, since);
+      // Asked only for a check of this run: the guard's own answer on whether this vote can still count.
+      const mine = !!check && BigInt(check.requested_ns) >= since;
+      const due = mine ? await viewAt<boolean>("vote_due", { id: next, sentinel: ME }) : { value: false, height };
+      const what = step(check, height, lastAt, due.value, due.height, since);
       if (what === "retry") {
         log(`#${next} : not found on a node behind the guard (block ${height} < ${lastAt}), will reread`);
         break;
@@ -184,9 +199,9 @@ if (import.meta.main) {
         } catch (e) {
           const refused = refusal(reason(e));
           if (refused) {
-            // its proof was never posted: an exit quote takes one vote, a decided check no more
+            // its proof was never posted: the file would be no vote of this check
             await rm(proofPath(next), { force: true });
-            log(refused === "settled" ? `#${next} : the check takes no more votes (another sentinel's decided it, or the quorum changed): mine is not needed` : `#${next} : vote refused, "sentinel only"`);
+            log(refused === "settled" ? `#${next} : the check takes no more votes (the quorum's came first, it was sent to signing, or the quorum changed): mine is not needed` : `#${next} : vote refused, "sentinel only"`);
             await reread(); // stops this process once this account is out of the set
             next++;
             continue;
@@ -220,6 +235,9 @@ if (import.meta.main) {
           }
         }
       } else if (!check) log(`#${next} : refunded without a verdict, skipped`);
+      // Not due on a check of this run it has not voted on: decided without it, or this account was
+      // removed from the set, which the guard answers with the same false (reread stops this process then).
+      else if (mine && what === "skip" && !check.votes.some((v) => v.sentinel === ME)) await reread();
       next++;
     }
   };

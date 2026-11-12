@@ -1,9 +1,9 @@
 // Agent role: requests a verdict check on buying a token and waits for the sentinel's answer.
 // Usage: bun --env-file=.env --env-file=.env.agent app/check.ts <token 0x...> [ETH to buy, default 0.00001]
-// Prints the id, verdict, reasons and proof path; code 1 if no verdict.
+// Prints the id, verdict, reasons and the proof files of the votes the guard took; code 1 if no verdict.
 import { parseEther } from "viem";
 import { requestCheck, waitVerdict } from "./agent";
-import { env, reason } from "./near";
+import { env, proofsOf, reason } from "./near";
 
 const [token, eth = "0.00001"] = process.argv.slice(2);
 if (!token) {
@@ -19,4 +19,4 @@ if (!check) {
   console.error(`#${id} : no verdict`);
   process.exit(1);
 }
-console.log(`#${id} verdict=${check.verdict} reasons=${check.reasons} proof=proofs/${id}.json`);
+console.log(`#${id} verdict=${check.verdict} reasons=${check.reasons} proof=${(await proofsOf(id)).join(" ")}`);

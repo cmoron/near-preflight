@@ -61,6 +61,7 @@ async function rpc(params) {
 }
 
 let rpcCalls = 0; // RPC requests this page load made (logged to the console)
+let sentinelCount = 0; // how many sentinels the guard names (view sentinels); 0 until read, or on a guard without the view
 async function view(guard, method, args = {}) {
   rpcCalls++;
   const res = await rpc({
@@ -162,7 +163,7 @@ function lines(c, choice, addr) {
     secs(k.judged_ns) - secs(k.requested_ns) + ' s after the request. The buy quotes ' + units(k.quote) + ' token units.'];
   const votes = k.votes || [], same = votes.filter((v) => v.verdict === k.verdict).length;
   const tally = !votes.length ? '' : k.verdict === 'block' ? ' (blocked by ' + same + ' of ' + votes.length + (votes.length === 1 ? ' vote)' : ' votes)')
-    : ' (' + same + ' of ' + votes.length + (votes.length === 1 ? ' sentinel)' : ' sentinels)');
+    : ' (' + same + ' of ' + (sentinelCount || votes.length) + ((sentinelCount || votes.length) === 1 ? ' sentinel)' : ' sentinels)');
   const w3 = [el('b', { class: 'verdict ' + k.verdict }, k.verdict), tally + ', the reasons stored:',
     el('ul', { class: 'reasons' }, ...reasons.map((r) => el('li', {}, el('q', {}, r)))),
     el('small', {}, 'Stored with the sha256 of its evidence, ', mono(k.evidence_sha256), ', and the hash of the one transaction NEAR may sign, ',
@@ -283,6 +284,9 @@ async function loadSnapshot(guard) {
     const guard = await guardId();
     $('cmd-guard').textContent = guard;
     const [tokens, snap] = await Promise.all([loadTokens(), loadSnapshot(guard)]);
+    // An allow shows "2 of 3 sentinels": the guard takes no third vote once the quorum's are in.
+    const set = snap && snap.sentinels ? snap.sentinels : await view(guard, 'sentinels').catch((e) => { console.warn('sentinels not read:', e); return null; });
+    sentinelCount = set ? set.sentinels.length : 0;
     const fromSnapshot = async (note) => {
       const { last, checks } = await readChecks(guard, snap, false);
       renderLive(guard, last, checks, note);

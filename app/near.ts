@@ -87,6 +87,8 @@ export type Check = {
   amount_wei: string;
   /** Tokens the guard's address received in the simulated buy of amount_wei (decimal); the swap's minimum is it minus 3 %. */
   quote: string;
+  /** True once the check's transactions were sent to signing and came back signed, or were reserved (a
+   *  buy or an exit whose signature did not come back keeps its nonce): it is used, and takes no more votes. */
   settled: boolean;
   /** True once the owner approved this warn verdict (approve_warn). */
   approved: boolean;
@@ -99,12 +101,25 @@ export type Check = {
   /** Signing hashes (no 0x) of the transactions the sentinel simulated: the guard signs only these for the check. */
   tx_hashes: string[];
   /** The sentinels' votes, in the order posted; `verdict` is set once they decide (the quorum's identical
-   *  allow or warn, one block vote, or a disagreement). */
+   *  allow or warn, one block vote, or a disagreement). On an exit quote every sentinel votes, and `quote`,
+   *  `tx_hashes` and `evidence_sha256` above are those of the quote that stands: the median of three
+   *  allow quotes, the highest of fewer. */
   votes: Vote[];
 };
-/** One sentinel's vote on a check: its verdict and the sha256 of the evidence it posted. */
-export type Vote = { sentinel: string; verdict: "allow" | "warn" | "block"; evidence_sha256: string };
+/** One sentinel's vote on a check: its verdict and the sha256 of the evidence it posted. `quote`: on an
+ *  exit quote, the ETH out (wei) an allow vote quoted, while it counts toward the floor; null otherwise. */
+export type Vote = { sentinel: string; verdict: "allow" | "warn" | "block"; evidence_sha256: string; quote?: string | null };
 /** The guard's sentinels and how many must post the same allow or warn (view `sentinels`). */
 export type Sentinels = { sentinels: string[]; quorum: number };
+
+/** The proof files of the votes the guard holds on check `id`, in the order posted: a sentinel writes
+ *  proofs/<id>.json when it is the first the guard names, proofs/<id>.s<n>.json as the n-th
+ *  (app/sentinel.ts). A sentinel whose vote the guard did not take (the quorum's allow came first) keeps
+ *  no file, so these are the files to replay. */
+export async function proofsOf(id: number): Promise<string[]> {
+  const [{ sentinels }, check] = await Promise.all([view<Sentinels>("sentinels"), view<Check | null>("get_check", { id })]);
+  const ranks = (check?.votes ?? []).map((v) => sentinels.indexOf(v.sentinel)).filter((rank) => rank >= 0);
+  return ranks.map((rank) => `proofs/${id}${rank ? `.s${rank + 1}` : ""}.json`);
+}
 /** A shared blocklist entry (get_entry). */
 export type Entry = { reporter: string; at_ns: string; evidence_sha256: string; note: string };

@@ -147,12 +147,16 @@ const kindOf = (k) => (k.exit_amount != null ? 'sale' : 'buy');
 const verdictOf = (k) => k.verdict || 'pending';
 const signedOf = (k) => (kindOf(k) === 'sale' ? k.settled : !!k.signed_tx); // as the "Signed by NEAR" fact below
 // The sentinels' votes on a check (none on a guard deployed before the quorum): an allow or a warn takes the
-// quorum's identical votes, one block vote blocks.
+// quorum's identical votes (the guard takes no more once they are in), one block vote blocks; on an exit every
+// sentinel quotes, and the median of three quotes stands, the highest of fewer.
 const votesOf = (k) => k.votes || [];
+let sentinelSet = null; // the guard's sentinels and quorum (view sentinels), read once; null on a guard without the view
 const tally = (k) => {
   const v = votesOf(k), same = v.filter((x) => x.verdict === k.verdict).length;
-  if (kindOf(k) === 'sale') return 'an exit quote takes one vote';
-  return k.verdict === 'block' ? 'blocked by ' + same + ' of ' + v.length + (v.length === 1 ? ' vote' : ' votes') : same + ' of ' + v.length + (v.length === 1 ? ' sentinel' : ' sentinels');
+  const quotes = v.filter((x) => x.quote != null).length;
+  if (kindOf(k) === 'sale') return quotes >= 3 ? 'the median of ' + quotes + ' quotes stands' : quotes ? 'the highest of ' + plural(quotes, 'quote') + ' stands' : 'no quote';
+  const of = sentinelSet ? sentinelSet.sentinels.length : v.length;
+  return k.verdict === 'block' ? 'blocked by ' + same + ' of ' + v.length + (v.length === 1 ? ' vote' : ' votes') : same + ' of ' + of + (of === 1 ? ' sentinel' : ' sentinels');
 };
 // The guard stores at most 280 characters of reasons: a cut one ends with an ellipsis, not mid-word.
 const reasonsOf = (k) => (k.reasons && k.reasons.length >= 280 ? k.reasons + '…' : k.reasons);
@@ -185,7 +189,7 @@ function checkItem({ id, check: k }, open) {
     ['Asked', sale ? 'a sale of ' + k.exit_amount + ' token units (exit quote)' : 'a buy of ' + eth(k.amount_wei)],
     ['Requested', when(k.requested_ns)],
     ['Judged', k.verdict ? when(k.judged_ns) + ' (' + (secs(k.judged_ns) - secs(k.requested_ns)) + ' s later)' : 'not yet'],
-    ['Votes', votesOf(k).length ? el('span', { class: 'stack' }, ...(k.verdict ? [tally(k) + ':'] : []), ...votesOf(k).map((v) => el('span', { class: 'vote' }, badge(v.verdict), ' ', acct(v.sentinel), el('small', {}, ' evidence ', mono(v.evidence_sha256))))) : 'none yet'],
+    ['Votes', votesOf(k).length ? el('span', { class: 'stack' }, ...(k.verdict ? [tally(k) + ':'] : []), ...votesOf(k).map((v) => el('span', { class: 'vote' }, badge(v.verdict), ' ', acct(v.sentinel), el('small', {}, v.quote != null ? ' quotes ' + eth(v.quote) + ',' : '', ' evidence ', mono(v.evidence_sha256))))) : 'none yet'],
     ['Reasons', ...(failClosed(k) ? [FAIL_CLOSED + ': '] : []), reasonsOf(k) || '-'],
     ['Quote', sale ? eth(k.quote) + ' for the sale' : k.quote + ' token units for the buy'],
     k.verdict === 'warn' && ['Owner approval', k.approved ? 'approved' : 'not approved'],
@@ -303,7 +307,7 @@ async function renderBounds() {
     ['Max arming duration', b.max_duration_s + ' s'],
     ['Max armed over 7 days', near(b.max_7d)],
     ['Max per buy', eth(b.max_buy_wei)],
-    ['Sentinels', s ? el('span', { class: 'stack' }, ...s.sentinels.map(acct), s.quorum + ' matching votes for an allow or a warn; one block vote blocks') : 'not read on this guard'],
+    ['Sentinels', s ? el('span', { class: 'stack' }, ...s.sentinels.map(acct), s.quorum + ' of ' + s.sentinels.length + ' matching votes for an allow or a warn; one block vote blocks; an exit sells on the median of their quotes') : 'not read on this guard'],
     ['Per token, all agents', t ? 'a block closes the token for ' + span(t.quarantine_s) + '; at most ' + eth(t.cap_wei) + ' bought per ' + span(t.cap_period_s) : 'not read on this guard'],
     ['EVM address NEAR signs for', mono(e.address, e.address)],
     ['Withdrawal address (owner)', mono(e.withdraw_to, e.withdraw_to)],
@@ -317,6 +321,7 @@ async function renderBounds() {
 
 async function refresh() {
   try {
+    sentinelSet ||= await view('sentinels').catch((err) => { console.warn('sentinels not read:', err); return null; });
     const { checks, last } = await renderChecks();
     const listed = await renderBlocklist();
     renderSummary(checks, last, listed);

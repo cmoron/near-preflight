@@ -116,8 +116,9 @@ export type OnChain = {
   signed_tx?: string | null;
   /** The `list_target` the sentinel posted with the verdict. */
   list_target: boolean;
-  /** The sentinels' votes (a check read without them counts as its one vote). */
-  votes?: { sentinel: string; verdict: string; evidence_sha256: string }[];
+  /** The sentinels' votes (a check read without them counts as its one vote). `quote`: on an exit quote,
+   *  the ETH out an allow vote quoted, while it counts toward the floor. */
+  votes?: { sentinel: string; verdict: string; evidence_sha256: string; quote?: string | null }[];
 } | null;
 /** A blocklist entry as get_entry returns it, null if not listed. */
 export type OnChainEntry = { reporter: string; evidence_sha256: string } | null;
@@ -492,9 +493,9 @@ const readCheck = async (id: number) => (await import("./near")).view<OnChain>("
 const readEntry = async (token: string) => (await import("./near")).view<OnChainEntry>("get_entry", { token });
 const readQuorum = async () => (await (await import("./near")).view<{ quorum: number }>("sentinels")).quorum;
 
-/** The proof against its check's votes on the guard. Its evidence must be one vote's (sha256 `h`), and
+/** The proof of a buy check against its votes on the guard. Its evidence must be one vote's (sha256 `h`), and
  *  that vote's verdict the file's. The guard's verdict must be what the votes decide: `quorum` votes for
- *  an allow or a warn (one for an exit quote), any one for a block. A block on a vote that was not one
+ *  an allow or a warn, any one for a block. A block on a vote that was not one
  *  (another sentinel blocked, or the votes disagreed) is reported as such. The stored reasons are the
  *  deciding vote's: compared when that vote is this proof's. */
 export function voteLines(id: number, c: NonNullable<OnChain>, h: string, file: { verdict: string; reasons: string }, quorum: number): Line[] {
@@ -512,7 +513,7 @@ export function voteLines(id: number, c: NonNullable<OnChain>, h: string, file: 
     ),
   ];
   if (c.votes && mine && mine.verdict !== file.verdict) return [...out, line(false, `the vote of ${mine.sentinel} on chain is ${mine.verdict}, the file says ${file.verdict}`)];
-  const needed = c.verdict === "block" || c.exit_amount !== null ? 1 : quorum;
+  const needed = c.verdict === "block" ? 1 : quorum;
   const posted = votes.filter((v) => v.verdict === c.verdict).length;
   const deciding = c.evidence_sha256 === h || !mine;
   if (c.verdict === "block" && file.verdict !== "block" && mine) out.push(line(true, `on-chain verdict block for #${id}: this vote was ${file.verdict}; another sentinel blocked, or the votes disagreed (${c.reasons})`));
@@ -520,6 +521,46 @@ export function voteLines(id: number, c: NonNullable<OnChain>, h: string, file: 
   else if (c.verdict !== "block" && posted < needed) out.push(line(false, `on-chain verdict ${c.verdict} for #${id} rests on ${posted} vote(s): the guard's quorum is ${needed}`));
   else out.push(line(true, `on-chain verdict ${c.verdict} for #${id} matches (same target, ${deciding ? "same reasons" : "the reasons stored are the first vote's"}): ${posted} sentinel(s) posted it, ${needed} needed`));
   return out;
+}
+/** The proof of an exit quote against its check's votes on the guard. Every sentinel votes and their quotes
+ *  differ (two Base blocks), so the file is one vote among them: its evidence must be one vote's (sha256
+ *  `h`), with the file's verdict and quote. The guard's quote must be what the votes' quotes give: the
+ *  median of three, the highest of fewer. A file whose vote was a block, or a quote that does not stand,
+ *  is a vote confirmed, not a mismatch. `stands`: this file's vote is the one the check rests on (the
+ *  standing quote's, or the first block's when no sentinel quoted); only then are the stored reasons, quote
+ *  and transaction hashes its own. */
+export function exitVoteLines(id: number, c: NonNullable<OnChain>, h: string, file: { verdict: string; reasons: string; quote: string }): { lines: Line[]; stands: boolean } {
+  const line = (ok: boolean, text: string): Line => ({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
+  const votes = c.votes ?? [{ sentinel: "the sentinel", verdict: String(c.verdict), evidence_sha256: c.evidence_sha256, quote: c.verdict === "allow" ? c.quote : null }];
+  const carrying = votes.filter((v) => v.evidence_sha256 === h);
+  const mine = carrying.find((v) => v.verdict !== file.verdict) ?? carrying[0];
+  const lines = [
+    line(
+      !!mine,
+      mine
+        ? `on-chain evidence_sha256 ${h} is the sha256 of the evidence replayed above: the vote of ${carrying.map((v) => v.sentinel).join(" and ")}, ${carrying.length} of the ${votes.length} posted`
+        : `on-chain evidence_sha256 ${votes.map((v) => v.evidence_sha256).join(", ")} != sha256 of the file's evidence ${h}`,
+    ),
+  ];
+  const fail = (text: string) => ({ lines: [...lines, line(false, text)], stands: false });
+  if (!mine) return { lines, stands: false };
+  if (mine.verdict !== file.verdict) return fail(`the vote of ${mine.sentinel} on chain is ${mine.verdict}, the file says ${file.verdict}`);
+  if (mine.quote != null && mine.quote !== file.quote) return fail(`the vote of ${mine.sentinel} on chain quotes ${mine.quote} wei, the file's evidence ${file.quote}`);
+  // the quotes that count, as the guard sorts them (src/lib.rs exit_vote)
+  const quotes = votes.flatMap((v) => (v.quote != null ? [BigInt(v.quote)] : [])).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const rule = quotes.length >= 3 ? `the median of ${quotes.length} quotes` : `the highest of ${quotes.length} quote${quotes.length === 1 ? "" : "s"}`;
+  if (quotes.length) {
+    const expected = quotes[quotes.length < 3 ? quotes.length - 1 : quotes.length >> 1].toString();
+    if (c.verdict !== "allow" || c.quote !== expected) return fail(`on-chain exit quote ${c.quote} wei for #${id} is not ${rule} posted (${quotes.join(", ")}): ${expected}`);
+  }
+  const stands = c.verdict === file.verdict && c.evidence_sha256 === h;
+  if (stands && (c.reasons !== file.reasons || c.quote !== file.quote)) return fail(`on-chain "${c.verdict}: ${c.reasons}" != file "${file.verdict}: ${file.reasons}"`);
+  if (stands) lines.push(line(true, c.verdict === "allow" ? `on-chain exit quote #${id}: allow, ${c.quote} wei, ${rule}: this file's vote is the one that stands, same reasons` : `on-chain exit quote #${id}: ${c.verdict}, no sentinel quoted; this file's vote is the first, same reasons`));
+  else if (c.verdict !== "allow" && file.verdict === "allow") return fail(`on-chain verdict ${c.verdict} for #${id}, yet this file's vote is an allow`);
+  else if (c.verdict !== "allow") lines.push(line(true, `on-chain exit quote #${id}: ${c.verdict}, no sentinel quoted; the reasons stored are the first vote's`));
+  else if (!quotes.length) lines.push(line(true, `on-chain exit quote #${id}: its quotes count no more (the guard's nonce, gas or fees moved since): nothing sells on it`));
+  else lines.push(line(true, `${file.verdict === "allow" ? `this vote's quote ${file.quote} does not stand` : "this vote was a block, no quote"}: the guard sells on ${c.quote} wei, ${rule}`));
+  return { lines, stands };
 }
 /** The guard account (GUARD in .env), its EVM address derived through Chain Signatures, and its slippage
  *  bound (evm_config.max_slippage_bps, fixed at init), which sets the exit-size sale. */
@@ -791,7 +832,8 @@ async function nearFacts(proof: Proof, e: Evidence, chain: (id: number) => Promi
 
 /** Replay of an exit quote: the request is the sale checkExit builds for the target and amount from
  *  the address in the request; resent, rejudged, quote recomputed; with --check, that address must be
- *  the guard's derived one and the on-chain verdict, quote and amount the file's. */
+ *  the guard's derived one, the file one of the check's votes, the guard's quote the one its votes give
+ *  (exitVoteLines), and, when this file's vote is the one that stands, the transactions it signs the file's. */
 async function replayExit(proof: Proof, e: ExitEvidence, url: string, opts: Opts): Promise<Line[]> {
   const out: Line[] = [];
   const add = (ok: boolean, text: string) => out.push({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
@@ -844,11 +886,12 @@ async function replayExit(proof: Proof, e: ExitEvidence, url: string, opts: Opts
     const c = await (opts.chain ?? readCheck)(proof.id);
     if (!c?.verdict) out.push({ ok: false, line: `ERROR    request #${proof.id} has no verdict on chain` });
     else {
-      const h = sha256(stringToHex(proof.evidence)).slice(2);
-      add(h === c.evidence_sha256, h === c.evidence_sha256 ? `on-chain evidence_sha256 ${h} is the sha256 of the evidence replayed above` : `on-chain evidence_sha256 ${c.evidence_sha256} != ${h}`);
-      const ok = c.verdict === proof.verdict && c.reasons === proof.reasons && c.quote === e.quote && c.exit_amount === e.amount && same(c.target, proof.target);
-      add(ok, ok ? `on-chain exit quote #${proof.id}: ${c.verdict}, ${c.quote} wei for ${c.exit_amount} tokens, matches` : `on-chain #${proof.id} (${c.verdict}, quote ${c.quote}, amount ${c.exit_amount}, ${c.target}) differs from the file`);
-      out.push(...signedAsSimulated(proof.id, c, e.tx_hashes));
+      const ok = c.exit_amount === e.amount && same(c.target, proof.target);
+      add(ok, ok ? `on-chain #${proof.id} is an exit quote for ${c.exit_amount} tokens of ${c.target}, as in the file` : `on-chain #${proof.id} (amount ${c.exit_amount}, ${c.target}) differs from the file`);
+      const voted = exitVoteLines(proof.id, c, sha256(stringToHex(proof.evidence)).slice(2), { verdict: proof.verdict, reasons: proof.reasons, quote: e.quote });
+      out.push(...voted.lines);
+      // the hashes stored are the standing quote's transactions: another vote's file simulated others
+      if (voted.stands) out.push(...signedAsSimulated(proof.id, c, e.tx_hashes));
     }
   } catch (err) {
     out.push({ ok: false, line: `ERROR    reading the NEAR contract: ${msg(err)}` });

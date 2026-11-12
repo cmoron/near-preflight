@@ -35,43 +35,36 @@ test("absent at last_check_id's block or after: erased by refund_check, skipped"
   expect(step(null, 100, 100)).toBe("skip");
   expect(step(null, 101, 100)).toBe("skip");
 });
-test("without a verdict: judged, whatever the node", () => {
-  expect(step(check(null), 99, 100)).toBe("judge");
-  expect(step(check(null), 100, 100)).toBe("judge");
-});
-test("already judged: skipped", () => {
-  for (const v of ["allow", "warn", "block"] as const) expect(step(check(v), 100, 100)).toBe("skip");
-});
-// The quorum: a sentinel votes while its vote can still count.
-describe("two sentinels, both needed", () => {
-  const voted = (by: string, verdict: "allow" | "block", decided: Check["verdict"]): Check => ({ ...check(decided), votes: [{ sentinel: by, verdict, evidence_sha256: "" }] });
-  test("the other sentinel's allow is in, the check undecided: judged", () => expect(step(voted("s1.test", "allow", null), 100, 100, "s2.test", 2)).toBe("judge"));
-  test("my own vote is in: skipped", () => expect(step(voted("s2.test", "allow", null), 100, 100, "s2.test", 2)).toBe("skip"));
-  test("the other sentinel blocked: judged, a block lists only with the quorum", () => expect(step(voted("s1.test", "block", "block"), 100, 100, "s2.test", 2)).toBe("judge"));
-  test("both voted: skipped", () => {
-    const both: Check = { ...check("allow"), votes: ["s1.test", "s3.test"].map((sentinel) => ({ sentinel, verdict: "allow" as const, evidence_sha256: "" })) };
-    expect(step(both, 100, 100, "s2.test", 2)).toBe("skip");
+// The guard says whether this sentinel's vote on a check can still count (view vote_due): the quorum's
+// rules live in the contract, the sentinel no longer copies them.
+describe("the guard's vote_due decides", () => {
+  test("due: judged, whatever the verdict so far (a block may still overturn an allow, an exit takes every quote)", () => {
+    for (const v of [null, "allow", "warn", "block"] as const) expect(step(check(v), 100, 100, true)).toBe("judge");
+    expect(step({ ...check("allow"), exit_amount: "5" }, 100, 100, true)).toBe("judge");
   });
-  test("an exit quote takes one vote: skipped once another sentinel posted it", () => {
-    expect(step({ ...voted("s1.test", "allow", "allow"), exit_amount: "5" }, 100, 100, "s2.test", 2)).toBe("skip");
-    expect(step({ ...check(null), exit_amount: "5" }, 100, 100, "s2.test", 2)).toBe("judge");
+  test("not due (voted, decided, 300 s old, signed, or no longer a sentinel): skipped", () => {
+    for (const v of [null, "allow", "warn", "block"] as const) expect(step(check(v), 100, 100, false)).toBe("skip");
+  });
+  test("not due on a node behind the one that showed the check: reread, a node that has not seen the check says false", () => {
+    expect(step(check(null), 100, 100, false, 99)).toBe("retry");
+    expect(step(check(null), 100, 100, false, 100)).toBe("skip");
+    expect(step(check(null), 100, 100, true, 99)).toBe("judge"); // true is never a node's ignorance
   });
 });
 
 // Review of a274879: restarted by check-mainnet.sh, the sentinels voted mainnet warns on fork checks #8 and #9,
-// decided blocks still short of the quorum. A sentinel now votes only on checks requested since it started:
+// decided blocks still short of the quorum. A sentinel votes only on checks requested since it started:
 // its own run, on the node it was given (a fork check and a mainnet one share chain id 8453 and the guard).
+// vote_due does not know which chain a sentinel reads: a check under 300 s old is still due to it.
 describe("checks from before this sentinel started", () => {
   const at = (ns: string, c: Check): Check => ({ ...c, requested_ns: ns });
-  const blocked: Check = { ...check("block"), votes: [{ sentinel: "s1.test", verdict: "block", evidence_sha256: "" }] };
-  test("requested before its start: skipped, undecided or a block short of the quorum", () => {
-    expect(step(at("4", check(null)), 100, 100, "s2.test", 2, 5n)).toBe("skip");
-    expect(step(at("4", blocked), 100, 100, "s2.test", 2, 5n)).toBe("skip");
+  test("requested before its start: skipped, though the guard says its vote is due", () => {
+    expect(step(at("4", check(null)), 100, 100, true, 100, 5n)).toBe("skip");
+    expect(step(at("4", check("block")), 100, 100, true, 100, 5n)).toBe("skip");
   });
-  test("requested since its start: judged as before, a block short of the quorum too (listing takes it)", () => {
-    expect(step(at("5", check(null)), 100, 100, "s2.test", 2, 5n)).toBe("judge");
-    expect(step(at("6", blocked), 100, 100, "s2.test", 2, 5n)).toBe("judge");
-    expect(step(at("6", blocked), 100, 100, "s1.test", 2, 5n)).toBe("skip"); // its own vote is in
+  test("requested since its start: the guard decides", () => {
+    expect(step(at("5", check(null)), 100, 100, true, 100, 5n)).toBe("judge");
+    expect(step(at("6", check("block")), 100, 100, false, 100, 5n)).toBe("skip");
   });
 });
 // A vote the guard refuses because the sentinel set or the quorum changed since this one read them.

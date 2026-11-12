@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end demo, each role in its own process with its own key: the armer arms the agent within the
-# human's bounds, the sentinel listens to the guard, the agent (app/demo.ts) goes through four moments:
+# human's bounds, the sentinels listen to the guard, the agent (app/demo.ts) goes through four moments:
 # a poisoned message and its trap, a farm token, a healthy buy signed by NEAR, the agent's bypasses.
 # --full adds the armer's bounds, the agent's exit, a warn approved by the human, a trap aimed at the
 # guard's address, a second agent, the live injection count (with the key), the emergency stop and the
@@ -49,17 +49,18 @@ export RPC_TIMEOUT_MS=60000
 # as on Base, for the blocks each check waits for (its reference block, then the later side's).
 bun app/testkit.ts live &
 MINER=$!
-# Each sentinel builds the template index from the fork's first block up to each check's block. Two of
-# them, each its own account and key (.env.sentinel2, written by setup): an allow needs both votes. Both
-# read the fork, the one node holding the demo tokens (check-mainnet.sh gives each its own nodes).
+# Each sentinel builds the template index from the fork's first block up to each check's block. Three of
+# them, each its own account and key (.env.sentinel, .env.sentinel2, .env.sentinel3, written by setup): an
+# allow needs two matching votes, an exit takes every quote. All read the fork, the one node holding the
+# demo tokens (check-mainnet.sh gives each its own nodes).
 export INDEX_FROM=$(($(jq .fork_block evm/tokens.json) + 1))
 unset INDEX_RPC
-bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts &
-SENTINELS=($!)
-if [[ -f .env.sentinel2 ]]; then
-  bun --env-file=.env --env-file=.env.sentinel2 app/sentinel.ts &
+SENTINELS=()
+for keys in .env.sentinel .env.sentinel2 .env.sentinel3; do
+  [[ -f $keys ]] || continue
+  bun --env-file=.env --env-file=$keys app/sentinel.ts &
   SENTINELS+=($!)
-fi
+done
 trap 'kill "${SENTINELS[@]}" $MINER' EXIT
 status=0
 rm -f proofs/verify.txt

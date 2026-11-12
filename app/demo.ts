@@ -16,7 +16,7 @@ import tokens from "../evm/tokens.json";
 import { agent, BUY_GAS, guardedBuy, requestCheck, sellAll, waitVerdict } from "./agent";
 import { GUARD_PATH, MPC_CONTRACT } from "./derive";
 import { boundSystem, costUsd, guardTools, inbox, injectionRuns, MODEL, runAgent, type Step, type Usage } from "./llm";
-import { call, env, reason, view, type Entry, type Sentinels } from "./near";
+import { call, env, proofsOf, reason, view, type Entry } from "./near";
 import { WETH } from "./verifier";
 
 const FULL = process.argv.includes("--full");
@@ -36,13 +36,10 @@ const step = (s: string) => console.log(`\n${s}`);
 const buyArgs = (id: number, wei: bigint) => ({ id, amount_wei: wei.toString() });
 const spawnEnv = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
 /** Commands that verify this run, written to proofs/verify.txt for demo.sh to print last. */
-const verify: string[] = [];
-/** One command per sentinel: each wrote its own proof of the check (app/sentinel.ts), each is a vote. */
-const SENTINELS = (await view<Sentinels>("sentinels")).sentinels.length;
-const replayCmd = (id: number, what: string) => {
-  verify.push(`bun --env-file=.env app/replay.ts proofs/${id}.json --check   # ${what}`);
-  for (let n = 2; n <= SENTINELS; n++) verify.push(`bun --env-file=.env app/replay.ts proofs/${id}.s${n}.json --check   # the same check, sentinel ${n}'s vote`);
-};
+const verify: (string | { id: number; what: string })[] = [];
+/** One command per vote the guard took on the check, resolved when the run ends (proofsOf): two for an
+ *  allow (the third sentinel's same vote is not taken), up to three for a block. */
+const replayCmd = (id: number, what: string) => void verify.push({ id, what });
 
 /** An attempt that must fail for the reason `want`; otherwise the demo fails (exit code 1). */
 async function mustFail(what: string, want: string, attempt: () => Promise<unknown>, by = "contract") {
@@ -137,8 +134,9 @@ async function ready(token: Address): Promise<void> {
 }
 
 /** request_check on `token`. A run interrupted before its verdicts can leave the token's one pending
- *  check, which this run's sentinels do not judge (app/sentinel.ts step: another run's): it is waited out,
- *  at most 300 s. A listing or quarantine found then is removed again. */
+ *  check, which this run's sentinels do not judge (app/sentinel.ts step: another run's) and which the
+ *  guard takes no vote on once it is 300 s old: its slot is waited out, at most those 300 s. A listing
+ *  or quarantine found then is removed again. */
 async function requestUnlisted(token: Address): Promise<number> {
   for (let tries = 1; ; tries++) {
     try {
@@ -275,11 +273,12 @@ await moment("moment 4", async () => {
 });
 
 if (FULL) {
-  step("5. Exit: the agent sells the USDC it holds for ETH, on a sentinel exit quote; NEAR signs the approve and swap the sentinel simulated, back to the guard's address.");
+  step("5. Exit: the agent sells the USDC it holds for ETH, on the sentinels' exit quotes (the median of three); NEAR signs the approve and swap that quote's sentinel simulated, back to the guard's address.");
   await moment("moment 5", async () => {
     if (!witness?.signed) throw new Error("moment 3 bought nothing to sell");
     const exit = await sellAll(witness.id);
     if (exit.signed.length !== 2 || !(await relay("exit", exit.nonce))) process.exitCode = 1;
+    replayCmd(exit.id, "moment 5: an exit quote (each file is one sentinel's; the guard sold on the median)");
   });
 
   const TAX = tokens.sell_tax_20 as Address;
@@ -341,4 +340,9 @@ console.log(
     ? "DEMO FAILED: a moment failed (see !!! above), an attempt went through, a refusal had another reason, a healthy purchase did not complete, or a verdict was not the expected one."
     : "The trap and the farm were blocked and their buys refused; the bypasses were refused by the contract and the protocol; the healthy purchases were signed by NEAR, as simulated, and executed on the fork.",
 );
-await Bun.write("proofs/verify.txt", ["Verify this run yourself (fork still running; each command exits 0):", ...verify.map((l) => `  ${l}`), ""].join("\n"));
+const commands: string[] = [];
+for (const v of verify) {
+  if (typeof v === "string") commands.push(v);
+  else for (const [i, file] of (await proofsOf(v.id)).entries()) commands.push(`bun --env-file=.env app/replay.ts ${file} --check   # ${i ? "the same check, another sentinel's vote" : v.what}`);
+}
+await Bun.write("proofs/verify.txt", ["Verify this run yourself (fork still running; each command exits 0):", ...commands.map((l) => `  ${l}`), ""].join("\n"));

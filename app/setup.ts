@@ -1,7 +1,8 @@
 // Deploys the guard on testnet under a parent account (the human) and writes .env and one key file
-// per role (.env.agent, .env.sentinel, .env.sentinel2, .env.armer), plus .env.agent2 for a second agent
-// (demo --full). Two sentinels, both needed for an allow (quorum 2 of 2): each its own account and key.
-// Usage: bun app/setup.ts <parent>.testnet [owner EVM address for ETH withdrawals]
+// per role (.env.agent, .env.sentinel, .env.sentinel2, .env.sentinel3, .env.armer), plus .env.agent2 for a
+// second agent (demo --full). Three sentinels, two needed for an allow (quorum 2 of 3): each its own
+// account and key. WASM names another build of the contract than target/near/goblin_near.wasm.
+// Usage: [WASM=<file.wasm>] bun app/setup.ts <parent>.testnet [owner EVM address for ETH withdrawals]
 import { actions, KeyPair, nearToYocto, teraToGas } from "near-api-js";
 import { homedir } from "node:os";
 import { mkdir } from "node:fs/promises";
@@ -62,15 +63,16 @@ async function scopedKey(name: string, methods: string[], allowance: `${number}`
 }
 
 // The guard's account pays for its code: 10^19 yoctoNEAR per byte, plus its state as it grows.
-const wasm = await Bun.file("target/near/goblin_near.wasm").bytes();
+const wasm = await Bun.file(process.env.WASM || "target/near/goblin_near.wasm").bytes();
 const GUARD_NEAR = (Math.ceil(wasm.length / 1e4) / 10 + 0.3).toFixed(1) as `${number}`;
-// About 7.2 NEAR in all with the credit below: one 10 NEAR faucet account is enough, with room to spare.
+// About 8 NEAR in all with the credit below: one 10 NEAR faucet account is enough.
 const guardKey = await subAccount("guard", GUARD_NEAR); // the wasm and its account: 1 NEAR per 100 KB of storage
 // Each role's own account pays the gas of its calls: a few thousandths of NEAR each.
 await subAccount("agent", "0.3");
 await subAccount("agent2", "0.2");
 await subAccount("sentinel", "0.3");
 await subAccount("sentinel2", "0.3");
+await subAccount("sentinel3", "0.3");
 await subAccount("armer", "0.2");
 // EVM address that NEAR signs for the guard: derived from the MPC master key, the account and the fixed path.
 const evmAddress = deriveEvmAddress(await fetchMasterPublicKey(), id("guard"), GUARD_PATH);
@@ -106,14 +108,17 @@ const agentKey = await scopedKey("agent", AGENT_METHODS, "0.5");
 const agent2Key = await scopedKey("agent2", AGENT_METHODS);
 const sentinelKey = await scopedKey("sentinel", ["post_verdict"]);
 const sentinel2Key = await scopedKey("sentinel2", ["post_verdict"]);
+const sentinel3Key = await scopedKey("sentinel3", ["post_verdict"]);
 const armerKey = await scopedKey("armer", ["arm", "disarm"]);
 
 const owner = (methodName: string, args: Record<string, unknown>) => human.callFunction({ contractId: id("guard"), methodName, args });
 await owner("set_bounds", BOUNDS);
 await owner("set_token_cap", TOKEN_CAP);
-// An allow or a warn needs both sentinels to post the same one; either blocks alone.
-await owner("set_sentinels", { sentinels: [id("sentinel"), id("sentinel2")], quorum: 2 });
-console.log(`sentinels: ${id("sentinel")} and ${id("sentinel2")}, quorum 2 of 2`);
+// An allow or a warn needs two of the three sentinels to post the same one; any one blocks alone. One
+// sentinel down stops nothing, and an exit sells on the median of their three quotes.
+const SENTINELS = [id("sentinel"), id("sentinel2"), id("sentinel3")];
+await owner("set_sentinels", { sentinels: SENTINELS, quorum: 2 });
+console.log(`sentinels: ${SENTINELS.join(", ")}, quorum 2 of 3`);
 await owner("register_agent", { agent: id("agent") });
 await owner("register_agent", { agent: id("agent2") });
 console.log(`bounds: 0.5 NEAR per arming, 3600 s max, 5 NEAR per 7 days, 0.0001 ETH per buy, 0.0005 ETH per token an hour; ${id("agent")} and ${id("agent2")} registered`);
@@ -144,6 +149,7 @@ await write(".env", [
 await write(".env.agent", [`AGENT_KEY=${agentKey}`]);
 await write(".env.sentinel", [`SENTINEL_KEY=${sentinelKey}`]);
 await write(".env.sentinel2", [`SENTINEL=${id("sentinel2")}`, `SENTINEL_KEY=${sentinel2Key}`]);
+await write(".env.sentinel3", [`SENTINEL=${id("sentinel3")}`, `SENTINEL_KEY=${sentinel3Key}`]);
 await write(".env.armer", [`ARMER_KEY=${armerKey}`]);
 await write(".env.agent2", [`AGENT=${id("agent2")}`, `AGENT_KEY=${agent2Key}`]);
 // The RPC spreads reads over nodes more or less up to date: a node behind the deposit says 0.
@@ -152,4 +158,4 @@ for (let i = 0; i < 20 && credit === "0"; i++) {
   if (i) await Bun.sleep(1500);
   credit = (await provider.callFunction({ contractId: id("guard"), method: "credit_of", args: { account: id("agent") } })) as string;
 }
-console.log(`.env, .env.agent, .env.agent2, .env.sentinel, .env.sentinel2, .env.armer written; agent credit: ${credit} yoctoNEAR`);
+console.log(`.env, .env.agent, .env.agent2, .env.sentinel, .env.sentinel2, .env.sentinel3, .env.armer written; agent credit: ${credit} yoctoNEAR`);

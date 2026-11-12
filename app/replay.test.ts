@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { encodeFunctionData, maxUint256, parseAbi, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
 import { buildIndex } from "./index";
-import { replay, summary, voteLines, type OnChain, type Proof } from "./replay";
+import { exitVoteLines, replay, summary, voteLines, type OnChain, type Proof } from "./replay";
 import { CHECK_BLOCKS, localPreviews, mine, nodeBefore, SETUP_SLIPPAGE_BPS } from "./testkit";
 import { checkExit, checkToken, deriveProbes, FAR_METHOD, LATER_S, rpc, ROUTER, saleRanges, specialOf, toProof, WETH, type Cadence, type NearFacts, type Probe } from "./verifier";
 
@@ -320,6 +320,72 @@ describe("replay --check: the proof against its check's votes (pure)", () => {
   });
 });
 
+// An exit quote: every sentinel votes, quotes differ (two Base blocks), and the guard sells on the median of
+// three allow quotes, the highest of fewer. A proof is one sentinel's vote: it need not be the one that stands.
+describe("replay --check: an exit quote's proof against its votes (pure)", () => {
+  const sha = (s: string) => s.repeat(64);
+  const vote = (sentinel: string, evidence: string, quote: string | null) => ({ sentinel, verdict: quote ? "allow" : "block", evidence_sha256: sha(evidence), quote });
+  const REASONS = "exit sale simulated";
+  /** The check as the guard stores it: verdict, quote and evidence of the vote `stands` (a letter), or the first vote's block. */
+  const chain = (votes: ReturnType<typeof vote>[], stands: string | null, reasons = REASONS) => {
+    const v = votes.find((x) => x.evidence_sha256 === sha(stands ?? ""));
+    return { verdict: v ? "allow" : "block", reasons, evidence_sha256: v?.evidence_sha256 ?? votes[0].evidence_sha256, quote: v?.quote ?? "0", exit_amount: "5", votes } as unknown as NonNullable<OnChain>;
+  };
+  const failedOf = (r: { lines: { ok: boolean; line: string }[] }) => r.lines.filter((l) => !l.ok).map((l) => l.line);
+  const allow = (quote: string, reasons = REASONS) => ({ verdict: "allow", reasons, quote });
+  const three = [vote("s1", "a", "50"), vote("s2", "b", "70"), vote("s3", "c", "60")];
+
+  test("three quotes: the median stands; its file is compared in full, the two others are confirmed as votes", () => {
+    const c = chain(three, "c");
+    const mid = exitVoteLines(9, c, sha("c"), allow("60"));
+    expect(failedOf(mid)).toEqual([]);
+    expect(mid.stands).toBe(true);
+    expect(mid.lines.at(-1)!.line).toContain("the median of 3 quotes");
+    for (const [e, q] of [["a", "50"], ["b", "70"]]) {
+      const other = exitVoteLines(9, c, sha(e), allow(q));
+      expect(failedOf(other)).toEqual([]);
+      expect(other.stands).toBe(false);
+      expect(other.lines.at(-1)!.line).toContain(`this vote's quote ${q} does not stand: the guard sells on 60 wei, the median of 3 quotes`);
+    }
+  });
+  test("two quotes: the highest stands; a block beside them is a vote, no quote, and no mismatch", () => {
+    const votes = [vote("s1", "a", "50"), vote("s2", "x", null), vote("s3", "c", "60")];
+    const c = chain(votes, "c");
+    expect(exitVoteLines(9, c, sha("c"), allow("60")).lines.at(-1)!.line).toContain("the highest of 2 quotes");
+    const blocked = exitVoteLines(9, c, sha("x"), { verdict: "block", reasons: "exit sale fails", quote: "0" });
+    expect(failedOf(blocked)).toEqual([]);
+    expect(blocked.stands).toBe(false);
+    expect(blocked.lines.at(-1)!.line).toContain("this vote was a block, no quote: the guard sells on 60 wei, the highest of 2 quotes");
+  });
+  test("the guard's quote is not what its votes' quotes give: refused", () => {
+    expect(failedOf(exitVoteLines(9, chain(three, "b"), sha("b"), allow("70")))).toEqual(["MISMATCH on-chain exit quote 70 wei for #9 is not the median of 3 quotes posted (50, 60, 70): 60"]);
+  });
+  test("the file is no vote of the check, or its verdict or quote is not its vote's: refused", () => {
+    const c = chain(three, "c");
+    expect(failedOf(exitVoteLines(9, c, sha("d"), allow("60")))[0]).toContain("!= sha256 of the file's evidence");
+    expect(failedOf(exitVoteLines(9, c, sha("a"), { verdict: "block", reasons: "x", quote: "0" }))).toEqual(["MISMATCH the vote of s1 on chain is allow, the file says block"]);
+    expect(failedOf(exitVoteLines(9, c, sha("a"), allow("51")))).toEqual(["MISMATCH the vote of s1 on chain quotes 50 wei, the file's evidence 51"]);
+  });
+  test("the standing vote's file: other reasons than the stored ones are refused", () => {
+    expect(failedOf(exitVoteLines(9, chain(three, "c"), sha("c"), allow("60", "worded otherwise")))).toEqual(['MISMATCH on-chain "allow: exit sale simulated" != file "allow: worded otherwise"']);
+  });
+  test("blocks only: no quote; the first vote's file carries the stored reasons, a later one is confirmed as a vote", () => {
+    const c = chain([vote("s1", "x", null), vote("s2", "y", null)], null, "exit sale fails");
+    const first = exitVoteLines(9, c, sha("x"), { verdict: "block", reasons: "exit sale fails", quote: "0" });
+    expect(failedOf(first)).toEqual([]);
+    expect(first.stands).toBe(true);
+    const second = exitVoteLines(9, c, sha("y"), { verdict: "block", reasons: "worded otherwise", quote: "0" });
+    expect(failedOf(second)).toEqual([]);
+    expect(second.stands).toBe(false);
+  });
+  test("a check read without votes (an older guard) counts as its one vote", () => {
+    const old = { verdict: "allow", reasons: REASONS, evidence_sha256: sha("a"), quote: "50", exit_amount: "5" } as unknown as NonNullable<OnChain>;
+    const r = exitVoteLines(9, old, sha("a"), allow("50"));
+    expect(failedOf(r)).toEqual([]);
+    expect(r.stands).toBe(true);
+  });
+});
+
 describe("replay --check: on-chain verdict", () => {
   test("everything matches: hash, target (case ignored), verdict, reasons", async () => {
     const proof = await proofOf();
@@ -437,6 +503,18 @@ describe("replay of an exit quote", () => {
     const proof = await exitProof();
     const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) }));
     expect(bad.some((l) => l.includes("not the guard's derived EVM address"))).toBe(true);
+  });
+  test("--check: a file whose quote does not stand is a vote confirmed, its transactions not compared; one that stands must carry the stored hashes", async () => {
+    const proof = await exitProof();
+    const guard = { ...GUARD_INFO, evm: HOLDER };
+    const mine = { sentinel: "s1", verdict: "allow", evidence_sha256: hashOf(proof.evidence), quote: evidenceOf(proof).quote as string };
+    const higher = { sentinel: "s2", verdict: "allow", evidence_sha256: "f".repeat(64), quote: (BigInt(mine.quote) + 1n).toString() };
+    const others = ["00".repeat(32), "11".repeat(32)]; // the standing quote's transactions, not this file's
+    const lines = await replay(proof, RPC, { check: true, guard, chain: onChain(proof, { votes: [mine, higher], quote: higher.quote, evidence_sha256: higher.evidence_sha256, tx_hashes: others }) });
+    expect(failed(lines)).toEqual([]);
+    expect(lines.some((l) => l.line.includes(`this vote's quote ${mine.quote} does not stand: the guard sells on ${higher.quote} wei, the highest of 2 quotes`))).toBe(true);
+    expect(failed(await replay(proof, RPC, { check: true, guard, chain: onChain(proof, { votes: [mine] }) }))).toEqual([]);
+    expect(failed(await replay(proof, RPC, { check: true, guard, chain: onChain(proof, { votes: [mine], tx_hashes: others }) }))).toEqual([expect.stringContaining("on-chain tx hashes of #2")]);
   });
 });
 
