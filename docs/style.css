@@ -18,6 +18,8 @@ h1{font-size:2rem;line-height:1;margin:0}
 h2{font-size:1.25rem;line-height:1.3;margin:0 0 .75rem}
 h2 small{font:400 .875rem var(--sans);font-stretch:100%;letter-spacing:0;color:var(--dim);margin-left:.25rem}
 p{margin:0 0 .75rem}
+h1,h2{text-wrap:balance}
+p,li,dd{text-wrap:pretty}
 code{font-family:var(--mono);font-size:.84em;overflow-wrap:anywhere}
 a{color:inherit;text-decoration:underline;text-decoration-color:var(--dim);text-decoration-thickness:1px;text-underline-offset:.2em}
 a:hover{text-decoration-color:currentColor}
@@ -125,12 +127,15 @@ footer p{margin:.25rem 0;max-width:none}
  .log summary{padding-left:1.5rem}
  .log summary::before{left:.45rem}
  .log details .facts{padding-left:1.5rem}
- .facts code:not(.acct){font-size:.8em}
  thead{position:absolute;left:-9999px}
  table,tbody,tr,td{display:block;width:100%}
  tr{border-top:1px solid var(--rule);padding:.5rem 0}
  tr:last-child{border-bottom:1px solid var(--rule)}
  td{border:0;padding:.1rem 0}
+ #blocklist td:nth-child(n+2)::before{color:var(--dim);font-size:.8rem;margin-right:.5rem}
+ #blocklist td:nth-child(2)::before{content:"Listed by"} #blocklist td:nth-child(3)::before{content:"When"} #blocklist td:nth-child(4)::before{content:"Note"}
+ #blocklist td.empty::before{content:none}
+ .facts code:not(.acct,.blob){font-size:.7rem}
 }
 
 /* Landing page (index.html). Everything below is scoped to body.landing: the journal is untouched.
@@ -140,6 +145,7 @@ footer p{margin:.25rem 0;max-width:none}
 .landing h1{font-size:clamp(2.5rem,1.1rem + 4.4vw,4.6rem);line-height:1.02;font-stretch:125%;letter-spacing:-.025em;max-width:15em;margin:0;text-wrap:balance}
 .landing h2{font-size:clamp(1.6rem,1.2rem + 1.2vw,2.15rem);line-height:1.1;font-stretch:118%;letter-spacing:-.02em;margin:0 0 1rem}
 .landing code{font-size:.84em}
+.landing code.acct{font-size:1em}
 .landing .note{font-size:.9375rem}
 .landing .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .landing main>section{margin:0;padding:clamp(4rem,9vw,7.5rem) 0 0;border:0}
@@ -165,7 +171,9 @@ footer p{margin:.25rem 0;max-width:none}
 .landing .btn.primary{background:var(--text);color:var(--ground)}
 .landing .btn.primary:hover{background:var(--dim);border-color:var(--dim)}
 .landing .btn.small{min-height:2.25rem;padding:.35rem .85rem;font-size:.9375rem}
+.landing .btn:active{transform:translateY(1px)}
 .landing .btn:disabled{opacity:.45;cursor:default}
+.landing .btn:disabled:hover{background:none}
 .landing .pad{position:relative;display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;margin-top:clamp(1.75rem,3.5vw,2.5rem)}
 .landing .pad::before{content:"";position:absolute;left:0;right:0;bottom:0;height:6px;background:var(--text)}
 .landing .pad picture{flex:none}
@@ -181,8 +189,8 @@ footer p{margin:.25rem 0;max-width:none}
 /* The chosen token is a tab of the board: same ground, no gap between them. */
 .landing .choice{display:grid;grid-template-columns:auto minmax(0,1fr);gap:0 .85rem;padding:.75rem 1rem .75rem .9rem;cursor:pointer}
 .landing .choice:has(input:checked){background:var(--raised)}
-.landing .choice input{appearance:none;-webkit-appearance:none;margin:.42em 0 0;width:10px;height:10px;background:var(--rule);cursor:pointer;grid-row:1/3}
-.landing .choice input:checked{background:var(--text)}
+.landing .choice input{appearance:none;-webkit-appearance:none;margin:.42em 0 0;width:10px;height:10px;box-shadow:inset 0 0 0 1.5px var(--dim);cursor:pointer;grid-row:1/3}
+.landing .choice input:checked{background:var(--text);box-shadow:none}
 .landing .choice input:focus-visible{outline:2px solid var(--text);outline-offset:4px}
 .landing .choice:has(input:checked){font-weight:600}
 .landing .choice:hover .name{text-decoration:underline;text-decoration-color:var(--dim);text-underline-offset:.2em}
@@ -249,10 +257,13 @@ footer p{margin:.25rem 0;max-width:none}
 .dia .ah{fill:var(--dim)}
 .dia .badges rect{fill:var(--ground);stroke:var(--text);stroke-width:1.5}
 .dia .badges text{fill:var(--text);font:700 13px var(--mono);text-anchor:middle}
+.dia .badges .first{fill:var(--text)} .dia .badges .first+text{fill:var(--ground)}
+.dia .relay{fill:var(--text);font-weight:600}
 .landing .flow{list-style:none;counter-reset:f;margin:0;padding:0}
 .landing .flow li{counter-increment:f;position:relative;padding:0 0 1rem 2.6rem;max-width:34rem}
 .landing .flow li::before{content:counter(f);position:absolute;left:0;top:.1rem;width:1.5rem;height:1.5rem;display:grid;place-items:center;
  font:700 .8rem/1 var(--mono);border:1.5px solid var(--text);box-sizing:border-box}
+.landing .flow li:first-child::before{background:var(--text);color:var(--ground)}
 
 /* Verify it yourself */
 .landing .cmd pre{margin:0;padding:1.25rem clamp(1rem,3vw,1.75rem);background:var(--raised);font:400 .875rem/1.65 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
@@ -277,6 +288,6 @@ footer p{margin:.25rem 0;max-width:none}
  .landing .threats a{grid-template-columns:minmax(0,1fr);gap:.2rem}
  .dia .sub{display:none}
  .dia .name{font-size:20px;font-stretch:100%}
- .dia .tag{font-size:18px}
- .dia .badges text{font-size:16px}
+ .dia .tag{font-size:19px}
+ .dia .badges>*{transform-box:fill-box;transform-origin:center;transform:scale(1.4)}
 }

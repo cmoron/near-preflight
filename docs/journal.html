@@ -14,7 +14,40 @@
       content="#FFFFFF"
       media="(prefers-color-scheme: light)"
     />
-    <title>near-preflight journal</title>
+    <title>Journal of the demo guard: near-preflight</title>
+    <meta
+      name="description"
+      content="Every check of the near-preflight demo guard on NEAR testnet: the token, the verdict (allow, warn or block), its reasons and what NEAR signed."
+    />
+    <link
+      rel="canonical"
+      href="https://cmoron.github.io/near-preflight/journal.html"
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="near-preflight" />
+    <meta
+      property="og:url"
+      content="https://cmoron.github.io/near-preflight/journal.html"
+    />
+    <meta
+      property="og:title"
+      content="Journal of the demo guard: near-preflight"
+    />
+    <meta
+      property="og:description"
+      content="Every check of the near-preflight demo guard on NEAR testnet: the token, the verdict, its reasons and what NEAR signed."
+    />
+    <meta
+      property="og:image"
+      content="https://cmoron.github.io/near-preflight/assets/social-preview.png"
+    />
+    <meta property="og:image:width" content="1280" />
+    <meta property="og:image:height" content="640" />
+    <meta
+      property="og:image:alt"
+      content="near-preflight: the rocket and its go/no-go board. An AI agent cannot buy a token it could never sell."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
     <link rel="icon" id="icon" href="assets/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -45,7 +78,8 @@
         attached.
       </p>
       <p class="note">
-        The demo's tokens live on a local fork of Base (anvil), not on Base: the
+        The demo's tokens live on a local fork of the Base blockchain (anvil),
+        not on Base itself: the
         traps and the buys run there, and the guard's signed transactions are
         broadcast only to that fork. Checks from
         <code>check-mainnet.sh</code> simulate USDC on Base mainnet, read-only,
@@ -158,6 +192,7 @@
         <span id="rpc">-</span>.
       </p>
       <p>
+        <a href="./">Home</a>,
         <a href="https://github.com/cmoron/near-preflight">Repository</a>,
         <a href="https://github.com/cmoron/near-preflight#readme"
           >README with the steps to reproduce</a

@@ -205,7 +205,7 @@ function renderSteps(checks) {
     step('The verdict is stored on NEAR.', 'With the sha256 of its evidence, ', mono(k.evidence_sha256), ', a quote of ', k.quote,
       ' token units, and the hash of the only transaction the guard may sign for it, ', mono('0x' + k.tx_hashes[0]), '.'),
     step('NEAR signs.', 'The guard built the swap (router, path, recipient = its own address, floor = quote minus slippage) and NEAR Chain Signatures signed it: ',
-      atob(k.signed_tx).length + ' bytes, ready for a relay with no key to broadcast.'),
+      atob(k.signed_tx).length + ' bytes, ready to broadcast by a relay, a program that holds no key.'),
   );
   // The four lamps light in order the first time (two frames, so the new steps are painted unlit first), in the
   // verdict's colour: a warn the owner approved is signed too.
@@ -314,8 +314,9 @@ async function refresh() {
     if (offline) { console.warn('snapshot not drawn:', e); return false; }
     console.error(e);
     $('error').hidden = false;
-    if (snap && !liveOnce) $('updated').textContent = ''; // the error line says it
-    $('error').textContent = liveOnce || !snap ? 'RPC error: ' + e.message + ' (showing the last good data, retrying).'
+    if (!liveOnce) $('updated').textContent = ''; // the error line says it
+    $('error').textContent = liveOnce ? 'RPC error: ' + e.message + ' (showing the last good data, retrying).'
+      : !snap ? 'NEAR testnet could not be read: ' + e.message + ' (retrying).'
       : 'NEAR RPC is rate-limiting this browser: showing the snapshot of ' + Snapshot.utc(snap) + ' (retrying in the background).';
     return false;
   }

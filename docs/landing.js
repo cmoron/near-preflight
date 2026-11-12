@@ -166,7 +166,7 @@ function lines(c, choice, addr) {
   let w4, means;
   if (k.signed_tx) {
     w4 = (k.verdict === 'warn' ? 'The owner approved the warn. ' : '') + 'NEAR Chain Signatures signed the swap the guard built from the simulation: '
-      + bytes + ' bytes, for a relay with no key to broadcast.';
+      + bytes + ' bytes. A relay, a program that holds no key, only broadcasts them.';
     means = k.verdict === 'warn' ? 'The owner decided: approved, and NEAR signed.' : 'The agent may buy, and NEAR signed its swap.';
   } else if (k.verdict === 'block') {
     w4 = 'NEAR signed nothing: the guard refuses a buy on a block.' + (k.list_target ? ' The token went on the shared blocklist, refused to every agent.' : '');
