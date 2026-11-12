@@ -19,7 +19,10 @@ const CHOICES = [
 ];
 
 const $ = (id) => document.getElementById(id);
-const query = new URLSearchParams(location.search).get('guard');
+// ?guard= ends up in a shell command the visitor copies: only a NEAR account id is accepted.
+const ACCOUNT_ID = /^(?=.{2,64}$)(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+$/;
+const asked = new URLSearchParams(location.search).get('guard');
+const query = asked && ACCOUNT_ID.test(asked) ? asked : null;
 let rpcIdx = 0;
 
 // The guard to read: ?guard=, else DEFAULT_GUARD read from app.js, its one source; a copy here would go
