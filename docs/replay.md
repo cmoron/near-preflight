@@ -27,17 +27,20 @@ request's sha256, the amount, the guard's transaction hashes, the call labels an
 the code facts, the liquidity facts and the reputation.
 
 It also holds the NEAR facts read before the verdict, the opcodes, the addresses touched, what the
-token's code calls or reads (`token_calls`) and whose ETH balance (`token_balances`), the drawn `sales`
+token's code calls or reads (`token_calls`), whose ETH balance (`token_balances`) and which of TIMESTAMP,
+NUMBER, SELFBALANCE, CREATE and CREATE2 it ran (`token_opcodes`), the drawn `sales`
 (`first`, `bps`, `late` and the drawn `far`, in blocks at that cadence), the later side and `list_target`. The
 later side (`later`) is its real block, the slots the buy wrote that Base also wrote before it
 (`moved`), the pool's reserves there, the trades of the pool re-executed after the buy (`replayed`,
 their hashes) and why they could not be (`unverified`, or null). The state the later side set is in its request's `stateOverrides`. An exit
 quote's evidence has `kind: "exit"` and fewer fields.
 
-Where it lives: the evidence string is on NEAR, in the `verdict_posted` event, and its sha256 in the
-check. The requests and responses are not: the sentinel publishes the proof file. Two ship in
-[`app/fixtures/`](../app/fixtures/) (`usdc-base-mainnet.json` is check #103 of the demo guard: its far sales
-301 s, 456 s and 900 s after the buy, which replay mines again on a local fork).
+Where it lives: each sentinel's evidence string is on NEAR, in its `verdict_posted` event, and its
+sha256 in the check's `votes`. Each sentinel writes its own proof file: `proofs/<id>.json` for the first
+one the guard names, `proofs/<id>.s2.json` for the second. The requests and responses are not: the sentinel publishes the proof file. Two ship in
+[`app/fixtures/`](../app/fixtures/) (`usdc-base-mainnet.json` is check #21 of the demo guard: its far sales
+301 s, 312 s and 900 s after the buy, which replay mines again on a local fork; both sentinels posted
+that same evidence string).
 
 ## What `replay` recomputes
 
@@ -56,8 +59,9 @@ Without `--check`, from the file and the node only:
 - the probes are fresh addresses (no code, not the router, WETH, the target or `owner()`);
 - the verdict, reasons and `list_target`, rejudged from the results;
 - once the requests are confirmed as the sentinel's (no other input reaches it): the addresses the
-  guard's transactions touch and what the token's code calls or reads, traced again on local anvil forks
-  (the guard side, the far sales, the later side), and the buy's state change;
+  guard's transactions touch, what the token's code calls or reads and the TIMESTAMP, NUMBER,
+  SELFBALANCE and CREATE it runs, traced again on local anvil forks (the guard side, the far sales, the later
+  side), and the buy's state change;
 - the far sales: their request rebuilt from the guard and probe sides (each one's late approve and swap,
   301 s, `sales.far` blocks and 900 s after the buy), mined again on that fork, every result identical;
   the verdict is rejudged on replay's own results;
@@ -72,8 +76,11 @@ Without `--check`, from the file and the node only:
 
 With `--check`, against the guard on NEAR (`GUARD` names it):
 
-- the on-chain `evidence_sha256` is the sha256 of the evidence replayed;
-- the on-chain quote, amount, `list_target`, transaction hashes, target, verdict and reasons match;
+- one of the check's votes carries the sha256 of the evidence replayed, and that vote's verdict is the file's;
+- the guard's verdict is what the votes decide: the quorum's votes for an `allow` or a `warn` (read from
+  the view `sentinels`), one for a `block`; a block on a vote that was not one is reported as such;
+- the on-chain quote, amount, `list_target`, transaction hashes and target match, and the reasons when
+  this vote is the one whose reasons the guard stored;
 - the buy NEAR signed for the check, if any, is the transaction simulated;
 - the evidence block is the request's reference block: the first Base block at least 4 s after its time
   on NEAR;
@@ -82,7 +89,7 @@ With `--check`, against the guard on NEAR (`GUARD` names it):
 - the guard side was simulated from the guard's derived Base address;
 - the blocklist entries and the code at the last check, as the evidence cites them, are on the guard.
 
-Example, from a fresh clone ([reproduce](reproduce.md#without-an-account)): check #103 replays with 38 `OK`
+Example, from a fresh clone ([reproduce](reproduce.md#without-an-account)): check #21 replays with 39 `OK`
 lines and `REPLAY OK: verdict warn confirmed, same as on chain`.
 
 ## What replay cannot do
@@ -116,8 +123,8 @@ nonce. How long NEAR AI keeps a signature is unknown, hence the archive.
 Packages stay in `proofs/llm/`, outside the repository. One ships,
 [`app/fixtures/decision.json`](../app/fixtures/decision.json), anchored on check #1 of the demo guard.
 
-Its signed request names `guard.goblin-guard-13713.testnet`, `agent.goblin-guard-13713.testnet` and a
-NEAR block 21 s before the check; its `request_check` tool call states the 10000000000000 wei the check stores.
+Its signed request names `guard.goblin-guard-69369.testnet`, `agent.goblin-guard-69369.testnet` and a
+NEAR block 7 s before the check; its `request_check` tool call states the 10000000000000 wei the check stores.
 
 The agent may attach a package's sha256 to `request_check` or `buy`. The guard stores it and refuses it a
 second time; it neither requires nor verifies it. The guard does not rely on the model: the scripted

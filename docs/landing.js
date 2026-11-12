@@ -159,7 +159,10 @@ function lines(c, choice, addr) {
     ', and paid for the check.'];
   const w2 = ['The sentinel simulated the buy NEAR would sign, then two sales of what it bought, and answered ',
     secs(k.judged_ns) - secs(k.requested_ns) + ' s after the request. The buy quotes ' + units(k.quote) + ' token units.'];
-  const w3 = [el('b', { class: 'verdict ' + k.verdict }, k.verdict), ', the sentinel\'s reasons:',
+  const votes = k.votes || [], same = votes.filter((v) => v.verdict === k.verdict).length;
+  const tally = !votes.length ? '' : k.verdict === 'block' ? ' (blocked by ' + same + ' of ' + votes.length + (votes.length === 1 ? ' vote)' : ' votes)')
+    : ' (' + same + ' of ' + votes.length + (votes.length === 1 ? ' sentinel)' : ' sentinels)');
+  const w3 = [el('b', { class: 'verdict ' + k.verdict }, k.verdict), tally + ', the reasons stored:',
     el('ul', { class: 'reasons' }, ...reasons.map((r) => el('li', {}, el('q', {}, r)))),
     el('small', {}, 'Stored with the sha256 of its evidence, ', mono(k.evidence_sha256), ', and the hash of the one transaction NEAR may sign, ',
       mono('0x' + k.tx_hashes[0]), '.')];

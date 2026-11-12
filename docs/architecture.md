@@ -48,7 +48,7 @@ flowchart LR
 | -------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------ |
 | **guard**            | NEAR contract                              | holds credits and budgets, stores checks and verdicts, builds every Base transaction |
 | **Chain Signatures** | NEAR's threshold signing network (the MPC) | signs for the guard's derived Base address whatever the guard asks                   |
-| **sentinel**         | off-chain, one machine                     | simulates each check on a Base node, posts the verdict and its evidence's sha256     |
+| **sentinel**         | off-chain; two in the demo, on one machine | simulates each check on a Base node, posts its vote and its evidence's sha256        |
 | **agent**            | off-chain                                  | the model decides; its wrapper calls the guard with the agent's key                  |
 | **armer**            | off-chain                                  | opens the agent's armed budget within the owner's bounds                             |
 | **owner**            | a human                                    | sets bounds and roles, stops, approves a `warn`, recovers                            |
@@ -68,7 +68,7 @@ sequenceDiagram
     participant R as relay
     participant B as Base node
     A->>G: request_check<br/>(token, amount)
-    Note over G,M: 0.019 NEAR debited
+    Note over G,M: 0.025 NEAR debited
     S->>G: get_check, preview_check, preview_sale
     S->>B: 4 simulations on one block
     S->>S: trace on a local anvil fork
@@ -82,8 +82,9 @@ sequenceDiagram
     R->>B: broadcast (anvil only)
 ```
 
-The sentinel polls the guard (`last_check_id`, then `get_check`): the guard never calls out. A `block`
-posted with `list_target` also lists the token. The four requests are in [sentinel](sentinel.md#the-four-requests).
+Each sentinel polls the guard (`last_check_id`, then `get_check`): the guard never calls out. The verdict
+is set once the votes decide (both sentinels' identical `allow` in the demo; one `block` vote is enough).
+A `block` both post with `list_target` also lists the token. The four requests are in [sentinel](sentinel.md#the-four-requests).
 
 ## One exit
 
@@ -118,7 +119,7 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 | Key                           | Held by                      | Can                                                                                                         | Cannot                                                                                        |
 | ----------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | Agent function-call key       | the agent's process          | the five agent methods, gas up to a 0.5 NEAR allowance                                                      | move NEAR, call the MPC, pick route, recipient or floor, buy without a fresh `allow`          |
-| Sentinel function-call key    | the sentinel's machine       | post verdicts and exit quotes                                                                               | sign on Base, buy, move funds                                                                 |
+| Sentinel function-call keys   | each sentinel's machine (two sentinels in the demo, on one machine) | vote on checks, post exit quotes; one key alone blocks a buy, never allows one | sign on Base, buy, move funds                                                                 |
 | Armer function-call key       | the armer's process          | arm within the owner's bounds, disarm                                                                       | exceed the bounds; it can fill the 7-day cap (the owner resets)                               |
 | Owner full-access key         | the human, near-cli keychain | every rule: bounds, roles, stop, approvals, unlist, sell, withdraw ETH to the address fixed at init, settle | change the code                                                                               |
 | Guard account full-access key | the deployer's keychain      | deploy other code, move the guard's NEAR                                                                    | nothing is out of reach: production removes it ([upgrade policy](contract.md#upgrade-policy)) |
@@ -127,12 +128,15 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 
 **Who is the sentinel, and why trust it?**
 
-- It is an off-chain program the owner appoints with `set_sentinel`; in the demo, the owner runs it.
-  One key on one machine, no TEE.
+- It is an off-chain program; the owner names the sentinels and their quorum with `set_sentinels`. The
+  demo guard has two, both needed for an `allow`: one key, or the one node it reads, cannot allow alone.
+- In the demo the owner runs both on one machine, no TEE: two keys, not two parties. A real deployment
+  gives each sentinel its own machine, RPC provider and operator.
 - You need not trust it to check it: [replay](replay.md) re-derives every verdict from its proof file
   and public chain data.
-- Before anyone checks, a lying `allow` can buy a trap within 120 s ([threat model](threat-model.md#a-lying-sentinel)).
-- The owner revokes it with `set_sentinel`. Running it in an enclave is the planned next step, not shipped.
+- Before anyone checks, an `allow` every sentinel lies on can buy a trap within 120 s, up to the owner's
+  per-token cap ([threat model](threat-model.md#a-lying-sentinel)).
+- The owner replaces one with `set_sentinels`. Running them in enclaves is the planned next step, not shipped.
 
 **The model** holds no key. Its signed decision is optional evidence, not a gate
 ([attested agent](replay.md#the-attested-agent)).
@@ -154,7 +158,7 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | [`src/lib.rs`](../src/lib.rs)                                    | the guard contract and its unit tests ([contract](contract.md))                       |
 | [`app/verifier.ts`](../app/verifier.ts)                          | the check: the four requests and the far sales, judging, listing, exit quotes ([sentinel](sentinel.md)) |
-| [`app/environment.ts`](../app/environment.ts)                    | the environment rule: addresses touched (guard side, far sales, later side), opcodes  |
+| [`app/environment.ts`](../app/environment.ts)                    | the environment rule: addresses touched (guard side, far sales, later side), opcodes, what the token's own code calls and runs |
 | [`app/later.ts`](../app/later.ts)                                | the later side: others' trades of the pool, and transfers to the guard, re-executed after the buy |
 | [`app/index.ts`](../app/index.ts)                                | template index and reputation; CLI to build an index                                  |
 | [`app/sentinel.ts`](../app/sentinel.ts)                          | the sentinel's loop: read checks, judge, post                                         |

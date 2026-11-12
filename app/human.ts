@@ -17,8 +17,14 @@
 // signature was mined.
 // release: frees the signature slot when its callback never ran, 600 s after the request; what it was
 // signing is reserved at its nonces (then replace, clear).
+// lift <token>: ends the quarantine a block verdict put the token in. quarantine <seconds>: how long the
+// next blocks quarantine their token (600 to 86,400). cap <wei> <period s>: the most all agents together
+// may buy of one token over a rolling period (3,600 to 604,800 s). A guard deployed before these limits
+// (the demo guard) answers that the method does not exist.
+// sentinels <quorum> <account>...: names the guard's sentinels (1 to 3) and how many must post the same
+// allow or warn; one call replaces a compromised key.
 // The relay broadcasts withdrawals and sales: bun --env-file=.env app/relay.ts exit <nonce>.
-// Usage: bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] [max | 0x approve] | unlist <token> | holding <token> <agent> [amount] | gas <limit> | replace <nonce> | clear <nonce> refund|spent | release
+// Usage: bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] [max | 0x approve] | unlist <token> | holding <token> <agent> [amount] | gas <limit> | replace <nonce> | clear <nonce> refund|spent | release | lift <token> | quarantine <seconds> | cap <wei> <period s> | sentinels <quorum> <account>...
 import { parseTransaction, type Hex } from "viem";
 import { call, env, humanAccount, view } from "./near";
 
@@ -46,6 +52,19 @@ if (cmd === "stop") {
 } else if (cmd === "unlist" && a) {
   const { tx } = await call(human, "unlist", { token: a });
   console.log(`  [human] ${a} removed from the shared blocklist  ${tx}`);
+} else if (cmd === "lift" && a) {
+  const { tx } = await call(human, "lift_quarantine", { token: a });
+  console.log(`  [human] quarantine of ${a} lifted: it can be checked and bought again  ${tx}`);
+} else if (cmd === "quarantine" && a) {
+  const { tx } = await call(human, "set_quarantine", { seconds: Number(a) });
+  console.log(`  [human] a block verdict now quarantines its token for ${a} s  ${tx}`);
+} else if (cmd === "cap" && a && b) {
+  const { tx } = await call(human, "set_token_cap", { cap_wei: a, period_s: Number(b) });
+  console.log(`  [human] per-token cap set: ${a} wei for all agents together over ${b} s  ${tx}`);
+} else if (cmd === "sentinels" && a && b) {
+  const sentinels = process.argv.slice(4);
+  const { tx } = await call(human, "set_sentinels", { sentinels, quorum: Number(a) });
+  console.log(`  [human] sentinels now ${sentinels.join(", ")}: ${a} of ${sentinels.length} must post the same allow or warn, any one blocks  ${tx}`);
 } else if (cmd === "holding" && a && b) {
   const { tx } = await call(human, "set_holding", { token: a, agent: b, amount: c });
   console.log(`  [human] ${a} now held for ${b}: ${c} to sell (0 frees it for any agent)  ${tx}`);
@@ -68,6 +87,6 @@ if (cmd === "stop") {
   const { value, tx } = await call<Hex[]>(human, "sell", { token: a, amount: b, min_out_wei: c, approve }, 0n, EXIT_GAS);
   console.log(`  [human] sale of ${b} ${a} (approve ${d ?? "of the amount"}) signed by NEAR (${value.length}/2 tx)${relayHint(value)}  ${tx}`);
 } else {
-  console.error("usage: bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] [max | 0x approve] | unlist <token> | holding <token> <agent> [amount] | gas <limit> | replace <nonce> | clear <nonce> refund|spent | release");
+  console.error("usage: bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] [max | 0x approve] | unlist <token> | holding <token> <agent> [amount] | gas <limit> | replace <nonce> | clear <nonce> refund|spent | release | lift <token> | quarantine <seconds> | cap <wei> <period s> | sentinels <quorum> <account>...");
   process.exit(2);
 }

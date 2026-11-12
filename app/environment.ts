@@ -18,10 +18,18 @@
 //   Others' balances move with all of Base, and the guard's own with the L1 fee no simulation bills.
 // - `opcodes`: the opcodes of the token's and its implementation's reachable code whose value no
 //   simulation can guarantee: at least a warn, the owner decides.
-// TIMESTAMP and NUMBER stay allowed: the simulated blocks follow the cadence measured at the check up to
-// the late sale (30 to 51 s after the buy), and the far sales' blocks (301 s, 900 s and a drawn delay
-// between, on the local fork trace starts) get the number and time real ones would have; the sales there
-// exercise them.
+// Two more facts turn the rule into an allow-list of what the token's own code did on the traced runs (the
+// guard's buy, approves and sales on the reference block, the far sales, and the later side's sales):
+// - it calls nothing but its implementation and the precompiles (`token_calls` again): its pool, the
+//   router or the guard reached from its own frames is a warn naming them. Keyed on its pool's reserves a
+//   token sells until anyone trades, and `pair.sync()` then `getReserves()` hands it the current time with
+//   no TIMESTAMP of its own.
+// - `token_opcodes`: it executes no TIMESTAMP, NUMBER or SELFBALANCE there (TOKEN_OPCODES): a warn naming
+//   them. What ran, not what the bytecode holds: a permit's deadline check the guard's path never takes is
+//   not executed. The sales drawn up to 900 s after the buy stay as a second line.
+// - it creates no contract there (CREATE, CREATE2, in `token_opcodes` too): a block. Init code runs at a new
+//   address, in frames that are not the token's and that no access list names: it could read the time or
+//   the pool for the token and hand the answer back as revert data.
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,8 +38,9 @@ import { ETH_LOGS, FACTORY, ROUTER, rpc, short, WETH, type Finding, type Liquidi
 
 /** Opcodes whose value the simulation cannot guarantee for a future real block or transaction. GAS is
  *  not one (solc emits it before every external call, and the simulation gives each transaction the
- *  guard's own gas limit); SELFBALANCE is the token's own state, as reproducible as its storage; BALANCE
- *  and EXTCODE* name an address, which `touched` judges. */
+ *  guard's own gas limit); TIMESTAMP, NUMBER and SELFBALANCE are judged on what the traced transactions
+ *  executed (TOKEN_OPCODES), since most tokens hold a TIMESTAMP in a path the guard never takes; BALANCE
+ *  and EXTCODE* name an address, which `touched` and `token_calls` judge. */
 export const ENV_OPCODES: Record<number, string> = {
   0x32: "ORIGIN",
   0x3a: "GASPRICE",
@@ -43,6 +52,11 @@ export const ENV_OPCODES: Record<number, string> = {
   0x49: "BLOBHASH",
   0x4a: "BLOBBASEFEE",
 };
+/** Opcodes the token's own frames may not execute on the guard's traced transactions: the time, the block
+ *  number and its own ETH balance, which anyone can raise (rule 2, a warn); and CREATE, CREATE2, whose
+ *  init code would run outside its frames (a block). By opcode number, as the tracer reports them (REACH). */
+export const TOKEN_OPCODES: Record<number, string> = { 0x42: "TIMESTAMP", 0x43: "NUMBER", 0x47: "SELFBALANCE", 0xf0: "CREATE", 0xf5: "CREATE2" };
+const CREATES = ["CREATE", "CREATE2"];
 /** STOP, JUMP, RETURN, REVERT, INVALID, SELFDESTRUCT: what follows runs only from a JUMPDEST. */
 const HALTS = new Set([0x00, 0x56, 0xf3, 0xfd, 0xfe, 0xff]);
 
@@ -80,7 +94,7 @@ export const ownedBy = (token: Address, implementation: Address | null, pair: Ad
 /** Pure: the environment findings of a check (replay rejudges them). `touched`, `token_calls` and
  *  `token_balances` are null when nothing was traced (no pool: the check stopped before any sale). */
 export function environmentFindings(
-  f: { opcodes: string[]; touched: string[] | null; token_calls: string[] | null; token_balances: string[] | null; implementation: Address | null; liquidity: Liquidity },
+  f: { opcodes: string[]; touched: string[] | null; token_calls: string[] | null; token_balances: string[] | null; token_opcodes: string[] | null; implementation: Address | null; liquidity: Liquidity },
   w: { token: Address; guard: Address },
 ): Finding[] {
   const out: Finding[] = [];
@@ -96,6 +110,18 @@ export function environmentFindings(
   if (shared.length) out.push({ level: "block", text: `token calls or reads ${shared.map((a) => (a === WETH.toLowerCase() ? "WETH" : "the V2 factory")).join(" and ")} during a transfer: state all of Base moves` });
   const read = f.token_balances ?? [];
   if (read.length) out.push({ level: "block", text: `token reads the ETH balance of ${read.slice(0, 3).map((a) => (a === w.guard.toLowerCase() ? "the guard" : short(a))).join(", ")} during a transfer: a value no simulation can match` });
+  // Rule 1: of the expected addresses, the token's own code may reach its implementation only (and the
+  // precompiles). A warn, not a block: a token that sells its fees through the router, or syncs its pool
+  // after a burn, is honest; the owner reads what it reaches and decides.
+  const own: [string | null | undefined, string][] = [[f.liquidity?.pair, "its pool"], [ROUTER, "the router"], [w.guard, "the guard"]];
+  // (an address whose balance it read is already a block above, and `token_calls` holds those too)
+  const reached = own.filter(([a]) => a && (f.token_calls ?? []).includes(a.toLowerCase()) && !read.includes(a.toLowerCase())).map(([, name]) => name);
+  if (reached.length) out.push({ level: "warn", text: `token calls or reads ${reached.join(", ")} during a transfer: ${reached[0] === "the guard" ? "outside its implementation and the precompiles" : "reserves and a clock any trade moves"}` });
+  // Rule 2: what it executed there, not what its bytecode holds. A warn: a launch cooldown is honest.
+  const ops = (f.token_opcodes ?? []).filter((o) => !CREATES.includes(o));
+  if (ops.length) out.push({ level: "warn", text: `token reads ${ops.join(", ")} during a transfer: it can act otherwise after the check's last sale` });
+  // Init code is code the rules above do not read: no honest transfer deploys a contract.
+  if ((f.token_opcodes ?? []).some((o) => CREATES.includes(o))) out.push({ level: "block", text: "token creates a contract during a transfer: code no rule reads" });
   return out;
 }
 
@@ -110,15 +136,16 @@ export const TRACE_MARGIN = 10n ** 18n;
  *  side gives the guard what its own calls spend); addresses lowercase, keys sorted. */
 export type Diff = { storage: Record<string, Record<string, [Hex, Hex]>>; balance: Record<string, [Hex, Hex]> };
 /** `touched`: every address the guard's transactions read or call; `calls`: what the token's own code
- *  reaches in them (REACH); `balances`: the addresses whose ETH balance it reads, itself aside; `diff`:
- *  what its buy wrote. */
-export type Trace = { touched: Address[]; calls: Address[]; balances: Address[]; diff: Diff };
+ *  reaches in them (REACH); `balances`: the addresses whose ETH balance it reads, itself aside; `opcodes`:
+ *  the TOKEN_OPCODES it executes in them, sorted; `diff`: what its buy wrote. */
+export type Trace = { touched: Address[]; calls: Address[]; balances: Address[]; opcodes: string[]; diff: Diff };
 /** What a run's calls touch and what the token's code reaches in them (Trace without the buy's diff). */
-export type Reach = Pick<Trace, "touched" | "calls" | "balances">;
+export type Reach = Pick<Trace, "touched" | "calls" | "balances" | "opcodes">;
 type Account = { balance?: Hex; storage?: Record<string, Hex> };
 /** A JS tracer (anvil runs geth's API) of what the token's code reaches: the target of each CALL,
  *  CALLCODE, DELEGATECALL, STATICCALL ("c:"), EXTCODESIZE, EXTCODECOPY, EXTCODEHASH ("c:") and BALANCE
- *  ("b:"), in every frame run in TOKEN's context (a proxy's implementation runs there) or running TOKEN's
+ *  ("b:"), and each TOKEN_OPCODES it executes ("o:" and the opcode's number; a BALANCE of the frame's own
+ *  address or of TOKEN is SELFBALANCE by another opcode; a CREATE's init code is not its frame), in every frame run in TOKEN's context (a proxy's implementation runs there) or running TOKEN's
  *  or IMPL's code, whatever its context: a plain call from the token to its implementation (an expected
  *  address) runs the implementation in its own. `code` holds each depth's code address: a frame's first
  *  step is one level below the step before it, and runs the code of the frame entered last (`next`, the
@@ -131,19 +158,23 @@ const REACH = `{seen: {}, code: {}, next: null, last: -1, enter: function (f) { 
   this.last = depth;
   this.next = null;
   var op = log.op.toNumber();
+  var own = op == 0x42 || op == 0x43 || op == 0x47 || op == 0xf0 || op == 0xf5;
   var at = op == 0x31 || op == 0x3b || op == 0x3c || op == 0x3f ? 0 : op == 0xf1 || op == 0xf2 || op == 0xf4 || op == 0xfa ? 1 : -1;
-  if (at < 0) return;
+  if (at < 0 && !own) return;
   var context = toHex(log.contract.getAddress());
   var code = this.code[depth];
   if (context != "TOKEN" && code != "TOKEN" && code != "IMPL") return;
-  this.seen[(op == 0x31 ? "b:" : "c:") + toHex(toAddress(log.stack.peek(at).toString(16)))] = true;
+  var target = own ? "" : toHex(toAddress(log.stack.peek(at).toString(16)));
+  if (own || (op == 0x31 && (target == context || target == "TOKEN"))) this.seen["o:" + (own ? op : 0x47)] = true;
+  else this.seen[(op == 0x31 ? "b:" : "c:") + target] = true;
 }, fault: function () {}, result: function () { return Object.keys(this.seen); }}`;
 /** What the code of `token` and of its `implementation` reaches in mined transaction `hash` (REACH):
- *  [address, balance read]. */
-export async function reachOf(url: string, hash: Hex, token: Address, implementation: Address | null): Promise<[string, boolean][]> {
+ *  `reads`, [address, balance read], and `opcodes`, the TOKEN_OPCODES it executes (names). */
+export async function reachOf(url: string, hash: Hex, token: Address, implementation: Address | null): Promise<{ reads: [string, boolean][]; opcodes: string[] }> {
   const tracer = REACH.replaceAll("TOKEN", token.toLowerCase()).replaceAll("IMPL", (implementation ?? token).toLowerCase());
   const seen = await rpc<string[]>(url, "debug_traceTransaction", [hash, { tracer }]);
-  return seen.map((k) => [k.slice(2), k.startsWith("b:")]);
+  const opcodes = seen.filter((k) => k.startsWith("o:")).map((k) => TOKEN_OPCODES[Number(k.slice(2))]);
+  return { reads: seen.filter((k) => !k.startsWith("o:")).map((k) => [k.slice(2), k.startsWith("b:")]), opcodes };
 }
 
 /** The far sales' runs (app/verifier.ts farBlocks, farRequest): the probe-side request, the far
@@ -158,7 +189,7 @@ const same = (a: string | undefined, b: string) => a?.toLowerCase() === b.toLowe
 function runner(local: string, token: Address, implementation: Address | null) {
   const call = <T>(method: string, params: unknown[]) => rpc<T>(local, method, params);
   const touched = new Set<string>();
-  const [called, balances] = [new Set<string>(), new Set<string>()];
+  const [called, balances, opcodes] = [new Set<string>(), new Set<string>(), new Set<string>()];
   /** Mines `run` on the fork from where it stands, its senders funded and impersonated as `side`'s first
    *  block says; a gap before a block is mined at once, empty. With `own`, records what each call touches
    *  and what the token's code reaches. Returns each call sent, in order, with the addresses it accessed,
@@ -175,15 +206,21 @@ function runner(local: string, token: Address, implementation: Address | null) {
     }
     const sent: { hash: Hex; accessed: Set<string> }[] = [];
     let paused: Hex | null = null;
-    let at = BigInt((await call<{ number: Hex }>("eth_getBlockByNumber", ["latest", false])).number);
+    const latest = await call<{ number: Hex; timestamp: Hex }>("eth_getBlockByNumber", ["latest", false]);
+    let [at, last] = [BigInt(latest.number), latest.timestamp];
     for (const b of run) {
       const n = BigInt(b.blockOverrides.number);
       if (n <= at) throw new Error(`trace: block ${n} does not follow block ${at}`);
       if (n === pause) paused = await call<Hex>("evm_snapshot", []);
-      // a far sale's gap: empty blocks, mined at once, their times the clock's (only BLOCKHASH, a
-      // flagged opcode, sees them); the next block gets its own time below
-      if (n > at + 1n) await call("anvil_mine", [toHex(n - at - 1n), "0x0"]);
-      at = n;
+      // a gap (a far sale's, or the blocks a run skips): empty blocks, mined at once from the time of
+      // the block before them (only BLOCKHASH, a flagged opcode, sees them); the next block gets its
+      // own time below. Left to the fork's clock, which runs on while it fetches state from the node,
+      // a short gap could end past that time: the check then failed on a slow node.
+      if (n > at + 1n) {
+        await call("evm_setNextBlockTimestamp", [last]);
+        await call("anvil_mine", [toHex(n - at - 1n), "0x0"]);
+      }
+      [at, last] = [n, b.blockOverrides.time];
       await call("evm_setNextBlockTimestamp", [b.blockOverrides.time]);
       if (!b.calls.length) {
         await call("evm_mine", []);
@@ -210,12 +247,14 @@ function runner(local: string, token: Address, implementation: Address | null) {
       }
       if (!own) continue;
       for (const h of hashes) {
-        for (const [a, balance] of await reachOf(local, h, token, implementation)) if (!same(a, token)) (balance ? balances : called).add(a);
+        const reached = await reachOf(local, h, token, implementation);
+        for (const [a, balance] of reached.reads) if (!same(a, token)) (balance ? balances : called).add(a);
+        for (const o of reached.opcodes) opcodes.add(o);
       }
     }
     return { sent, paused };
   };
-  const reach = (): Reach => ({ touched: [...touched].sort() as Address[], calls: [...new Set([...called, ...balances])].sort() as Address[], balances: [...balances].sort() as Address[] });
+  const reach = (): Reach => ({ touched: [...touched].sort() as Address[], calls: [...new Set([...called, ...balances])].sort() as Address[], balances: [...balances].sort() as Address[], opcodes: [...opcodes].sort() });
   return { call, mine, reach };
 }
 
@@ -306,7 +345,7 @@ export async function traceLater(url: string, later: Request, token: Address, im
     await mine(blocks, blocks, true);
     const r = reach();
     const join = (x: Address[], y: Address[]) => [...new Set([...x, ...y])].sort() as Address[];
-    return { touched: join(seen.touched, r.touched), calls: join(seen.calls, r.calls), balances: join(seen.balances, r.balances) };
+    return { touched: join(seen.touched, r.touched), calls: join(seen.calls, r.calls), balances: join(seen.balances, r.balances), opcodes: [...new Set([...seen.opcodes, ...r.opcodes])].sort() };
   } finally {
     await fork.stop();
   }

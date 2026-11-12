@@ -168,7 +168,7 @@ export const costUsd = (u: Usage) => u.prompt_tokens * 0.08e-6 + u.completion_to
 
 /** The wrapper's answer to a tool call's `amount_wei`, or null to pass it on: a positive decimal number
  *  of wei, at most the owner's per-buy limit `max` (the guard refuses above it too), and not dust (below
- *  1 % of it: a check the pool cannot price, paid 0.019 NEAR for nothing; the guard accepts it). */
+ *  1 % of it: a check the pool cannot price, paid for nothing; the guard accepts it). */
 export function amountRefusal(raw: unknown, max: bigint): string | null {
   const amount = String(raw ?? "");
   if (!/^[1-9]\d*$/.test(amount)) return `ERROR: amount_wei must be a positive decimal number of wei, got ${JSON.stringify(raw)}`;

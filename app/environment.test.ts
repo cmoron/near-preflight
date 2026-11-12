@@ -13,7 +13,7 @@ describe("opcodes no simulation can match, in reachable code only (pure)", () =>
   test("found in code: ORIGIN, GASPRICE, BASEFEE, PREVRANDAO, COINBASE, BLOCKHASH", () => {
     expect(envOpcodes("0x3250 3a50 4850 4450 4150 4050 00".replaceAll(" ", "") as Hex)).toEqual(["BASEFEE", "BLOCKHASH", "COINBASE", "GASPRICE", "ORIGIN", "PREVRANDAO"]);
   });
-  test("GAS, TIMESTAMP, NUMBER, SELFBALANCE, BALANCE, EXTCODEHASH: none (allowed, or judged by the addresses touched)", () => {
+  test("GAS, TIMESTAMP, NUMBER, SELFBALANCE, BALANCE, EXTCODEHASH: none (GAS allowed, the others judged on what the traced transactions executed or touched)", () => {
     expect(envOpcodes("0x5a50 4250 4350 4750 5f3150 5f3f50 00".replaceAll(" ", "") as Hex)).toEqual([]);
   });
   test("a PUSH operand is data: 0x48 inside a PUSH2 is not BASEFEE", () => expect(envOpcodes("0x614848 50 00".replaceAll(" ", "") as Hex)).toEqual([]));
@@ -55,7 +55,7 @@ describe("addresses the guard's transactions touch (pure)", () => {
   const w = { token: "0x00000000000000000000000000000000000000a1" as Address, guard: "0x00000000000000000000000000000000000000a2" as Address };
   const pair = "0x00000000000000000000000000000000000000a3" as Address;
   const liquidity = { pair, supply: "1", supply_before: "1", created: null, candidates: 0, holders: null };
-  const facts = (touched: string[] | null, opcodes: string[] = [], token_calls: string[] | null = [], token_balances: string[] | null = []) => ({ opcodes, touched, token_calls, token_balances, implementation: null, liquidity });
+  const facts = (touched: string[] | null, opcodes: string[] = [], token_calls: string[] | null = [], token_balances: string[] | null = [], token_opcodes: string[] | null = []) => ({ opcodes, touched, token_calls, token_balances, token_opcodes, implementation: null as Address | null, liquidity });
   test("token, pool, router, WETH, guard and precompiles: no finding", () => {
     expect(environmentFindings(facts([w.token, pair, ROUTER.toLowerCase(), WETH.toLowerCase(), w.guard, "0x0000000000000000000000000000000000000001", "0x0000000000000000000000000000000000000100"]), w)).toEqual([]);
   });
@@ -84,8 +84,26 @@ describe("addresses the guard's transactions touch (pure)", () => {
       "token reads the ETH balance of 0x4200..0006 during a transfer: a value no simulation can match",
     ]);
   });
-  test("the token's code calls its pool or its implementation: no finding", () => {
-    expect(environmentFindings(facts([w.token, pair], [], [pair]), w)).toEqual([]);
+  // The step-up, rule 1: the token's own code may call its implementation and the precompiles, nothing
+  // else. Its pool gives it reserves any trade moves, and a clock (sync, then getReserves).
+  test("the token's code calls its implementation: no finding", () => {
+    const impl = "0x00000000000000000000000000000000000000a4" as Address;
+    expect(environmentFindings({ ...facts([w.token, impl], [], [impl]), implementation: impl }, w)).toEqual([]);
+  });
+  test("the token's code calls or reads its pool, the router or the guard: warn, naming them", () => {
+    expect(environmentFindings(facts([w.token, pair], [], [pair]), w)).toEqual([{ level: "warn", text: "token calls or reads its pool during a transfer: reserves and a clock any trade moves" }]);
+    expect(environmentFindings(facts([w.token], [], [pair, ROUTER.toLowerCase(), w.guard]), w)[0]?.text).toBe("token calls or reads its pool, the router, the guard during a transfer: reserves and a clock any trade moves");
+    expect(environmentFindings(facts([w.token], [], [w.guard]), w)).toEqual([{ level: "warn", text: "token calls or reads the guard during a transfer: outside its implementation and the precompiles" }]);
+  });
+  // Rule 2: what its code executed on the guard's transactions, not what its bytecode holds.
+  test("the token's code executes TIMESTAMP, NUMBER or SELFBALANCE there: warn, naming them", () => {
+    expect(environmentFindings(facts([w.token], [], [], [], ["NUMBER", "TIMESTAMP"]), w)).toEqual([{ level: "warn", text: "token reads NUMBER, TIMESTAMP during a transfer: it can act otherwise after the check's last sale" }]);
+    expect(environmentFindings(facts([w.token], [], [], [], ["SELFBALANCE"]), w)[0]?.level).toBe("warn");
+  });
+  // Init code runs at a new address, outside the token's frames and outside any access list.
+  test("the token's code creates a contract there: block, beside the warn for what it read", () => {
+    expect(environmentFindings(facts([w.token], [], [], [], ["CREATE"]), w)).toEqual([{ level: "block", text: "token creates a contract during a transfer: code no rule reads" }]);
+    expect(environmentFindings(facts([w.token], [], [], [], ["CREATE2", "NUMBER"]), w).map((f) => f.level)).toEqual(["warn", "block"]);
   });
 });
 
@@ -106,7 +124,7 @@ describe("what the token's own code reaches, in its context, implementation incl
       const hash = await rpc<Hex>(RPC, "eth_sendTransaction", [{ from: caller, to: proxy, data: "0x", gas: toHex(100_000) }]);
       for (let i = 0; i < 50 && !(await rpc<unknown>(RPC, "eth_getTransactionReceipt", [hash])); i++) await Bun.sleep(100);
       const sorted = (x: [string, boolean][]) => x.map(([a, b]) => `${a}:${b}`).sort();
-      expect(sorted(await reachOf(RPC, hash, proxy, impl))).toEqual(sorted([[impl, false], [caller, true], [WETH.toLowerCase(), false]]));
+      expect(sorted((await reachOf(RPC, hash, proxy, impl)).reads)).toEqual(sorted([[impl, false], [caller, true], [WETH.toLowerCase(), false]]));
     } finally {
       await rpc(RPC, "evm_revert", [snapshot]);
     }
@@ -124,7 +142,7 @@ describe("what the token's own code reaches, in its context, implementation incl
       const hash = await rpc<Hex>(RPC, "eth_sendTransaction", [{ from: caller, to: proxy, data: "0x", gas: toHex(100_000) }]);
       for (let i = 0; i < 50 && !(await rpc<unknown>(RPC, "eth_getTransactionReceipt", [hash])); i++) await Bun.sleep(100);
       const sorted = (x: [string, boolean][]) => x.map(([a, b]) => `${a}:${b}`).sort();
-      expect(sorted(await reachOf(RPC, hash, proxy, impl))).toEqual(sorted([[impl, false], [caller, true], [WETH.toLowerCase(), false]]));
+      expect(sorted((await reachOf(RPC, hash, proxy, impl)).reads)).toEqual(sorted([[impl, false], [caller, true], [WETH.toLowerCase(), false]]));
     } finally {
       await rpc(RPC, "evm_revert", [snapshot]);
     }
@@ -155,11 +173,61 @@ describe("what the token's own code reaches, in its context, implementation incl
         await rpc(RPC, "anvil_impersonateAccount", [caller]);
         const hash = await rpc<Hex>(RPC, "eth_sendTransaction", [{ from: caller, to: proxy, data: "0x", gas: toHex(200_000) }]);
         for (let i = 0; i < 50 && !(await rpc<unknown>(RPC, "eth_getTransactionReceipt", [hash])); i++) await Bun.sleep(100);
-        const seen = (await reachOf(RPC, hash, proxy, impl)).map(([a, b]) => `${a}:${b}`);
+        const seen = (await reachOf(RPC, hash, proxy, impl)).reads.map(([a, b]) => `${a}:${b}`);
         expect([name, seen.includes(`${caller}:true`) && seen.includes(`${WETH.toLowerCase()}:false`)]).toEqual([name, true]);
       } finally {
         await rpc(RPC, "evm_revert", [snapshot]);
       }
+    }
+  });
+  // The step-up, rule 2: TIMESTAMP, NUMBER and SELFBALANCE the token's own frames execute, in its context
+  // or its implementation's own; code that holds one in a branch the transaction never takes ran none.
+  const ran = async (implCode: string, proxyCode: string) => {
+    const snapshot = await rpc<Hex>(RPC, "evm_snapshot", []);
+    try {
+      await rpc(RPC, "anvil_setCode", [impl, `0x${implCode}`]);
+      await rpc(RPC, "anvil_setCode", [proxy, `0x${proxyCode}`]);
+      await rpc(RPC, "anvil_setBalance", [caller, toHex(parseEther("1"))]);
+      await rpc(RPC, "anvil_impersonateAccount", [caller]);
+      const hash = await rpc<Hex>(RPC, "eth_sendTransaction", [{ from: caller, to: proxy, data: "0x", gas: toHex(100_000) }]);
+      for (let i = 0; i < 50 && !(await rpc<unknown>(RPC, "eth_getTransactionReceipt", [hash])); i++) await Bun.sleep(100);
+      return await reachOf(RPC, hash, proxy, impl);
+    } finally {
+      await rpc(RPC, "evm_revert", [snapshot]);
+    }
+  };
+  const delegate = `6000600060006000${"73"}${impl.slice(2)}5af45000`; // DELEGATECALL(impl)
+  const plain = `6000600060006000600073${impl.slice(2)}5af15000`; // CALL(impl): its own context
+  test("TIMESTAMP, NUMBER and SELFBALANCE run by the implementation, in the proxy's context or its own: recorded, sorted", async () => {
+    expect((await ran("425043504750" + "00", delegate)).opcodes.sort()).toEqual(["NUMBER", "SELFBALANCE", "TIMESTAMP"]);
+    expect((await ran("4250" + "00", plain)).opcodes).toEqual(["TIMESTAMP"]);
+  });
+  test("BALANCE of its own address, or of the proxy from the implementation's own context: SELFBALANCE by another opcode", async () => {
+    expect(await ran("303150" + "00", delegate)).toEqual({ reads: [[impl, false]], opcodes: ["SELFBALANCE"] }); // BALANCE(ADDRESS)
+    expect((await ran(`73${proxy.slice(2)}3150` + "00", plain)).opcodes).toEqual(["SELFBALANCE"]); // BALANCE(proxy)
+  });
+  // A CREATE whose init code reads the time and reverts with it: the token learns it from the revert data,
+  // and no TIMESTAMP ran in its own frames. The CREATE itself is what is recorded.
+  test("a CREATE whose init code runs TIMESTAMP and reverts with it: CREATE recorded, not TIMESTAMP (the init code is not the token's frame)", async () => {
+    // init code: TIMESTAMP, PUSH0, MSTORE, PUSH1 32, PUSH0, REVERT (8 bytes), stored at memory 0 then CREATE(0, 0, 8)
+    const create = "67" + "425f5260205ffd" + "00" + "5f52" + "6008" + "6018" + "5f" + "f0" + "50" + "00";
+    expect((await ran(create, delegate)).opcodes).toEqual(["CREATE"]);
+  });
+  test("a TIMESTAMP in a branch the transaction does not take, or run by another contract: not recorded", async () => {
+    // PUSH1 1, PUSH1 6, JUMPI, TIMESTAMP, STOP, JUMPDEST, STOP: the jump skips the TIMESTAMP
+    expect((await ran("6001600657" + "4200" + "5b00", delegate)).opcodes).toEqual([]);
+    // the caller's own code is not the token's: a proxy that is neither token nor implementation
+    const other = "0x00000000000000000000000000000000000c0de4" as Address;
+    const snapshot = await rpc<Hex>(RPC, "evm_snapshot", []);
+    try {
+      await rpc(RPC, "anvil_setCode", [other, "0x425000"]);
+      await rpc(RPC, "anvil_setBalance", [caller, toHex(parseEther("1"))]);
+      await rpc(RPC, "anvil_impersonateAccount", [caller]);
+      const hash = await rpc<Hex>(RPC, "eth_sendTransaction", [{ from: caller, to: other, data: "0x", gas: toHex(100_000) }]);
+      for (let i = 0; i < 50 && !(await rpc<unknown>(RPC, "eth_getTransactionReceipt", [hash])); i++) await Bun.sleep(100);
+      expect((await reachOf(RPC, hash, proxy, impl)).opcodes).toEqual([]);
+    } finally {
+      await rpc(RPC, "evm_revert", [snapshot]);
     }
   });
 });
@@ -232,6 +300,23 @@ describe("the real sale fails where the simulation's passes", () => {
     expect(await buyThenSell(tokens.busy_tell as Address, async () => {})).toBe(true);
     expect(await buyThenSell(tokens.busy_tell as Address, wraps)).toBe(false);
   });
+  // The step-up: LateClose's sales close 20 minutes after its owner arms it, past a check's last sale.
+  for (const name of ["late_close", "pool_clock"] as const) {
+    test(`${name}: armed, a sale goes through at once, as every sale a check draws, and fails 20 minutes later`, async () => {
+      const token = tokens[name] as Address;
+      const owner = "0x60B1100000000000000000000000000000000001" as Address; // evm/fork.sh DEPLOYER
+      const snapshot = await rpc<Hex>(RPC, "evm_snapshot", []);
+      try {
+        await rpc(RPC, "anvil_impersonateAccount", [owner]);
+        expect(await send(owner, token, encodeFunctionData({ abi: parseAbi(["function arm(uint256)"]), args: [1200n] }))).toBe(true);
+        expect(await buyThenSell(token, async () => {})).toBe(true);
+        const later = async () => void (await rpc(RPC, "evm_setNextBlockTimestamp", [toHex(BigInt((await rpc<{ timestamp: Hex }>(RPC, "eth_getBlockByNumber", ["latest", false])).timestamp) + 1200n)]));
+        expect(await buyThenSell(token, later)).toBe(false);
+      } finally {
+        await rpc(RPC, "evm_revert", [snapshot]);
+      }
+    });
+  }
   test("ApproveKey: the approve itself fails after another user's deposit", async () => {
     const token = tokens.approve_key as Address;
     const eoa = `0x${Buffer.from(crypto.getRandomValues(new Uint8Array(20))).toString("hex")}` as Address;

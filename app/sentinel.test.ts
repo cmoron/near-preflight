@@ -23,6 +23,7 @@ const check = (verdict: Check["verdict"]): Check => ({
   buy_decision_sha256: null,
   amount_wei: "10000000000000",
   tx_hashes: [],
+  votes: verdict ? [{ sentinel: "s1.test", verdict, evidence_sha256: "" }] : [],
 });
 
 test("absent on a node behind last_check_id: reread on the next round, not skipped", () => {
@@ -38,6 +39,21 @@ test("without a verdict: judged, whatever the node", () => {
 });
 test("already judged: skipped", () => {
   for (const v of ["allow", "warn", "block"] as const) expect(step(check(v), 100, 100)).toBe("skip");
+});
+// The quorum: a sentinel votes while its vote can still count.
+describe("two sentinels, both needed", () => {
+  const voted = (by: string, verdict: "allow" | "block", decided: Check["verdict"]): Check => ({ ...check(decided), votes: [{ sentinel: by, verdict, evidence_sha256: "" }] });
+  test("the other sentinel's allow is in, the check undecided: judged", () => expect(step(voted("s1.test", "allow", null), 100, 100, "s2.test", 2)).toBe("judge"));
+  test("my own vote is in: skipped", () => expect(step(voted("s2.test", "allow", null), 100, 100, "s2.test", 2)).toBe("skip"));
+  test("the other sentinel blocked: judged, a block lists only with the quorum", () => expect(step(voted("s1.test", "block", "block"), 100, 100, "s2.test", 2)).toBe("judge"));
+  test("both voted: skipped", () => {
+    const both: Check = { ...check("allow"), votes: ["s1.test", "s3.test"].map((sentinel) => ({ sentinel, verdict: "allow" as const, evidence_sha256: "" })) };
+    expect(step(both, 100, 100, "s2.test", 2)).toBe("skip");
+  });
+  test("an exit quote takes one vote: skipped once another sentinel posted it", () => {
+    expect(step({ ...voted("s1.test", "allow", "allow"), exit_amount: "5" }, 100, 100, "s2.test", 2)).toBe("skip");
+    expect(step({ ...check(null), exit_amount: "5" }, 100, 100, "s2.test", 2)).toBe("judge");
+  });
 });
 
 // Batch 9: the later side reads 100 blocks of receipts from Base's public node, which answers HTTP 429

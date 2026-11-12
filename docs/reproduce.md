@@ -27,14 +27,14 @@ No NEAR account, no key: `GUARD` only names the contract to read.
 
 ```sh
 git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun install
-export GUARD=guard.goblin-guard-13713.testnet
+export GUARD=guard.goblin-guard-69369.testnet
 bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
-#   38 OK lines, then: REPLAY OK: verdict warn confirmed, same as on chain
+#   39 OK lines, then: REPLAY OK: verdict warn confirmed, same as on chain
 bun app/attest.ts app/fixtures/decision.json --check 1
 #   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)
 ```
 
-- `replay` resends check #103 (USDC on Base mainnet) to `mainnet.base.org`, traces it on throwaway anvil
+- `replay` resends check #21 (USDC on Base mainnet) to `mainnet.base.org`, traces it on throwaway anvil
   forks, mines its far sales there again, rejudges it and compares everything with the guard
   ([what it checks](replay.md#what-replay-recomputes)).
 - `attest` verifies the model's decision behind check #1; it calls Intel and NVIDIA
@@ -44,7 +44,7 @@ Then every trap on a local Base fork, as CI runs it:
 
 ```sh
 echo GUARD=$GUARD > .env && evm/fork.sh    # Base fork at block 55836672 ready on http://127.0.0.1:8545 (about 30 s)
-bun test --timeout 30000                   # in another terminal: 308 pass, 0 fail (5 to 6 min)
+bun test --timeout 30000                   # in another terminal: 333 pass, 0 fail (5 to 6 min)
 ```
 
 `evm/fork.sh` starts anvil on a copy of Base at block 55,836,672 and deploys the demo tokens at fixed
@@ -59,16 +59,17 @@ reverts the fork; `demo.sh` mines one a second (`bun app/testkit.ts live`).
 
 ## Full demo
 
-1. **Build and test the contract.** `cargo test` gives `249 passed`; then `bun install`.
-2. **Get a testnet account** holding about 7 NEAR (setup moves 6.35 NEAR). The faucet gives 10:
+1. **Build and test the contract.** `cargo test` gives `295 passed`; then `bun install`.
+2. **Get a testnet account** holding about 8 NEAR (setup moves 7.1 NEAR). The faucet gives 10:
    `near account create-account sponsor-by-faucet-service <you>.testnet autogenerate-new-keypair save-to-keychain network-config testnet create`.
    If it fails, see [troubleshooting](#troubleshooting).
 3. **Deploy.** `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard
-   and creates `agent.`, `agent2.`, `sentinel.` and `armer.`, each with a function-call key limited to the
-   guard. The armer, a key apart from the agent's, opens the agent's armed budget.
-4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`308 pass`) and
+   and creates `agent.`, `agent2.`, `sentinel.`, `sentinel2.` and `armer.`, each with a function-call key
+   limited to the guard. An `allow` takes both sentinels' votes; the armer, a key apart from the agent's,
+   opens the agent's armed budget.
+4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`333 pass`) and
    `bunx tsc --noEmit` (exit 0).
-5. **Run the demo.** `./demo.sh` exits 0 in 3 to 5 min (255 and 290 s here with the live model; each check waits for Base blocks), in four moments:
+5. **Run the demo.** `./demo.sh` exits 0 in 3 to 5 min (255 and 290 s with the live model, measured with one sentinel; each check waits for Base blocks and for both votes), in four moments:
    - a poisoned inbox message pushes the agent to a trap: `BLOCK (sale refused N s after the buy …)`,
      and the contract refuses the buy (`verdict does not allow the purchase`);
    - a farm token whose simulation is clean: `BLOCK (template 0x9c69..94c8: 5 of 5 earlier pools drained …)`;
@@ -79,23 +80,25 @@ reverts the fork; `demo.sh` mines one a second (`bun app/testkit.ts live`).
    commands; each exits 0.
 7. **Optional.** With `NEAR_AI_API_KEY=...` in `.env.llm` ([cloud.near.ai](https://cloud.near.ai)), moment 1
    runs the live model (0.0003 USD here); without it, a recorded decision is verified.
-   `./demo.sh --full` (479 s here) adds an exit, a `warn` the owner approves, a trap aimed at the guard's
-   address, a second agent, three concurrent model runs, the emergency stop and a withdrawal.
+   `./demo.sh --full` (697 s here, the fork's upstream node timing out twice) adds an exit, a `warn` the owner approves, a trap aimed at the guard's
+   address, a second agent refused the token the first one's check got quarantined, three concurrent
+   model runs, the emergency stop and a withdrawal.
 8. **Real Base.** `./check-mainnet.sh`, below.
 
 The journal reads any guard: `https://cmoron.github.io/near-preflight/journal.html?guard=guard.<you>.testnet`.
 
 ## Real Base
 
-`./check-mainnet.sh` exits 0 in about a minute (62 and 63 s here; longer when its pool trades during the wait). The armer arms; the sentinel simulates USDC on Base
+`./check-mainnet.sh` exits 0 in about a minute (68 s here, with both sentinels; longer when its pool trades during the wait). The armer arms; each sentinel simulates USDC on Base
 mainnet (`mainnet.base.org`, read only, nothing broadcast), traces it on an anvil forked from it, waits
-for the later side's block and posts the verdict; then the proof is replayed with `--check`.
+for the later side's block and posts its vote; then the first sentinel's proof is replayed with `--check`.
 
 The verdict is `warn`: there is no template index for mainnet. When USDC/WETH traded during the wait,
 the trades are re-executed after the buy, or a second reason says the resale was not verified (4 of 7
-such windows, [sentinel](sentinel.md#others-trades-during-the-wait)). Check #70's pool traded, its trade
-was re-executed. Check #103's proof ships as `app/fixtures/usdc-base-mainnet.json` (nobody traded its pool
-during its wait; its far sales ran 301 s, 456 s and 900 s after the buy).
+such windows, [sentinel](sentinel.md#others-trades-during-the-wait)). On an earlier guard, check #70's
+pool traded and its trade was re-executed. Check #21's proof ships as `app/fixtures/usdc-base-mainnet.json`
+(nobody traded its pool during its wait; its far sales ran 301 s, 312 s and 900 s after the buy). Both
+sentinels posted that very evidence string: the one file is the proof of both votes.
 
 To build an index, use a node that serves `eth_getLogs` (`mainnet.base.org` does not):
 `bun app/index.ts <rpc> <from> <to> <out.json> --pace-ms 1000`. The measurements are in
@@ -113,17 +116,21 @@ To build an index, use a node that serves `eth_getLogs` (`mainnet.base.org` does
 | `../.env missing`                                | `evm/fork.sh` needs `GUARD` in `.env` (or `GUARD_EVM`)                                                                                                                                                                                     |
 | `transaction differs from the one simulated`     | another signature or a gas change happened since the verdict: request a new check                                                                                                                                                          |
 | `verdict expired`                                | more than 120 s since the verdict: request a new check                                                                                                                                                                                     |
-| `./demo.sh` was interrupted                      | run it again: a check it left pending is judged first, and the owner unlists a trap that check lists again |
-| A check never gets a verdict                     | the sentinel is not running, or its key's allowance is spent; after 300 s, `refund_check`                                                                                                                                                  |
+| `./demo.sh` was interrupted                      | run it again: a check it left pending is judged first, and the owner unlists or lifts the quarantine of a trap that check blocks again |
+| `target is quarantined after a block verdict`    | a check blocked that token less than 30 min ago: wait, or the owner lifts it (`app/human.ts lift <token>`)                                                                                                                                |
+| `a check of this target is already awaiting its verdict` | one check per token at a time, for all agents: wait for its verdict (at most 300 s)                                                                                                                                              |
+| `check requested more than 180 s ago`            | the verdict came late or the buy waited: request a new check                                                                                                                                                                               |
+| A check never gets a verdict                     | a sentinel is not running (an `allow` takes both), or its key's allowance is spent; after 300 s, `refund_check`                                                                                                                            |
 
 ## Deployment
 
 | Fact       | Value                                                         |
 | ---------- | ------------------------------------------------------------- |
-| Guard      | `guard.goblin-guard-13713.testnet`                            |
-| Source     | `src/` at commit `d832e22` (unchanged since)                  |
+| Guard      | `guard.goblin-guard-69369.testnet`                            |
+| Source     | `src/` as committed with this page                             |
 | Build      | `cargo near build non-reproducible-wasm`, near-sdk 5          |
-| Wasm       | 361,064 bytes, sha256 `35bbcc91…f52d`, the code hash on chain |
+| Wasm       | 387,314 bytes, sha256 `0fdc4f6a…89d1`, the code hash on chain |
+| Sentinels  | `sentinel.` and `sentinel2.goblin-guard-69369.testnet`, quorum 2 of 2 |
 | MPC signer | `v1.signer-prod.testnet`, derivation path `evm-1`             |
 
 Check the code hash yourself: `view_account` on the guard returns it in base58; decoded, it is the

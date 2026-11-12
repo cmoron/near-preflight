@@ -85,6 +85,23 @@ The first row is the [environment rule](sentinel.md#environment-rule). The other
 | ------------------------------------------------------------------ | -------------------------------------------------------------------------- | ------------------------------------- |
 | Code keyed on the base fee, coinbase, prevrandao… (`basefee_trap`) | 🟠 the owner decides: `code reads BASEFEE: values no simulation can match`; 🔴 not listed once the base fee moved before the later block (on the fork it falls every block) | `bun test -t "keyed on the base fee"` |
 
+### What the token's own code did
+
+Sampling sales does not converge: each review found the delay, the size or the state the samples missed.
+So an `allow` also means that, on the guard's own buy, approves and sales, the token's code called nothing
+but its implementation and the precompiles, ran no TIMESTAMP, NUMBER or SELFBALANCE, and created no
+contract ([how](sentinel.md#environment-rule)).
+
+| Attack                                                                                         | Answer (exact reason)                                                                                             | Reproduce                   |
+| ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| Sales closed for everyone 20 min after the owner arms it, past the check's last sale (`late_close`) | 🟠 the owner decides: `token reads TIMESTAMP during a transfer: it can act otherwise after the check's last sale` | `bun test -t "LateClose"`   |
+| The same, the time read from its own pool (`sync`, `getReserves`), no TIMESTAMP run (`pool_clock`) | 🟠 the owner decides: `token calls or reads its pool during a transfer: reserves and a clock any trade moves`    | `bun test -t "PoolClock"`   |
+| Either one, bought: the sale goes through at once and fails 20 min later                        | what the `warn` is for                                                                                            | `bun test -t "fails 20 minutes later"` |
+| Reads the time in the init code of a contract it creates, handed back as revert data           | 🔴 not listed: `token creates a contract during a transfer: code no rule reads`                                   | `bun test -t "init code runs TIMESTAMP"` |
+
+Both got `allow` before: every sale a check draws goes through. A `warn`, not a `block`: an honest launch
+cooldown reads the time too, and the owner decides with the reason in hand.
+
 ### Attacks on the guard's address
 
 The guard's Base address is public: anyone can send it tokens or get a token to freeze it.
@@ -105,12 +122,28 @@ The guard's Base address is public: anyone can send it tokens or get a token to 
 | The agent calls the MPC signer or moves NEAR directly                  | NEAR protocol: `Access key receiver … does not match transaction receiver v1.signer-prod.testnet`, `Access key requires full access` | `./demo.sh`, moment 4                                   |
 | The agent buys another amount than checked, or above the owner's limit | `amount is not the one checked`, `amount above the owner's per-buy limit`                                                            | `cargo test another_amount`, `cargo test per_buy_limit` |
 | One signed model decision reused for a second call                     | `decision already anchored on check #n`                                                                                              | `cargo test digest`                                     |
+| The agent asks again right after a `block`, or buys on an earlier `allow` | `target is quarantined after a block verdict`                                                       | `cargo test blocked_token`, `cargo test later_check_blocked` |
+| Several checks of one token at once, as many draws                     | `a check of this target is already awaiting its verdict`                                                                             | `cargo test second_check_of_a_token`                    |
+| Buys of one token beyond the owner's cap, by any agents                | `amount above what the owner's per-token cap leaves`                                                                             | `cargo test token_cap`                                  |
 | A buy on a verdict from before the owner's emergency stop              | `check requested before the owner's stop: request a new check`                                                                       | `cargo test before_a_stop`                              |
 
 ### A lying sentinel
 
-The sentinel is one NEAR key on one machine, with no TEE (trusted execution environment). Its key can only
-post verdicts. What a lie gets:
+A sentinel is one NEAR key and one Base node, with no TEE (trusted execution environment); its key can
+only vote on checks. The guard takes votes from the sentinels its owner names: an `allow` or a `warn`
+needs the quorum's identical votes, and any one sentinel blocks ([quorum](contract.md#sentinel-quorum)).
+
+The demo guard has two sentinels, both needed. What one stolen key, or one lying node, gets:
+
+| One sentinel alone                                      | Answer                                                                                  | Reproduce                                  |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------ |
+| Posts `allow` on a trap                                 | no verdict: the other sentinel's `block` vetoes it, and nothing is bought on one vote   | `cargo test one_allow_vote`, `cargo test vetoes` |
+| Posts `allow` with another quote, transaction or code   | 🔴 the votes disagree: `sentinels disagree on …`, not listed                            | `cargo test disagree`                      |
+| Posts `block` on an honest token                        | 🔴 that check is blocked and the token quarantined 30 min; **not stopped**, the owner lifts it and replaces the key | `cargo test single_block_vote` |
+| Asks to list an honest token                            | not listed: listing takes the quorum's identical `block` votes                          | `cargo test listing_takes_the_quorum`      |
+| Posts a low exit quote                                  | **not stopped**: an exit quote takes one vote, so that a sentinel down never blocks a sale; the agent's floor is lower | `cargo test exit_quote_takes_one_vote` |
+
+Both sentinels lying together get what one got before the quorum. What replay then shows, afterwards:
 
 | Lie                                                     | Answer                                                                                  | Reproduce                                                  |
 | ------------------------------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
@@ -120,9 +153,13 @@ post verdicts. What a lie gets:
 | Leaves out a trade of the pool it should re-execute     | `replay` reports a `MISMATCH`: it fetches the trades again from the node                 | `bun test -t "leaves out a trade"`                         |
 | States another cadence                                  | `replay` reports a `MISMATCH`: it measures the cadence again at the block               | `bun test -t "cadence other than"`                         |
 | Forges a simulation result or a fact                    | `replay` resends the requests and recomputes every fact                                 | `bun test app/replay.test.ts`                              |
-| Posts `allow` on a trap                                 | **not stopped**: bought if the agent buys within 120 s; replay shows the lie afterwards, from the proof file | see below                                                  |
+| Post `allow` on a trap, both of them                    | **not stopped**: bought if the agent buys within 120 s, at most the owner's per-token cap per period; replay shows the lie afterwards, from each proof file | see below                                                  |
 
-The owner replaces a compromised key with `set_sentinel`; verdicts it already posted stay.
+The owner replaces a compromised key with `set_sentinels`; votes it already posted stay.
+
+**In the demo both sentinels run on one machine**, under one operator, and read the same Base node
+unless `EVM_RPC_2` names another: two keys, not two parties. A real deployment separates the machine,
+the RPC provider and the operator of each sentinel; only then is one lying node or one stolen key alone.
 
 ### Honest tokens
 
@@ -130,8 +167,9 @@ The owner replaces a compromised key with `set_sentinel`; verdicts it already po
 | ------------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------ |
 | USDC on the fork                            | 🟢 `allow`; the guard builds the swap, NEAR signs it, the relay broadcasts it to the fork    | `bun test -t "USDC, healthy"`, `./demo.sh` |
 | USDC on the fork, its pool traded by others while the check waits | 🟢 `allow`: their trades re-executed after the buy, the resale verified      | `bun test -t "their trades re-executed"`   |
-| An honest 30-block cooldown (`cooldown_60`) | 🟢 `allow`; 🔴 not listed when the first sale is drawn within 30 blocks (about 1 check in 6 on Base, every check on the fork) | `bun test -t "Cooldown60"`                 |
-| USDC on Base mainnet                        | 🟠 `warn`: no template index covers mainnet; its pool's trades during the check re-executed (check #70), or, when that cannot be built, a second reason: resale not verified | `./check-mainnet.sh`                       |
+| An honest 30-block cooldown (`cooldown_60`) | 🟠 `warn` naming NUMBER, which its code reads; 🔴 not listed when the first sale is drawn within 30 blocks (about 1 check in 6 on Base, every check on the fork) | `bun test -t "Cooldown60"`                 |
+| An honest one-block hold (`hold_one_block`) | 🟠 `warn` naming NUMBER and TIMESTAMP; its resale goes through, the owner approves           | `bun test -t "holding block"`              |
+| USDC on Base mainnet                        | 🟠 `warn`: no template index covers mainnet; its pool's trades during the check re-executed (an earlier guard's check #70), or, when that cannot be built, a second reason: resale not verified | `./check-mainnet.sh`                       |
 
 A refused sale lists the token only if the far sale at 900 s is refused too: a refusal that clears with
 time blocks that check alone, or any agent could repeat checks until one lists an honest token. The
@@ -141,22 +179,38 @@ listed.
 
 ## What it does not stop
 
-- **A lying sentinel's `allow`.** Bought if the agent buys within 120 s. Replay shows a forged
-  simulation, a block or draw it chose, or an index window not bound to the check, only afterwards, and
-  only from the proof file (the sentinel may withhold it) and a node that still serves both blocks' state.
-- **A lying exit quote.** It gives the agent a lower floor (minimum output); replay catches it afterwards.
+- **Every sentinel lying, or all on one machine.** An `allow` the quorum posts on a trap is bought if
+  the agent buys within 120 s, up to the owner's per-token cap. Replay shows a forged simulation, a block
+  or draw they chose, or an index window not bound to the check, only afterwards, and only from the proof
+  files (a sentinel may withhold its own) and a node that still serves both blocks' state.
+- **One Base node for all.** Each sentinel believes the endpoint it reads. In the demo both read the
+  same one: a node that lies or lags gives both the same wrong verdict.
+- **One sentinel blocking.** A stolen key blocks every buy and quarantines the tokens it votes on,
+  until the owner replaces it; a sentinel whose node fails blocks the checks it cannot simulate, without
+  quarantine. An exit is never blocked.
+- **A lying exit quote.** One vote is enough for it, so a sentinel down never blocks a sale: one key
+  gives the agent a lower floor (minimum output); replay catches it afterwards.
 - **What a token does after 900 s.** `eth_simulateV1` reaches 256 blocks past a real block, 51 s at
   Base's five blocks a second; the far sales play the late sale again 301 s and 900 s after the buy, and
   at a delay drawn between, on a local fork. A sale closed or taxed from 5 to 15 min on, for anyone or for
-  the guard alone, is caught at every check (`bun test -t "5 minutes"`, `-t "J9GuardLater"`); from 15 min
-  on, never. Nor is an owner action after the buy (pause, tax, blacklist; any admin, not only `owner()`).
+  the guard alone, is caught at every check (`bun test -t "5 minutes"`, `-t "J9GuardLater"`). From 15 min
+  on, a token whose own code read the time or its pool on the guard's transactions is a `warn`; one that
+  read neither there passes (a time test in a branch they never took, behind a flag set later or reached
+  once others traded). Nor is an owner action after the buy stopped (pause, tax, blacklist; any admin,
+  not only `owner()`).
+- **A holder of most of the supply.** It sells into the pool with no trap in the code: the check reads
+  who holds the LP, never who holds the token.
+- **Old liquidity.** LP that already existed an hour before the check is not read: its holders can
+  still remove it.
 - **What Base does during those minutes.** The far sales run on a frozen copy of the reference block:
   others' trades, WETH, L1Block and the base fee stay as they were. A token keyed on time and on state
   Base moves together passes them; the later side sees 16 to 24 s of real Base.
 - **Sizes and delays the check did not draw.** A sale refused only below some share, or only during a
-  window that reopens before 900 s and misses the drawn delays, passes. A `block` that lists nothing is
-  not remembered, so an agent may request checks until the draws miss such a window; a refusal in
-  force at 301 s or at 900 s is met at every check. An agent's exit sells its holding when it chooses.
+  window that reopens before 900 s and misses the drawn delays, passes. A refusal in force at 301 s or
+  at 900 s is met at every check. An agent's exit sells its holding when it chooses.
+- **Asking again, later.** A block quarantines its token for every agent and one check per token
+  runs at a time, so a re-draw costs a quarantine, 30 min by default: an agent that waits may still ask
+  again, with new draws ([token limits](contract.md#token-limits)).
 - **State that does not move within the later side's window.** A token keyed on its own pool or storage
   passes when nobody touched them during those 16 to 24 s, and fails once someone does. Others' trades of
   the pool are re-executed after the buy, without the transactions before them in their block; when that
@@ -207,7 +261,7 @@ Each now has a test.
 | Drained copies of USDC's code got USDC blocked                                                    | reputation does not apply to a pool that predates the window                                              |
 | Anyone could block arming by depositing 1 yoctoNEAR to the agent                                  | `arm` refuses only a credit below what the armer read                                                     |
 | The recorded decision package re-anchored on a guard that never called the model                  | the signed request names the guard, the agent and a fresh NEAR block; `attest --check` verifies all three |
-| A compromised sentinel key could not be revoked                                                   | `set_sentinel`, owner only, logged                                                                        |
+| A compromised sentinel key could not be revoked                                                   | `set_sentinels` (first `set_sentinel`), owner only, logged                                                |
 | A sale only after a top-level `balanceOf`, which only the simulation sent (fifth run's JudgeTrap) | the guard side holds the guard's own transactions alone; every other call runs in a request of its own    |
 | Simulated blocks told apart from real ones (timestamps, one prevrandao for all)                   | every block up to the late sale listed, a prevrandao per L1 epoch; since batch 9, the cadence measured     |
 | A sale tax hidden by a token that sells for itself into the pool during the sale                  | the tax is the ETH the seller receives; a pool paying out more is a `block`                               |
@@ -248,3 +302,9 @@ Each now has a test.
 | The later side was not traced: a token could act differently there unseen (a proxy upgraded during the check) | the later side runs on a local fork too, traced by the same rule |
 | Dust sent to the guard was merged as a sum, exact for a balance only: another slot could turn a block into a warn | no value is summed: transfers to or from the guard are re-executed after the buy; any other slot keeps Base's value |
 | The tracer's stack of code addresses could lose its place on a frame that enters without exiting | a frame's code is found by its depth |
+| Design review: a check that samples sales does not converge, each pass found the delay, size or state it missed | an allow-list for the token's own code on the guard's transactions: it calls only its implementation and the precompiles and runs no TIMESTAMP, NUMBER or SELFBALANCE, or the verdict is at most `warn` |
+| A token keyed on its own pool (its reserves, or `sync()` then `getReserves()` for the time) had no finding | its own code reaching its pool or the router is a `warn` naming it |
+| A gap of empty blocks left to the local fork's clock could end past the next block's time on a slow node: the check failed | a gap starts at the time of the block before it |
+| An agent could ask again until a draw missed a trap, N checks at once were N draws, and one trap could take every armed budget | a quarantine after any block, one check per token, a cap per token for all agents ([token limits](contract.md#token-limits)) |
+| One sentinel key, or the one node it read, was enough for an `allow` on a trap                    | a quorum of sentinels: identical votes for an `allow` or a `warn`, any one blocks, listing takes the quorum |
+| The sentinel alone could `report` any token to the blocklist                                      | a sentinel is no reporter: its votes list with the quorum                                                 |

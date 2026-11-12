@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { encodeFunctionData, maxUint256, parseAbi, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
 import { buildIndex } from "./index";
-import { replay, summary, type OnChain, type Proof } from "./replay";
+import { replay, summary, voteLines, type OnChain, type Proof } from "./replay";
 import { CHECK_BLOCKS, localPreviews, mine } from "./testkit";
 import { checkExit, checkToken, deriveProbes, FAR_METHOD, LATER_S, rpc, ROUTER, saleRanges, specialOf, toProof, WETH, type Cadence, type NearFacts, type Probe } from "./verifier";
 
@@ -262,9 +262,61 @@ describe("replay of the environment facts", () => {
     const lines = await replay({ ...forged, reasons }, RPC);
     expect(failed(lines)).toEqual([expect.stringContaining("opcodes in the code: BASEFEE, evidence says none")]);
   });
+  // The step-up: what the token's own code ran on the guard's transactions is a fact of the evidence too.
+  test("evidence that omits the NUMBER and TIMESTAMP the token's code ran, verdict rejudged allow: detected", async () => {
+    const proof = await proofOf(tokens.hold_one_block as Address);
+    expect(proof.verdict).toBe("warn");
+    const forged = withEvidence(proof, (e) => (e.token_opcodes = []));
+    const lines = await replay({ ...forged, verdict: "allow", reasons: "buy, takeback probes and sales simulated without anomaly" }, RPC);
+    expect(failed(lines)).toEqual([expect.stringContaining('token opcodes executed: evidence [], traced ["NUMBER","TIMESTAMP"]')]);
+  });
+  test("an executed opcode that is not one of the rule's: refused before anything is sent", async () => {
+    const forged = withEvidence(await proofOf(tokens.hold_one_block as Address), (e) => (e.token_opcodes = ["GAS"]));
+    expect(failed(await replay(forged, RPC))).toEqual(["MISMATCH evidence fields have unexpected types (nothing sent to the node)"]);
+  });
   test("an opcode name that is not one of the rule's: refused before anything is sent", async () => {
     const forged = withEvidence(await proofOf(tokens.basefee_trap as Address), (e) => (e.opcodes = ["SSTORE"]));
     expect(failed(await replay(forged, RPC))).toEqual(["MISMATCH evidence fields have unexpected types (nothing sent to the node)"]);
+  });
+});
+
+// The quorum: a check holds one vote per sentinel; a proof is one sentinel's, checked against its vote.
+describe("replay --check: the proof against its check's votes (pure)", () => {
+  const sha = (s: string) => s.repeat(64);
+  const vote = (sentinel: string, verdict: string, evidence: string) => ({ sentinel, verdict, evidence_sha256: sha(evidence) });
+  const chain = (verdict: string, reasons: string, votes: ReturnType<typeof vote>[], decidedBy = votes[0].evidence_sha256) =>
+    ({ verdict, reasons, evidence_sha256: decidedBy, exit_amount: null, votes }) as unknown as NonNullable<OnChain>;
+  const failedOf = (ls: { ok: boolean; line: string }[]) => ls.filter((l) => !l.ok).map((l) => l.line);
+  test("two identical allow votes, quorum 2: each sentinel's proof is confirmed", () => {
+    const c = chain("allow", "fine", [vote("s1", "allow", "a"), vote("s2", "allow", "b")]);
+    expect(failedOf(voteLines(7, c, sha("a"), { verdict: "allow", reasons: "fine" }, 2))).toEqual([]);
+    const second = voteLines(7, c, sha("b"), { verdict: "allow", reasons: "worded otherwise" }, 2);
+    expect(failedOf(second)).toEqual([]);
+    expect(second[0].line).toContain("the vote of s2, 1 of the 2 posted");
+    // two sentinels that posted the same evidence string: one file is both votes'
+    const same = chain("allow", "fine", [vote("s1", "allow", "a"), vote("s2", "allow", "a")]);
+    expect(voteLines(7, same, sha("a"), { verdict: "allow", reasons: "fine" }, 2)[0].line).toContain("the vote of s1 and s2, 2 of the 2 posted");
+    expect(second[1].line).toContain("2 sentinel(s) posted it, 2 needed");
+  });
+  test("an allow resting on one vote where the quorum is 2: refused", () => {
+    const c = chain("allow", "fine", [vote("s1", "allow", "a")]);
+    expect(failedOf(voteLines(7, c, sha("a"), { verdict: "allow", reasons: "fine" }, 2))).toEqual(["MISMATCH on-chain verdict allow for #7 rests on 1 vote(s): the guard's quorum is 2"]);
+  });
+  test("my allow, vetoed by the other sentinel's block: the vote is confirmed, the guard's block reported", () => {
+    const c = chain("block", "sale refused", [vote("s1", "allow", "a"), vote("s2", "block", "b")], sha("b"));
+    const lines = voteLines(7, c, sha("a"), { verdict: "allow", reasons: "fine" }, 2);
+    expect(failedOf(lines)).toEqual([]);
+    expect(lines[1].line).toContain("this vote was allow; another sentinel blocked, or the votes disagreed (sale refused)");
+    expect(failedOf(voteLines(7, c, sha("b"), { verdict: "block", reasons: "sale refused" }, 2))).toEqual([]); // one block vote is enough
+  });
+  test("no vote carries the file's evidence, or the vote's verdict is not the file's: refused", () => {
+    const c = chain("allow", "fine", [vote("s1", "allow", "a"), vote("s2", "allow", "b")]);
+    expect(failedOf(voteLines(7, c, sha("c"), { verdict: "allow", reasons: "fine" }, 2))[0]).toContain("!= sha256 of the file's evidence");
+    expect(failedOf(voteLines(7, c, sha("b"), { verdict: "warn", reasons: "fine" }, 2))).toEqual(["MISMATCH the vote of s2 on chain is allow, the file says warn"]);
+  });
+  test("the deciding vote's reasons are the stored ones: another wording in its file is refused", () => {
+    const c = chain("allow", "fine", [vote("s1", "allow", "a"), vote("s2", "allow", "b")]);
+    expect(failedOf(voteLines(7, c, sha("a"), { verdict: "allow", reasons: "other" }, 2))).toEqual(['MISMATCH on-chain "allow: fine" != file "allow: other"']);
   });
 });
 

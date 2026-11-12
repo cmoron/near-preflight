@@ -8,11 +8,16 @@ cd "$(dirname "$0")"
 TOKEN=${1:-0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913} # USDC on Base
 RPC=https://mainnet.base.org
 
-# The check states a buy of 0.00001 ETH: price 0.019 NEAR plus that buy at the gas cap must fit in the budget.
+# The check states a buy of 0.00001 ETH: its price plus that buy at the gas cap must fit in the budget.
 bun --env-file=.env --env-file=.env.armer app/arm.ts 0.05 600
+# Both sentinels (the guard's quorum); the second reads EVM_RPC_2 when it names another Base node.
 EVM_RPC=$RPC bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts &
-SENTINEL=$!
-trap 'kill $SENTINEL 2>/dev/null || true' EXIT
+SENTINELS=($!)
+if [[ -f .env.sentinel2 ]]; then
+  EVM_RPC=${EVM_RPC_2:-$RPC} bun --env-file=.env --env-file=.env.sentinel2 app/sentinel.ts &
+  SENTINELS+=($!)
+fi
+trap 'kill "${SENTINELS[@]}" 2>/dev/null || true' EXIT
 out=$(bun --env-file=.env --env-file=.env.agent app/check.ts "$TOKEN") || { echo "$out"; exit 1; }
 echo "$out" # not tee /dev/stderr: reopening it truncates a log file the output is redirected to
 proof=$(sed -n 's/.* proof=//p' <<<"$out")

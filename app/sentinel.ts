@@ -11,33 +11,51 @@
 // A check that fails 3 times gets a block (fail closed): a token cannot stall the queue nor be bought.
 // A buy check waits for the real Base block its later side runs on: the first block 16 to 24 s after
 // the reference block, itself the first block 4 s after the request.
+// The guard takes votes: an allow or a warn needs the quorum of its sentinels to post the same one, any
+// one of them blocks. Each sentinel is this program with its own account, key and, ideally, Base node.
 // Usage: [INDEX_FROM=<block>] bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts   (EVM_RPC: the node)
 import { formatEther, type Address, type Hex } from "viem";
-import type { Check, Entry } from "./near";
+import type { Check, Entry, Sentinels } from "./near";
 import type { NearFacts, Previews } from "./verifier";
 
 /** What to do with the request read at block height `readAt`, its id being <= last_check_id read at
  *  height `lastAt`. Absent at a height >= lastAt: it existed at lastAt and no longer does, so it was
  *  erased by refund_check (ids never come back), skip it. Absent at a lower
- *  height: the node read is behind, reread it on the next round without advancing. */
-export function step(check: Check | null, readAt: number, lastAt: number): "judge" | "skip" | "retry" {
-  if (check) return check.verdict ? "skip" : "judge";
-  return readAt >= lastAt ? "skip" : "retry";
+ *  height: the node read is behind, reread it on the next round without advancing.
+ *  Present: sentinel `me` judges it while its vote can still count: it has not voted, the check is
+ *  undecided or blocked (a block takes votes up to the quorum: listing needs them), and fewer than
+ *  `quorum` votes are in (one for an exit quote). */
+export function step(check: Check | null, readAt: number, lastAt: number, me = "", quorum = 1): "judge" | "skip" | "retry" {
+  if (!check) return readAt >= lastAt ? "skip" : "retry";
+  const open = (check.verdict === null || check.verdict === "block") && check.votes.length < (check.exit_amount ? 1 : quorum);
+  return open && !check.votes.some((v) => v.sentinel === me) ? "judge" : "skip";
 }
 
 if (import.meta.main) {
   // near.ts installs a global fetch and reads NEAR_RPC at import: loaded here only, not by the tests.
-  const { account, call, env, view, viewAt } = await import("./near");
+  const { account, call, env, reason, view, viewAt } = await import("./near");
   const { checkExit, checkToken, deriveProbes, toProof } = await import("./verifier");
   const { buildIndex, INDEX_SPAN_S } = await import("./index");
   const { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH } = await import("./derive");
-  const { mkdir } = await import("node:fs/promises");
+  const { mkdir, rm } = await import("node:fs/promises");
 
-  const sentinel = account(env("SENTINEL"), env("SENTINEL_KEY"));
+  let tag = "sentinel"; // "sentinel 2" once it knows its place among several
+  const log = (s: string) => console.log(`    [${tag}] ${s}`);
+  const ME = env("SENTINEL");
+  const sentinel = account(ME, env("SENTINEL_KEY"));
+  // The guard's sentinels and quorum, read once: this process is one of them, with its own key and, when
+  // the operator gives it one, its own Base node (EVM_RPC). Its proofs go to proofs/<id>.json for the
+  // first sentinel named, proofs/<id>.s<n>.json for the n-th.
+  const { sentinels, quorum } = await view<Sentinels>("sentinels");
+  const rank = sentinels.indexOf(ME);
+  if (rank < 0) throw new Error(`${ME} is not one of the guard's sentinels (${sentinels.join(", ")})`);
+  if (sentinels.length > 1) tag = `sentinel ${rank + 1}`;
+  const proofPath = (id: number) => `proofs/${id}${rank ? `.s${rank + 1}` : ""}.json`;
+  /** The guard refused a vote because the check no longer takes it: another sentinel's vote decided it. */
+  const settledByOthers = (e: unknown) => /verdict already posted|sentinel already voted/.test(reason(e));
   const EVM = env("EVM_RPC");
   // The real buyer: the guard's EVM address, public, derived like the relay does. Simulated too.
   const GUARD_EVM = deriveEvmAddress(await fetchMasterPublicKey(), env("GUARD"), GUARD_PATH);
-  const log = (s: string) => console.log(`    [sentinel] ${s}`);
   await mkdir("proofs", { recursive: true });
   // The index must end at each check's reference block (windowProblem): it is built for each check.
   const from = process.env.INDEX_FROM ? Number(process.env.INDEX_FROM) : null;
@@ -72,9 +90,9 @@ if (import.meta.main) {
       log(`#${id} : ${check.agent} wants to sell ${check.exit_amount} of ${target}: exit quote, the guard's approve and swap simulated from its EVM address...`);
       const r = await checkExit(EVM, target, GUARD_EVM, BigInt(check.exit_amount), preview.check);
       const proof = toProof(id, target, r);
-      await Bun.write(`proofs/${id}.json`, JSON.stringify(proof, null, 2));
+      await Bun.write(proofPath(id), JSON.stringify(proof, null, 2));
       const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code: null, list_target: false, tx_hashes: unprefixed(r.evidence.tx_hashes) });
-      log(`#${id} : exit quote ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.quote} wei for ${check.exit_amount} tokens, block ${r.evidence.block}, proof proofs/${id}.json  ${tx}`);
+      log(`#${id} : exit quote ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.quote} wei for ${check.exit_amount} tokens, block ${r.evidence.block}, proof ${proofPath(id)}  ${tx}`);
       return;
     }
     log(`#${id} : ${check.agent} wants to buy ${formatEther(BigInt(check.amount_wei))} ETH of ${target}: the guard's own buy and sales simulated, liquidity, template reputation, blocklist...`);
@@ -82,23 +100,24 @@ if (import.meta.main) {
     const ticket = { guard: env("GUARD"), id, requested_ns: check.requested_ns };
     const r = await checkToken(EVM, target, GUARD_EVM, (head, cadence) => deriveProbes(ticket, head.hash, cadence), { requested_ns: check.requested_ns, index, near: nearFacts, amount: BigInt(check.amount_wei), preview });
     const proof = toProof(id, target, r);
-    await Bun.write(`proofs/${id}.json`, JSON.stringify(proof, null, 2));
+    await Bun.write(proofPath(id), JSON.stringify(proof, null, 2));
     const code = { code_hash: r.evidence.code_hash, implementation: r.evidence.implementation };
     // list_target: the guard lists the token only on a block the probe side shows after a buy that
     // succeeded, never on what the agent's amount decides (judge).
     const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code, list_target: r.list_target, tx_hashes: unprefixed(r.evidence.tx_hashes) });
     const failed = r.evidence.calls.filter((c) => c.endsWith("revert")).length;
     const later = r.evidence.later ? `, sales again on block ${r.evidence.later.block}` : "";
-    log(`#${id} : ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.calls.length} simulated calls (${failed} reverted, takeback probes included), quote ${r.evidence.quote} for ${r.evidence.amount_wei} wei, guard tx ${r.evidence.tx_hashes[0].slice(0, 10)}..., block ${r.evidence.block}${later}, proof proofs/${id}.json  ${tx}`);
-    // An entry is never overwritten: a token already listed keeps its first entry.
-    if (r.list_target && !r.evidence.near.listed.length) log(`#${id} : ${target} listed on the guard's shared blocklist by this block verdict (evidence sha256 = the proof's)`);
+    log(`#${id} : ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.calls.length} simulated calls (${failed} reverted, takeback probes included), quote ${r.evidence.quote} for ${r.evidence.amount_wei} wei, guard tx ${r.evidence.tx_hashes[0].slice(0, 10)}..., block ${r.evidence.block}${later}, proof ${proofPath(id)}, vote posted (an allow or a warn takes ${quorum})  ${tx}`);
+    // An entry is never overwritten: a token already listed keeps its first entry. Listing takes the
+    // quorum's identical block votes: this one asks for it.
+    if (r.list_target && !r.evidence.near.listed.length) log(`#${id} : this block vote asks to list ${target} on the guard's shared blocklist: listed once ${quorum === 1 ? "posted" : `${quorum} sentinels' identical votes are in`}`);
   };
 
   const scan = async () => {
     const { value: last, height: lastAt } = await viewAt<number>("last_check_id");
     while (next <= last) {
       const { value: check, height } = await viewAt<Check | null>("get_check", { id: next });
-      const what = step(check, height, lastAt);
+      const what = step(check, height, lastAt, ME, quorum);
       if (what === "retry") {
         log(`#${next} : not found on a node behind the guard (block ${height} < ${lastAt}), will reread`);
         break;
@@ -107,6 +126,13 @@ if (import.meta.main) {
         try {
           await judge(next, check);
         } catch (e) {
+          if (settledByOthers(e)) {
+            // its proof was never posted: an exit quote takes one vote, a decided check no more
+            await rm(proofPath(next), { force: true });
+            log(`#${next} : another sentinel's vote decided it first, mine is not needed`);
+            next++;
+            continue;
+          }
           const msg = e instanceof Error ? e.message.split("\n")[0] : String(e);
           const tries = (failures.get(next) ?? 0) + 1;
           failures.set(next, tries);
@@ -140,7 +166,7 @@ if (import.meta.main) {
     }
   };
 
-  log(`listening to ${env("GUARD")}, simulating on ${EVM} as a derived probe buyer and as the guard's EVM address ${GUARD_EVM}`);
+  log(`${ME}, sentinel ${rank + 1} of ${sentinels.length} (quorum ${quorum}), listening to ${env("GUARD")}, simulating on ${EVM} as a derived probe buyer and as the guard's EVM address ${GUARD_EVM}`);
   for (;;) {
     try {
       await scan();

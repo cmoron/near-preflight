@@ -6,12 +6,13 @@ One line per term, in alphabetical order. Links go to the page that explains it.
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | **agent**              | the AI model and its wrapper; it holds a NEAR key limited to five guard methods, and no Base key                           |
 | **allow, warn, block** | the three verdicts: buy, buy once the owner approves, never buy                                                            |
+| **allow-list**         | what the token's own code may do on the guard's transactions for an `allow`: call its implementation and the precompiles, run no TIMESTAMP, NUMBER or SELFBALANCE, create no contract ([sentinel](sentinel.md#environment-rule)) |
 | **anvil**              | Foundry's local EVM node; here a copy (fork) of Base, never the real chain                                                 |
 | **armed budget**       | what an agent may spend before a deadline, opened by the armer within the owner's bounds                                   |
 | **armer**              | the role that arms an agent; a key apart from the agent's ([contract](contract.md#roles-and-keys))                         |
 | **Chain Signatures**   | NEAR's threshold signing network (the MPC): it signs Base transactions for a NEAR account's derived address                |
 | **cadence**            | Base's blocks per second, measured at a check's reference block from timestamps: turns the rules' seconds into blocks ([sentinel](sentinel.md#bases-cadence)) |
-| **check**              | one request for a verdict on buying an amount of a token; it costs 0.019 NEAR                                              |
+| **check**              | one request for a verdict on buying an amount of a token; it costs 0.025 NEAR on the demo guard                            |
 | **credit**             | NEAR an account prepaid to the guard; checks and gas are paid from it                                                      |
 | **decision package**   | one model completion, its signature and its TEE attestation ([attest](replay.md#the-attested-agent))                       |
 | **derived address**    | the guard's Base address, derived by Chain Signatures from its NEAR account and the path `evm-1`                           |
@@ -37,13 +38,17 @@ One line per term, in alphabetical order. Links go to the page that explains it.
 | **listed**             | on the guard's shared blocklist: refused to every agent until the owner unlists it                                         |
 | **MPC**                | multi-party computation: Chain Signatures' nodes sign together, none holds the whole key                                   |
 | **owner**              | the human named at init: bounds, roles, emergency stop, approvals, recovery                                                |
+| **per-token cap**      | the most all agents together may buy of one token per rolling period, set by the owner ([contract](contract.md#token-limits)) |
 | **probe**              | a fresh address derived per check, from which the sentinel repeats the buy and sales                                       |
 | **proof file**         | `proofs/<id>.json`: the requests, the responses and the evidence of one check ([replay](replay.md#the-proof-file))         |
+| **quarantine**         | after a `block`, the token can be neither checked nor bought for the owner's period (30 min by default) |
+| **quorum**             | how many sentinels must post the same `allow` or `warn` for it to count; any one blocks ([contract](contract.md#sentinel-quorum)) |
 | **reference block**    | the first Base block at least 4 s after a check's request on NEAR: the check simulates on it                               |
 | **relay**              | a program with no key that broadcasts a transaction NEAR signed; here only to anvil                                        |
 | **replay**             | `app/replay.ts`: re-derives a verdict from its proof file and a Base node                                                  |
-| **sentinel**           | the off-chain program that simulates each check and posts the verdict, with a key limited to that                          |
+| **sentinel**           | an off-chain program that simulates each check and posts its vote, with a key limited to that; the demo guard has two      |
 | **takeback**           | a `transferFrom` of a buyer's tokens without approval, by `owner()` or a stranger                                          |
 | **TEE**                | trusted execution environment: hardware that attests which code runs (Intel TDX here)                                      |
 | **template**           | a token's code with metadata and `PUSH32` operands masked: copies share it                                                 |
-| **verdict**            | the sentinel's answer to a check; it buys only within 120 s                                                                |
+| **verdict**            | the sentinels' answer to a check, set once their votes decide; it buys only within 120 s                                   |
+| **vote**               | one sentinel's verdict on a check, stored with the sha256 of its evidence                                                  |

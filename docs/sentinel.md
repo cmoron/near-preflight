@@ -1,8 +1,12 @@
 # Sentinel
 
-The sentinel judges a token before the guard lets an agent buy it. It runs off-chain
+A sentinel judges a token before the guard lets an agent buy it. It runs off-chain
 ([`app/sentinel.ts`](../app/sentinel.ts)), reads the guard's new checks, simulates on a Base node
-([`app/verifier.ts`](../app/verifier.ts)), and posts a verdict with its one NEAR key, limited to `post_verdict`.
+([`app/verifier.ts`](../app/verifier.ts)), and posts its vote with its one NEAR key, limited to `post_verdict`.
+
+The guard takes votes from the sentinels its owner names: the demo runs two, each with its own account
+and key, and an `allow` needs both ([quorum](contract.md#sentinel-quorum)). Everything below is what
+each one does; they agree because nothing in a check is theirs to choose.
 
 Nothing is signed or sent on Base: every call is a read-only simulation (`eth_simulateV1`) or a log query.
 Every fact a verdict rests on goes into the **evidence**, whose sha256 the guard stores with the verdict.
@@ -36,10 +40,12 @@ Every fact a verdict rests on goes into the **evidence**, whose sha256 the guard
 | Code changed         | `last_code` on the guard: code hash and proxy implementation at the last verdict | changed: `warn`                               |
 | Environment          | the guard's transactions replayed on local forks: what they touch and call       | see below                                     |
 | Environment opcodes  | the reachable code of the token and of its implementation                        | found: `warn`                                 |
+| The token's own code | the same replay: what its frames call, and the TIMESTAMP, NUMBER, SELFBALANCE they run | found: `warn`; a CREATE: `block`        |
 | Agent exit quote     | `eth_simulateV1`: the guard's own approve and swap, alone, 2 and 3 blocks ahead  | quote = ETH in                                |
 
 A check that fails (an RPC error, an index window not bound to the check) is retried; after 3 tries
-the sentinel posts a `block`: `simulation impossible after 3 tries : …`.
+the sentinel posts a `block`: `simulation impossible after 3 tries : …`. One sentinel's block is
+enough to block the check; posted without the token's code, it quarantines nothing.
 
 ## The four requests
 
@@ -78,7 +84,7 @@ The fourth runs on a real block Base mined later:
 A simulation keeps Base still between the buy and the sales; Base does not. On the later side, whatever
 Base really did in those `t` seconds is there, before the approve as well as before the swap: others'
 WETH, the base fee, the factory, the token's own pool. Nothing in it is a recipe a token could recognise.
-The sentinel waits for that block: on Base mainnet a verdict came 25 to 31 s after the request (checks #65
+The sentinel waits for that block: on Base mainnet a verdict came 25 to 31 s after the request (on an earlier guard, checks #65
 to #69), 53 s when the pool traded meanwhile and its trade was re-executed (#70).
 
 What the buy wrote comes from the [trace](#environment-rule): each storage slot it changed and each ETH
@@ -173,7 +179,7 @@ there is not downgraded. Each trade's hash is in `later.replayed`; replay fetche
 re-executes them, and one left out is a `MISMATCH`.
 
 **Measured on Base mainnet**, 2026-11-12, USDC: in 7 real windows where its pool traded during the wait
-(check #70, and 6 past windows checked read-only), the trades were re-executed and the resale verified
+(an earlier guard's check #70, and 6 past windows checked read-only), the trades were re-executed and the resale verified
 in 3. In the other 4 the resale is not verified: in three, re-executing the trades did not give back
 Base's value of a USDC balance (the one inspected is an arbitrage contract's, which ten other
 transactions of the same block also moved; another window hit the same slot), and one window held 14
@@ -295,13 +301,18 @@ the later side's trace and the two fixed far sales added about 0.4 s a check on 
 to 22.8 s after, of which 5.7 s is the later side's trace (its fork fetches the state it reads from the
 node). The sentinel runs the far sales while it waits for the later side's block, and the later side's
 trace beside its simulation, after the wait: on the guard, from the request to the verdict, 23.0 to
-25.5 s before (checks #96 to #98), 32.6 to 33.4 s after (#103, #104), 74.9 s when the pool traded
-during the wait (#105). The throwaway anvils' peak memory: 85 to 95 MB, measured with one far sale.
+25.5 s before (an earlier guard's checks #96 to #98), 32.6 to 33.4 s after (#103, #104), 74.9 s when the
+pool traded during the wait (#105). The throwaway anvils' peak memory: 85 to 95 MB, measured with one far sale.
+
+The [allow-list](#environment-rule) for the token's own code reads the same trace: no measurable cost
+(the same day: USDC 1.64 to 1.83 s before, 1.69 to 1.93 s after on the local copy; 23.1 and 24.3 s
+before, 22.0 s after on Base mainnet).
 
 **What it is not.** A frozen copy of the reference block: nothing Base does in those minutes is in it,
 neither others' trades of the pool nor WETH, L1Block or the base fee. A token keyed on time and on that
 state together (refusing from 5 minutes on only once WETH moved) passes there; the later side sees 16 to
-24 s of real Base. The horizon is 900 s: a sale closed from 15 minutes on passes.
+24 s of real Base. The horizon is 900 s: a sale closed from 15 minutes on passes them, and is left to
+the [allow-list](#environment-rule) for the token's own code.
 
 ## Environment rule
 
@@ -347,6 +358,37 @@ and the later side gives it what its transactions spend, not Base's.
 The same trace gives the buy's state change (`prestateTracer`, its values read before and after its
 block), which the [later side](#the-four-requests) applies.
 
+**An allow-list for the token's own code.** Sampling sales does not converge: each judge pass found the
+delay, the size or the state the samples missed. The rule above holds because it lists what is allowed.
+
+So `allow` also means that on the traced runs (the guard's buy, approves and sales on the reference
+block, the far sales, the later side's sales) the token's own frames did only this:
+
+- **Called nothing but its implementation and the precompiles** (`token_calls`). Its pool, the router or
+  the guard reached from its own code is a `warn` naming them: `token calls or reads its pool during a
+transfer: reserves and a clock any trade moves`.
+- **Executed no TIMESTAMP, NUMBER or SELFBALANCE** (`token_opcodes`): a `warn` naming them, `token reads
+TIMESTAMP during a transfer: it can act otherwise after the check's last sale`.
+- **Created no contract** (CREATE, CREATE2, in `token_opcodes` too): a `block`, `token creates a contract
+during a transfer: code no rule reads`. Init code runs at a new address, outside the token's frames and
+  outside any access list: it could read the time for the token and hand it back as revert data.
+
+Why the pool: keyed on its reserves a token sells until anyone trades, and `pair.sync()` then
+`getReserves()` hands it the block's time with no TIMESTAMP of its own. Hence both rules together.
+
+**What ran, not what the code holds.** USDC's `permit` compares a deadline with TIMESTAMP; the guard's
+buy, approve and sales never take that path, so USDC ran none. A BALANCE of the token's own address
+counts as SELFBALANCE.
+
+**A `warn`, not a `block`.** A launch cooldown, a fee swap through the router, a pool `sync()` after a
+burn are honest: the owner reads what the token reaches, then approves or not. WETH, the factory, an ETH
+balance and any address outside the list stay a `block`, as before.
+
+`LateClose` (`late_close`, `pool_clock`) closes every sale 20 minutes after its owner arms it, past the
+last far sale, by TIMESTAMP or by its pool's clock. Every sale a check draws goes through: `allow` before,
+`warn` now (`bun test -t "LateClose"`, `-t "PoolClock"`), and the real sale fails 20 minutes later
+(`bun test -t "fails 20 minutes later"`).
+
 **`opcodes`**: BLOCKHASH, COINBASE, PREVRANDAO, GASLIMIT, BASEFEE, BLOBHASH, BLOBBASEFEE, GASPRICE and
 ORIGIN in the reachable code of the token and of its implementation: a `warn` naming them.
 
@@ -357,10 +399,11 @@ ORIGIN in the reachable code of the token and of its implementation: a `warn` na
 Decisions, each on purpose:
 
 - GAS is not flagged: solc emits it before every external call, and each simulated transaction carries
-  the guard's own gas limit. SELFBALANCE reads the token's own state. BALANCE and EXTCODE* name an
-  address, which `touched` judges (anvil's access list reports them: tested).
-- TIMESTAMP and NUMBER stay allowed: the simulated blocks follow the cadence measured, and the sales
-  exercise them up to the [far sales](#the-far-sale) (301 to 900 s). After 900 s nothing is checked.
+  the guard's own gas limit. BALANCE and EXTCODE* name an address, which `touched` and `token_calls`
+  judge (anvil's access list reports them: tested).
+- TIMESTAMP, NUMBER and SELFBALANCE are judged on what ran, never on the code: most tokens hold a
+  TIMESTAMP (a permit's deadline). The simulated blocks still follow the cadence measured, and the
+  [far sales](#the-far-sale) exercise time up to 900 s: a second line of defence.
 - The coinbase is not an expected address: on Base it is the sequencer fee vault `0x4200…0011`, whose
   balance moves every block; the access list reports it only when code reads it.
 - A token whose transfers call any other contract (a dividend tracker, a library, a beacon proxy) is a
@@ -384,11 +427,36 @@ Decisions, each on purpose:
 - The full check of USDC, DAI, AERO, DEGEN, BRETT, TOSHI, VIRTUAL and cbBTC found no environment
   finding; each got `warn` only for its unknown reputation.
 
+**The allow-list measured before it changed a verdict** (2026-11-12, read only, a buy of 0.00001 ETH
+each): 21 tokens whose Uniswap V2 WETH pool held at least 0.001 WETH.
+
+| Tokens                                                                                                       | Before  | After   | What the two rules found       |
+| ------------------------------------------------------------------------------------------------------------ | ------- | ------- | ------------------------------ |
+| USDC, DAI, AERO, DEGEN, BRETT, TOSHI, VIRTUAL, cbBTC, cbETH, USDbC, WELL, MOCHI, KEYCAT, MIGGLES, ZORA, USDT, BOOMER, mfer | `warn`  | `warn`  | nothing                        |
+| SKI                                                                                                          | `warn`  | `warn`  | nothing (its code holds ORIGIN) |
+| BENJI                                                                                                        | `warn`  | `warn`  | its code ran NUMBER (and holds ORIGIN) |
+| AIXBT                                                                                                        | `block` | `block` | nothing (it reads another contract) |
+
+- No verdict changed. Each `warn` is the unknown reputation (no index on `mainnet.base.org`); with an
+  index, 18 of the 21 would have no finding at all, before and after.
+- Their own code called an implementation only (USDC, cbBTC, cbETH, USDbC, WELL) or nothing.
+- BENJI is the one token the rules add a reason to: `token reads NUMBER during a transfer`.
+
+**A third rule, measured and not shipped**: the token's code reads no storage slot the guard's own
+transactions did not write. On the guard's approves and sales, 16 of the 21 read at least one (USDC 4,
+BRETT 13, TOSHI 11, cbETH and USDbC 1).
+
+Only DAI, AERO, VIRTUAL, KEYCAT and USDT read none. It would cap USDC at `warn`: the owner's decision.
+
 **On the fork**, `red_l1_trap` and `helper_trap` (L1Block reached through a delegatecall to a helper
 whose address sits in storage) are a `block`, USDC an `allow`. `basefee_trap` is a `warn` for its opcode,
 and a `block` once the base fee moved before the later block: on the fork it falls about 2 wei a block,
 on Base it sat at its floor in 10 of 11 blocks sampled. `weth_key`, `approve_key` and `busy_tell` call
 WETH: a `block`.
+
+Two honest demo tokens changed verdict with the allow-list: `hold_one_block` (a one-block hold) and
+`cooldown_60` (when its first sale is drawn past the cooldown) were `allow` and are `warn`, naming the
+NUMBER and TIMESTAMP their code reads. Every other demo token keeps its verdict.
 
 [`app/environment.test.ts`](../app/environment.test.ts) shows each real sale failing after one emulated
 sequencer block (L1Block's sequence number advanced), a base fee move, or another user's WETH deposit.
@@ -405,6 +473,9 @@ sequencer block (L1Block's sequence number advanced), a base fee move, or anothe
 | A sale refused, or paying 1 % less, on the later side, verified or not    | `block` |
 | A template whose earlier pools were drained, or a token on the blocklist  | `block` |
 | A tax from 10 %, an environment opcode, removable liquidity, code changed | `warn`  |
+| The token's own code calls its pool, the router or the guard              | `warn`  |
+| The token's own code runs TIMESTAMP, NUMBER or SELFBALANCE                | `warn`  |
+| The token's own code creates a contract                                   | `block` |
 | Others' trades not re-executed, the resale going through there            | `warn`  |
 | No V2 pair, no template index for the chain                               | `warn`  |
 
@@ -515,14 +586,18 @@ minus 3 %). It simulates twice: with no floor to get the quote, then exactly as 
 A simulation cannot prove that a token will be sellable later. Still open:
 
 - An owner action after the buy: a pause, a fee raised, a blacklist; any admin, not only `owner()`.
-- Behaviour that changes after 900 s, the last far sale: a sale closed from 15 min on passes. One closed
-  from 5 to 15 min on (`sell_blocked_later`, `sell_tax_later`, `guard_later`) is caught at every check.
+- Behaviour that changes after 900 s, the last far sale, when the token's code read neither the time
+  nor its pool on the guard's transactions: a time test in a branch they never took (behind a flag its
+  owner sets later, or reached only once others traded), or a time someone else writes into its storage.
+  A token whose code reads TIMESTAMP, NUMBER or its pool there is a `warn`
+  ([allow-list](#environment-rule)); a sale closed from 5 to 15 min on is caught at every check.
 - What Base does during those minutes: the far sales run on a frozen copy of the reference block. A token
   keyed on time and on state Base moves together passes them ([why](#the-far-sale)).
 - A sale size or delay the check did not draw: a sale refused only below some share, or only during a
-  window that reopens before 900 s and misses the drawn delays. A `block` that lists nothing is not
-  remembered: an agent may request checks again, and each one draws the first and late sales, the far
-  sale between 301 and 900 s, and the later side's block anew. What a re-draw can escape is bounded: a
+  window that reopens before 900 s and misses the drawn delays. Each check draws the first and late
+  sales, the far sale between 301 and 900 s, and the later side's block anew; the guard quarantines the
+  token after any block and takes one check per token at a time
+  ([token limits](contract.md#token-limits)): one draw per quarantine, 30 min by default, not none. What a re-draw can escape is bounded: a
   refusal in force at 301 s or at 900 s is met at every check, and the late and far sales always sell
   the whole rest. An agent's exit sells its holding (the signed minimum, 97 % of the quote), when it
   chooses.
@@ -538,6 +613,12 @@ A simulation cannot prove that a token will be sellable later. Still open:
 - Uniswap V4 hooks: only V2 WETH pools are read.
 - A token that refuses or taxes only some sale sizes can still get listed by a check of that size; the
   owner unlists.
+
+- A holder of most of the supply: it sells into the pool with no trap in the code. The check reads who
+  holds the LP, never who holds the token.
+- The node: each sentinel reads one Base endpoint (`EVM_RPC`) and believes it. The guard takes two
+  sentinels' identical votes for an `allow` ([quorum](contract.md#sentinel-quorum)), so one lying node
+  no longer allows alone, when the two read different nodes: in the demo both read the same one.
 
 When the guard's address cannot pay for its transactions at the check, its balance is set to exactly
 what they spend.

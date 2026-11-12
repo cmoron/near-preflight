@@ -236,6 +236,37 @@
             </li>
             <li>
               <a
+                href="https://github.com/cmoron/near-preflight/blob/main/docs/threat-model.md#what-the-tokens-own-code-did"
+              >
+                <span class="v warn"
+                  ><span class="lamps" aria-hidden="true"
+                    ><i></i><i></i><i></i><i></i></span
+                  ><b class="verdict">warn</b></span
+                >
+                <span
+                  >A token whose own code reads the time or its pool, to change
+                  after the check: the owner decides</span
+                >
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://github.com/cmoron/near-preflight/blob/main/docs/threat-model.md#a-lying-sentinel"
+              >
+                <span class="v block"
+                  ><span class="lamps" aria-hidden="true"
+                    ><i></i><i></i><i></i><i></i></span
+                  ><b class="verdict">no allow</b></span
+                >
+                <span
+                  >One stolen sentinel key, or a Base node only one sentinel
+                  reads, says allow on a trap: the second sentinel's vote is
+                  missing, or blocks</span
+                >
+              </a>
+            </li>
+            <li>
+              <a
                 href="https://github.com/cmoron/near-preflight/blob/main/docs/threat-model.md#agent-bypasses"
               >
                 <span class="v block"
@@ -260,12 +291,23 @@
           <h2>What it does not stop</h2>
           <ul>
             <li>
-              <b>A lying sentinel.</b> Its <code>allow</code> on a trap can be
-              bought within 120 s; replay shows the lie afterwards.
+              <b>Both sentinels lying.</b> One alone can only block. In this
+              demo both run on one machine and read one Base node: two keys, not
+              two parties. Replay shows a lie afterwards.
             </li>
             <li>
               <b>What a token does later.</b> A pause, tax or blacklist after
               the buy.
+            </li>
+            <li>
+              <b>Asking again, later.</b> A block quarantines its token for 30
+              min, for every agent; after it an agent may ask again, with new
+              draws.
+            </li>
+            <li>
+              <b>What no code shows.</b> A holder of most of the supply can sell
+              into the pool; liquidity older than one hour is not read; each
+              sentinel believes the Base node it reads.
             </li>
             <li>
               <b>Front-running.</b> The signing request is public on NEAR before
@@ -328,7 +370,6 @@
             <rect class="box" x="16" y="282" width="130" height="88" />
             <text class="name" x="32" y="320">AI agent</text>
             <text class="sub" x="32" y="344">no key for Base</text>
-            <text class="tag" x="16" y="392">Start here</text>
             <rect class="box" x="176" y="282" width="130" height="88" />
             <text class="name" x="192" y="320">sentinel</text>
             <text class="sub" x="192" y="344">off-chain</text>
@@ -370,12 +411,14 @@
               for the check.
             </li>
             <li>
-              The sentinel reads the check and simulates on Base the exact buy
+              Each sentinel reads the check and simulates on Base the exact buy
               the guard would sign, then two sales of what it bought.
             </li>
             <li>
-              It stores the verdict on the guard, with the sha256 of its
-              evidence and the hash of the one transaction NEAR may sign.
+              Each posts its vote to the guard, with the sha256 of its evidence
+              and the hash of the one transaction NEAR may sign. An
+              <code>allow</code> takes both votes; one <code>block</code> is
+              enough.
             </li>
             <li>
               On a fresh <code>allow</code>, within 120 s, the agent buys. It
@@ -392,8 +435,8 @@
           </ol>
         </div>
         <p class="note">
-          The guard's owner appoints the sentinel; its key can only post
-          verdicts.
+          The guard's owner appoints the sentinels, two on the demo guard; a
+          sentinel's key can only vote on checks.
           <a
             href="https://github.com/cmoron/near-preflight/blob/main/docs/threat-model.md#a-lying-sentinel"
             >What a lying sentinel can still do</a
@@ -421,9 +464,9 @@
           <pre
             id="cmds"
           ><code>git clone https://github.com/cmoron/near-preflight &amp;&amp; cd near-preflight &amp;&amp; bun install
-export GUARD=<span id="cmd-guard">guard.goblin-guard-13713.testnet</span>   <span class="c"># the demo guard on NEAR testnet, read only</span>
+export GUARD=<span id="cmd-guard">guard.goblin-guard-69369.testnet</span>   <span class="c"># the demo guard on NEAR testnet, read only</span>
 
-<span class="c"># Check #103 (USDC on Base mainnet): resent, traced on a local fork, re-judged, compared with NEAR</span>
+<span class="c"># Check #21 (USDC on Base mainnet): resent, traced on a local fork, re-judged, compared with NEAR</span>
 bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
 <span class="c">#   REPLAY OK: verdict warn confirmed, same as on chain</span>
 

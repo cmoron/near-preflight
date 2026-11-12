@@ -34,7 +34,7 @@ export async function takeSnapshot() {
   const snap = {
     guard, taken_at, block_height: height, last_check_id: last, checks, entries, agents,
     signing_since: await v("signing_since"), escrow: await v("escrow"), credits_total: await v("credits_total"),
-    bounds: await v("bounds"), evm_config: await v("evm_config"),
+    bounds: await v("bounds"), evm_config: await v("evm_config"), sentinels: await v("sentinels"), token_limits: await v("token_limits"),
   };
   // Checks are requested while we read: a snapshot that straddles two states would mislabel itself.
   if (Number(await v("last_check_id")) !== last) throw new Error("a check was requested while reading: run again");

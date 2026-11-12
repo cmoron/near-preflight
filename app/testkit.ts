@@ -122,7 +122,9 @@ if (import.meta.main && process.argv[2] === "live") {
   }
   console.log(`    [fork] mining a block every ${FORK_S} s on ${url}, with others' WETH and ETH transfers`);
   while (!stop) {
-    await mine(url, 1, true);
+    // A fork that answers late (it fetches state it does not hold yet from its upstream node) costs a
+    // block, not the miner: every check of the demo waits for the blocks it mines.
+    await mine(url, 1, true).catch((e) => console.log(`    [fork] block not mined, next try in ${FORK_S} s (${e instanceof Error ? e.message.split("\n")[0] : e})`));
     await Bun.sleep(Number(FORK_S) * 1000);
   }
 }

@@ -8,7 +8,7 @@
 // It needs a node that still serves the state of both blocks. docs/replay.md lists each line.
 // Usage: bun app/replay.ts <proof.json> [rpc] [--check]   (exit code 0 only if every line holds)
 import { decodeFunctionData, encodeFunctionData, keccak256, parseAbi, parseTransaction, serializeTransaction, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
-import { ENV_OPCODES, trace, traceLater, type Reach, type Trace } from "./environment";
+import { ENV_OPCODES, TOKEN_OPCODES, trace, traceLater, type Reach, type Trace } from "./environment";
 import { laterSide, MAX_REPLAYED } from "./later";
 import { beforeBlock, buildIndex, INDEX_SPAN_S, indexSha256, ownFunding, reputationOf, templateOf, windowProblem, type Reputation } from "./index";
 import {
@@ -84,6 +84,7 @@ type Evidence = {
   touched: string[] | null;
   token_calls: string[] | null;
   token_balances: string[] | null;
+  token_opcodes: string[] | null;
   sales: Sale;
   later: Later | null;
   list_target: boolean;
@@ -110,6 +111,8 @@ export type OnChain = {
   signed_tx?: string | null;
   /** The `list_target` the sentinel posted with the verdict. */
   list_target: boolean;
+  /** The sentinels' votes (a check read without them counts as its one vote). */
+  votes?: { sentinel: string; verdict: string; evidence_sha256: string }[];
 } | null;
 /** A blocklist entry as get_entry returns it, null if not listed. */
 export type OnChainEntry = { reporter: string; evidence_sha256: string } | null;
@@ -118,7 +121,7 @@ const blocksOf = (q: Request) => (q.params[0] as { blockStateCalls: BlockStateCa
 /** What replay compares of a call's result: status, return data and logs (emitter, topics, data). */
 const outcome = (r: Result) => JSON.stringify([r.status, r.returnData, (r.logs ?? []).map((l) => [l.address.toLowerCase(), l.topics, l.data])]);
 
-const EVIDENCE_KEYS = "amount_wei,block,cadence,calls,chain_id,code_hash,implementation,later,liquidity,list_target,method,near,opcodes,quote,reputation,request_sha256,sales,template,token_balances,token_calls,touched,tx_hashes";
+const EVIDENCE_KEYS = "amount_wei,block,cadence,calls,chain_id,code_hash,implementation,later,liquidity,list_target,method,near,opcodes,quote,reputation,request_sha256,sales,template,token_balances,token_calls,token_opcodes,touched,tx_hashes";
 const EXIT_KEYS = "amount,block,cadence,calls,chain_id,kind,method,quote,request_sha256,tx_hashes";
 const REPUTATION_KEYS = "before_block,drained,from,index_sha256,median_drain_blocks,pools,template,to";
 
@@ -176,6 +179,7 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
     (e.touched === null || addresses(e.touched)) &&
     (e.token_calls === null || addresses(e.token_calls)) &&
     (e.token_balances === null || addresses(e.token_balances)) &&
+    (e.token_opcodes === null || (Array.isArray(e.token_opcodes) && e.token_opcodes.every((o) => Object.values(TOKEN_OPCODES).includes(o as string)))) &&
     isSale(e.sales, e.cadence as Cadence) &&
     (e.later === null || isLater(e.later, e.block as number)) &&
     typeof e.list_target === "boolean";
@@ -397,7 +401,7 @@ async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][]): P
  *  fork); the far sales mined again on the same fork, their results compared with the file's and returned
  *  (null without them) for the judgment; then the later side rebuilt on evidence.later's block from what
  *  the buy wrote there and the node's state, compared with the file's, and traced in turn. What all of
- *  them touch is compared with evidence.touched, token_calls and token_balances. */
+ *  them touch is compared with evidence.touched, token_calls, token_balances and token_opcodes. */
 async function retrace(url: string, p: Proof, e: Evidence, r: Rebuilt): Promise<{ lines: Line[]; far: Result[] | null }> {
   const out: Line[] = [];
   const add = (ok: boolean, text: string) => out.push({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
@@ -415,11 +419,12 @@ async function retrace(url: string, p: Proof, e: Evidence, r: Rebuilt): Promise<
     add(same, same ? `far sales re-run on a local fork, the late sale again ${when}: status, return data and logs of their ${far.length} calls identical` : `far sales re-run on a local fork ${when}: their results differ from the proof's`);
   }
   const seen: Reach | null = traced && e.later ? await laterLines(url, p, e, r, traced, add, out) : traced;
-  const [t, calls, read] = [seen?.touched ?? null, seen?.calls ?? null, seen?.balances ?? null].map((x) => JSON.stringify(x));
+  const [t, calls, read, ran] = [seen?.touched ?? null, seen?.calls ?? null, seen?.balances ?? null, seen?.opcodes ?? null].map((x) => JSON.stringify(x));
   const where = `traced again on local forks at block ${e.block}${e.later ? ` and block ${e.later.block}` : ""}`;
   add(t === JSON.stringify(e.touched), t === JSON.stringify(e.touched) ? `addresses the guard's transactions touch, ${where}: ${seen ? seen.touched.length : "none, no pool"}, identical to evidence.touched` : `addresses touched: evidence ${JSON.stringify(e.touched)}, traced ${t}`);
   add(calls === JSON.stringify(e.token_calls), calls === JSON.stringify(e.token_calls) ? `what the token's code calls or reads in them: ${seen?.calls.join(", ") || "nothing"}, identical to evidence.token_calls` : `token calls: evidence ${JSON.stringify(e.token_calls)}, traced ${calls}`);
   add(read === JSON.stringify(e.token_balances), read === JSON.stringify(e.token_balances) ? `ETH balances the token's code reads: ${seen?.balances.join(", ") || "none"}, identical to evidence.token_balances` : `token balances read: evidence ${JSON.stringify(e.token_balances)}, traced ${read}`);
+  add(ran === JSON.stringify(e.token_opcodes), ran === JSON.stringify(e.token_opcodes) ? `TIMESTAMP, NUMBER, SELFBALANCE or CREATE the token's code executes in them: ${seen?.opcodes.join(", ") || "none"}, identical to evidence.token_opcodes` : `token opcodes executed: evidence ${JSON.stringify(e.token_opcodes)}, traced ${ran}`);
   return { lines: out, far };
 }
 
@@ -473,6 +478,37 @@ async function probeProblems(url: string, e: Evidence, target: Address, r: Rebui
 
 const readCheck = async (id: number) => (await import("./near")).view<OnChain>("get_check", { id }); // near.ts installs a global fetch: loaded here only
 const readEntry = async (token: string) => (await import("./near")).view<OnChainEntry>("get_entry", { token });
+const readQuorum = async () => (await (await import("./near")).view<{ quorum: number }>("sentinels")).quorum;
+
+/** The proof against its check's votes on the guard. Its evidence must be one vote's (sha256 `h`), and
+ *  that vote's verdict the file's. The guard's verdict must be what the votes decide: `quorum` votes for
+ *  an allow or a warn (one for an exit quote), any one for a block. A block on a vote that was not one
+ *  (another sentinel blocked, or the votes disagreed) is reported as such. The stored reasons are the
+ *  deciding vote's: compared when that vote is this proof's. */
+export function voteLines(id: number, c: NonNullable<OnChain>, h: string, file: { verdict: string; reasons: string }, quorum: number): Line[] {
+  const line = (ok: boolean, text: string): Line => ({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
+  const votes = c.votes ?? [{ sentinel: "the sentinel", verdict: String(c.verdict), evidence_sha256: c.evidence_sha256 }];
+  // honest sentinels often post the very same evidence string: the file is then each one's
+  const carrying = votes.filter((v) => v.evidence_sha256 === h);
+  const mine = carrying.find((v) => v.verdict !== file.verdict) ?? carrying[0];
+  const out = [
+    line(
+      !!mine,
+      mine
+        ? `on-chain evidence_sha256 ${h} is the sha256 of the evidence replayed above: the vote of ${carrying.map((v) => v.sentinel).join(" and ")}, ${carrying.length} of the ${votes.length} posted`
+        : `on-chain evidence_sha256 ${votes.map((v) => v.evidence_sha256).join(", ")} != sha256 of the file's evidence ${h}`,
+    ),
+  ];
+  if (c.votes && mine && mine.verdict !== file.verdict) return [...out, line(false, `the vote of ${mine.sentinel} on chain is ${mine.verdict}, the file says ${file.verdict}`)];
+  const needed = c.verdict === "block" || c.exit_amount !== null ? 1 : quorum;
+  const posted = votes.filter((v) => v.verdict === c.verdict).length;
+  const deciding = c.evidence_sha256 === h || !mine;
+  if (c.verdict === "block" && file.verdict !== "block" && mine) out.push(line(true, `on-chain verdict block for #${id}: this vote was ${file.verdict}; another sentinel blocked, or the votes disagreed (${c.reasons})`));
+  else if (c.verdict !== file.verdict || (deciding && c.reasons !== file.reasons)) out.push(line(false, `on-chain "${c.verdict}: ${c.reasons}" != file "${file.verdict}: ${file.reasons}"`));
+  else if (c.verdict !== "block" && posted < needed) out.push(line(false, `on-chain verdict ${c.verdict} for #${id} rests on ${posted} vote(s): the guard's quorum is ${needed}`));
+  else out.push(line(true, `on-chain verdict ${c.verdict} for #${id} matches (same target, ${deciding ? "same reasons" : "the reasons stored are the first vote's"}): ${posted} sentinel(s) posted it, ${needed} needed`));
+  return out;
+}
 /** The guard account (GUARD in .env) and its EVM address derived through Chain Signatures. */
 export type GuardInfo = { account: string; evm: Address };
 async function readGuard(): Promise<GuardInfo> {
@@ -484,6 +520,8 @@ const same = (a: string | null, b: string) => a?.toLowerCase() === b.toLowerCase
 
 type Opts = {
   check?: boolean;
+  /** Identical votes an allow or a warn needs on the guard (view `sentinels`; 1 with an injected `chain`). */
+  quorum?: number;
   chain?: (id: number) => Promise<OnChain>;
   entry?: (token: string) => Promise<OnChainEntry>;
   guard?: GuardInfo;
@@ -658,12 +696,8 @@ export async function replay(
       else if (!c.verdict) out.push({ ok: false, line: `ERROR    request #${proof.id} has no verdict on chain yet` });
       else {
         const h = sha256(stringToHex(proof.evidence)).slice(2);
-        add(
-          h === c.evidence_sha256,
-          h === c.evidence_sha256
-            ? `on-chain evidence_sha256 ${h} is the sha256 of the evidence replayed above`
-            : `on-chain evidence_sha256 ${c.evidence_sha256} != sha256 of the file's evidence ${h}`,
-        );
+        const voted = voteLines(proof.id, c, h, proof, opts.quorum ?? (opts.chain ? 1 : await readQuorum()));
+        out.push(voted[0]);
         add(c.quote === e.quote, c.quote === e.quote ? `on-chain quote ${c.quote} matches evidence` : `on-chain quote ${c.quote} != evidence quote ${e.quote}`);
         add(c.amount_wei === e.amount_wei, c.amount_wei === e.amount_wei ? `on-chain amount ${c.amount_wei} wei (stated at request_check) is the one simulated` : `on-chain amount ${c.amount_wei} wei != simulated ${e.amount_wei}`);
         add(
@@ -672,10 +706,7 @@ export async function replay(
         );
         out.push(...signedAsSimulated(proof.id, c, e.tx_hashes));
         if (c.target.toLowerCase() !== proof.target.toLowerCase()) add(false, `on-chain target ${c.target} is not the proof target ${proof.target}`);
-        else {
-          const same = c.verdict === proof.verdict && c.reasons === proof.reasons;
-          add(same, same ? `on-chain verdict ${c.verdict} for #${proof.id} matches (same target, same reasons)` : `on-chain "${c.verdict}: ${c.reasons}" != file "${proof.verdict}: ${proof.reasons}"`);
-        }
+        else out.push(...voted.slice(1));
         out.push(await reference(url, e, c));
         if (rebuilt) out.push(...(await derivation(url, proof.id, rebuilt, e, c, blockHash, opts.guard ?? (await readGuard()))));
         out.push(...(await nearFacts(proof, e, opts.chain ?? readCheck, opts.entry ?? readEntry)));

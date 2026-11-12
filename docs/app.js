@@ -1,6 +1,6 @@
 'use strict';
 // Guard account to read. Override with ?guard=<account id>.
-const DEFAULT_GUARD = 'guard.goblin-guard-13713.testnet';
+const DEFAULT_GUARD = 'guard.goblin-guard-69369.testnet';
 const RPCS = ['https://test.rpc.fastnear.com', 'https://rpc.testnet.near.org'];
 const REFRESH_MS = 30000, BATCH = 5, PAGE = 50;
 // A check judged this long ago no longer changes (approval, buy and quoted exit end 120 s after the
@@ -45,6 +45,8 @@ const LABELS = {
   cooldown_60: 'honest: 30-block cooldown after a buy (6 s on Base)',
   impl_mark: "trap: the next buy marks you in its implementation's storage",
   guard_later: "trap: closes the guard's sales 8 min after its buy",
+  late_close: 'trap: closes every sale 20 min after it is armed',
+  pool_clock: "trap: the same, the time read from its own pool",
 };
 
 const GUARD = new URLSearchParams(location.search).get('guard') || DEFAULT_GUARD;
@@ -144,7 +146,14 @@ function token(addr, inline) {
 const kindOf = (k) => (k.exit_amount != null ? 'sale' : 'buy');
 const verdictOf = (k) => k.verdict || 'pending';
 const signedOf = (k) => (kindOf(k) === 'sale' ? k.settled : !!k.signed_tx); // as the "Signed by NEAR" fact below
-const firstReason = (k) => (k.reasons ? k.reasons.split(' ; ')[0] : k.verdict ? '-' : 'waiting for the sentinel');
+// The sentinels' votes on a check (none on a guard deployed before the quorum): an allow or a warn takes the
+// quorum's identical votes, one block vote blocks.
+const votesOf = (k) => k.votes || [];
+const tally = (k) => {
+  const v = votesOf(k), same = v.filter((x) => x.verdict === k.verdict).length;
+  return k.verdict === 'block' ? 'blocked by ' + same + ' of ' + v.length + (v.length === 1 ? ' vote' : ' votes') : same + ' of ' + v.length + (v.length === 1 ? ' sentinel' : ' sentinels');
+};
+const firstReason = (k) => (k.verdict ? (k.reasons ? k.reasons.split(' ; ')[0] : '-') : 'waiting for the sentinels' + (votesOf(k).length ? ' (' + votesOf(k).length + ' voted)' : ''));
 
 async function mapBatches(items, fn) {
   const out = [];
@@ -169,6 +178,7 @@ function checkItem({ id, check: k }, open) {
     ['Asked', sale ? 'a sale of ' + k.exit_amount + ' token units (exit quote)' : 'a buy of ' + eth(k.amount_wei)],
     ['Requested', when(k.requested_ns)],
     ['Judged', k.verdict ? when(k.judged_ns) + ' (' + (secs(k.judged_ns) - secs(k.requested_ns)) + ' s later)' : 'not yet'],
+    ['Votes', votesOf(k).length ? el('span', { class: 'stack' }, ...(k.verdict ? [tally(k) + ':'] : []), ...votesOf(k).map((v) => el('span', {}, v.verdict + ' by ' + v.sentinel + ', evidence ', mono(v.evidence_sha256, v.evidence_sha256)))) : 'none yet'],
     ['Reasons', k.reasons || '-'],
     ['Quote', sale ? eth(k.quote) + ' for the sale' : k.quote + ' token units for the buy'],
     k.verdict === 'warn' && ['Owner approval', k.approved ? 'approved' : 'not approved'],
@@ -200,8 +210,8 @@ function renderSteps(checks) {
   const step = (title, ...text) => el('li', {}, el('b', {}, title), ' ', ...text);
   $('steps').replaceChildren(
     step('The agent asks.', acct(k.agent), ' asked to buy ', eth(k.amount_wei), ' of ', token(k.target, true), ' at ', when(k.requested_ns), '.'),
-    step('The sentinel simulates.', 'The buy NEAR would sign, then two sales of what it bought, were simulated on its Base node. ',
-      secs(k.judged_ns) - secs(k.requested_ns) + ' s after the request, it answered ', badge(k.verdict), ': ', el('q', {}, firstReason(k)), '.'),
+    step('The sentinels simulate.', 'The buy NEAR would sign, then two sales of what it bought, were simulated by each sentinel on its Base node. ',
+      secs(k.judged_ns) - secs(k.requested_ns) + ' s after the request, ' + (votesOf(k).length ? tally(k) : 'the sentinel') + ' answered ', badge(k.verdict), ': ', el('q', {}, firstReason(k)), '.'),
     step('The verdict is stored on NEAR.', 'With the sha256 of its evidence, ', mono(k.evidence_sha256), ', a quote of ', k.quote,
       ' token units, and the hash of the only transaction the guard may sign for it, ', mono('0x' + k.tx_hashes[0]), '.'),
     step('NEAR signs.', 'The guard built the swap (router, path, recipient = its own address, floor = quote minus slippage) and NEAR Chain Signatures signed it: ',

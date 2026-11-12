@@ -35,27 +35,36 @@ refused() {
 
 echo "0. The armer (own process, function-call key limited to arm/disarm) arms the agent within the human's bounds."
 [[ $FULL ]] && refused "budget above the human's bound" "${ARMER[@]}" 0.6 900
-# Default run: 4 checks and 2 buys (0.121 NEAR), with the model up to 2 more checks; --full: about
-# 0.3 NEAR (exit, warn, second trap, the model's runs and buy). Armed with some margin.
+# Default run: 4 checks and 2 buys (0.145 NEAR), with the model up to 2 more checks; --full: about
+# 0.35 NEAR (exit, warn, second trap, the model's runs and buy). Armed with some margin.
 "${ARMER[@]}" 0.4 900
 # The second agent (--full) asks for one check.
 [[ $FULL ]] && AGENT=$(sed -n 's/^AGENT=//p' .env.agent2) "${ARMER[@]}" 0.05 900
 LLM=()
 [[ -f .env.llm ]] && LLM=(--env-file=.env.llm)
 
+# 60 s per RPC call (20 s by default): the fork answers late while it fetches Base state it has not read yet.
+export RPC_TIMEOUT_MS=60000
 # The fork mines nothing on its own: a block a second (app/testkit.ts FORK_S) with others' WETH and ETH transfers,
 # as on Base, for the blocks each check waits for (its reference block, then the later side's).
 bun app/testkit.ts live &
 MINER=$!
-# The sentinel builds the template index from the fork's first block up to each check's block.
-INDEX_FROM=$(($(jq .fork_block evm/tokens.json) + 1)) bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts &
-SENTINEL=$!
-trap 'kill $SENTINEL $MINER' EXIT
+# Each sentinel builds the template index from the fork's first block up to each check's block. Two of
+# them, each its own account and key (.env.sentinel2, written by setup): an allow needs both votes. The
+# second reads another Base node when EVM_RPC_2 names one; on the fork both read the fork.
+export INDEX_FROM=$(($(jq .fork_block evm/tokens.json) + 1))
+bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts &
+SENTINELS=($!)
+if [[ -f .env.sentinel2 ]]; then
+  env ${EVM_RPC_2:+EVM_RPC=$EVM_RPC_2} bun --env-file=.env --env-file=.env.sentinel2 app/sentinel.ts &
+  SENTINELS+=($!)
+fi
+trap 'kill "${SENTINELS[@]}" $MINER' EXIT
 status=0
 rm -f proofs/verify.txt
 # The agent's buy and sale wait for the MPC signature: allow 60 s per NEAR RPC call (20 s by default).
-RPC_TIMEOUT_MS=60000 bun --env-file=.env --env-file=.env.agent "${LLM[@]}" app/demo.ts $FULL || status=$?
-kill $SENTINEL $MINER
+bun --env-file=.env --env-file=.env.agent "${LLM[@]}" app/demo.ts $FULL || status=$?
+kill "${SENTINELS[@]}" $MINER
 trap - EXIT # otherwise the trap kills an already reaped process, and under set -e its failure becomes the exit code
 
 if [[ $FULL ]]; then

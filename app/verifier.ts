@@ -154,6 +154,9 @@ export type Report = {
     token_calls: string[] | null;
     /** Those whose ETH balance it reads (BALANCE), itself aside, sorted; null without a pool. */
     token_balances: string[] | null;
+    /** TIMESTAMP, NUMBER and SELFBALANCE as its own code executed them in those transactions (same
+     *  trace; app/environment.ts TOKEN_OPCODES), sorted; null without a pool. */
+    token_opcodes: string[] | null;
     /** The later side (laterSide): the real block it ran on, the slots the buy wrote that Base also wrote
      *  before it, the pool's reserves at its start; null when the check stopped at the buy. */
     later: Later | null;
@@ -764,7 +767,7 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const st = buyStages(byLabel(labelsOf(first1), first.response.flat()), { token, ...who });
   if (st.stop || !liquidity) {
     const t = liquidity ? await trace(url, first.request[0], Number(block), token, implementation) : null;
-    return report({ ...proof, touched: t?.touched ?? null, token_calls: t?.calls ?? null, token_balances: t?.balances ?? null, later: null }, first, labelsOf(first1), [keccak256(buy0)], { token, ...who });
+    return report({ ...proof, touched: t?.touched ?? null, token_calls: t?.calls ?? null, token_balances: t?.balances ?? null, token_opcodes: t?.opcodes ?? null, later: null }, first, labelsOf(first1), [keccak256(buy0)], { token, ...who });
   }
 
   // 2nd simulation: the guard's buy as it would be signed on this quote (minimum = quote - slippage),
@@ -788,7 +791,7 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const [out, seen] = await Promise.all([rpc<{ calls: Result[] }[]>(url, l.request.method, l.request.params), traceLater(url, l.request, token, implementation, t)]);
   const both = { request: [...sim.request, l.request, far], response: [...sim.response, out.flatMap((b) => b.calls), t.far!] };
   const { request: _, ...found } = l;
-  const facts = { ...proof, touched: seen.touched, token_calls: seen.calls, token_balances: seen.balances, later: { block: Number(real.number), ...found } };
+  const facts = { ...proof, touched: seen.touched, token_calls: seen.calls, token_balances: seen.balances, token_opcodes: seen.opcodes, later: { block: Number(real.number), ...found } };
   return report(facts, both, labelsOf(sides), [keccak256(buy)], { token, ...who });
 }
 
@@ -997,7 +1000,7 @@ export function quoteOf(labels: string[], results: Result[], w: Parties): bigint
 export const byLabel = (labels: string[], results: Result[]) => Object.fromEntries(labels.map((l, i) => [l, results[i]]));
 
 /** Facts beside the simulation that the verdict rests on, all in the evidence. */
-export type Facts = Pick<Report["evidence"], "block" | "cadence" | "code_hash" | "implementation" | "liquidity" | "reputation" | "near" | "opcodes" | "touched" | "token_calls" | "token_balances" | "sales" | "later">;
+export type Facts = Pick<Report["evidence"], "block" | "cadence" | "code_hash" | "implementation" | "liquidity" | "reputation" | "near" | "opcodes" | "touched" | "token_calls" | "token_balances" | "token_opcodes" | "sales" | "later">;
 
 function report(
   proof: Omit<Facts, "block"> & { chain_id: number; block: bigint; template: Hex; amount_wei: string },
@@ -1028,6 +1031,7 @@ function report(
     touched: proof.touched,
     token_calls: proof.token_calls,
     token_balances: proof.token_balances,
+    token_opcodes: proof.token_opcodes,
     sales: proof.sales,
     later: proof.later,
     list_target,

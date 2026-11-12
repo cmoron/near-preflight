@@ -45,6 +45,9 @@
         return method === 'is_frozen' ? a.frozen : a.stopped_at;
       }
       case 'signing_since': case 'escrow': case 'credits_total': case 'bounds': case 'evm_config': return snap[method];
+      case 'sentinels': case 'token_limits': // absent from a snapshot taken before them
+        if (snap[method] === undefined) throw new Error('snapshot has no ' + method);
+        return snap[method];
       default: throw new Error('snapshot has no ' + method);
     }
   }

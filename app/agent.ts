@@ -13,6 +13,7 @@ export const BUY_GAS = 100_000_000_000_000n;
 export const SELL_GAS = 150_000_000_000_000n;
 const log = (s: string) => console.log(`  [wrapper] ${s}`);
 const VERDICT_TTL_MS = 120_000; // an allow verdict expires 120 s after it is posted (same rule as the contract)
+const FRESH_MS = 180_000; // and buys only within 180 s of the check's request: the state judged is that old
 const TIMEOUT_MS = 300_000; // contract delay before refunding a request without a verdict
 
 /** Asks the guard for a verdict on buying `wei` of `target`: the sentinel simulates that very buy,
@@ -20,7 +21,7 @@ const TIMEOUT_MS = 300_000; // contract delay before refunding a request without
  *  (app/llm.ts) that asked for it, stored with the check. */
 export async function requestCheck(target: string, wei: bigint, decision?: string): Promise<number> {
   const { value: id, tx } = await call<number>(agent, "request_check", { target, amount_wei: wei.toString(), decision_sha256: decision });
-  log(`request #${id} : verdict on a buy of ${formatEther(wei)} ETH of ${target}, 0.019 NEAR taken from credit${decision ? `, decision ${decision.slice(0, 12)}...` : ""}  ${tx}`);
+  log(`request #${id} : verdict on a buy of ${formatEther(wei)} ETH of ${target}, its price taken from credit${decision ? `, decision ${decision.slice(0, 12)}...` : ""}  ${tx}`);
   return id;
 }
 
@@ -42,8 +43,9 @@ export async function waitVerdict(id: number): Promise<Check | null> {
 
 /** Waits for the owner's approve_warn of #id on chain, at most `waitMs` and never past the verdict's
  *  life (the buy needs ~10 s more). */
-async function waitApproval(id: number, judgedNs: string, waitMs: number): Promise<boolean> {
-  const end = Math.min(Date.now() + waitMs, Number(BigInt(judgedNs) / 1_000_000n) + VERDICT_TTL_MS - 10_000);
+async function waitApproval(id: number, judgedNs: string, requestedNs: string, waitMs: number): Promise<boolean> {
+  const ms = (ns: string) => Number(BigInt(ns) / 1_000_000n);
+  const end = Math.min(Date.now() + waitMs, ms(judgedNs) + VERDICT_TTL_MS - 10_000, ms(requestedNs) + FRESH_MS - 10_000);
   while (Date.now() < end) {
     try {
       if ((await view<Check | null>("get_check", { id }))?.approved) return true;
@@ -76,7 +78,7 @@ export async function guardedBuy(
     log(`#${id} : WARN (${check.reasons}). Asking the human: bun --env-file=.env app/human.ts approve ${id}`);
     opts.onWarn?.(id);
     const waitMs = opts.approvalWaitMs ?? VERDICT_TTL_MS;
-    if (!(await waitApproval(id, check.judged_ns, waitMs))) {
+    if (!(await waitApproval(id, check.judged_ns, check.requested_ns, waitMs))) {
       log(`#${id} : WARN not approved on chain within ${Math.round(waitMs / 1000)} s (or the verdict's life), I GIVE UP, no purchase`);
       return { id, signed: null };
     }
@@ -86,8 +88,9 @@ export async function guardedBuy(
     return { id, signed: null };
   }
   const age = Date.now() - Number(BigInt(check.judged_ns) / 1_000_000n);
-  if (age > VERDICT_TTL_MS) {
-    log(`#${id} : ${verdict} expired (${Math.round(age / 1000)} s old, limit ${VERDICT_TTL_MS / 1000} s), I REFUSE TO BUY`);
+  const asked = Date.now() - Number(BigInt(check.requested_ns) / 1_000_000n);
+  if (age > VERDICT_TTL_MS || asked > FRESH_MS) {
+    log(`#${id} : ${verdict} expired (${Math.round(age / 1000)} s old, limit ${VERDICT_TTL_MS / 1000} s; requested ${Math.round(asked / 1000)} s ago, limit ${FRESH_MS / 1000} s), I REFUSE TO BUY`);
     return { id, signed: null };
   }
   return { id, signed: await buy(id, wei, verdict) };
@@ -130,7 +133,7 @@ export async function sellAll(buyId: number): Promise<{ nonce: number; signed: H
   ]);
   const amount = balance < BigInt(held) ? balance : BigInt(held);
   const { value: id, tx: asked } = await call<number>(agent, "request_exit", { buy_id: buyId, amount: amount.toString() });
-  log(`request #${id} : exit quote for ${amount} ${token} (bought by #${buyId}), 0.019 NEAR taken from credit  ${asked}`);
+  log(`request #${id} : exit quote for ${amount} ${token} (bought by #${buyId}), its price taken from credit  ${asked}`);
   const quote = await waitVerdict(id);
   if (quote?.verdict !== "allow") {
     log(`#${id} : no exit quote (${quote?.reasons ?? "no verdict"}): no sale by the agent; the owner's own exit stays open`);

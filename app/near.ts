@@ -98,6 +98,13 @@ export type Check = {
   exit_amount: string | null;
   /** Signing hashes (no 0x) of the transactions the sentinel simulated: the guard signs only these for the check. */
   tx_hashes: string[];
+  /** The sentinels' votes, in the order posted; `verdict` is set once they decide (the quorum's identical
+   *  allow or warn, one block vote, or a disagreement). */
+  votes: Vote[];
 };
+/** One sentinel's vote on a check: its verdict and the sha256 of the evidence it posted. */
+export type Vote = { sentinel: string; verdict: "allow" | "warn" | "block"; evidence_sha256: string };
+/** The guard's sentinels and how many must post the same allow or warn (view `sentinels`). */
+export type Sentinels = { sentinels: string[]; quorum: number };
 /** A shared blocklist entry (get_entry). */
 export type Entry = { reporter: string; at_ns: string; evidence_sha256: string; note: string };

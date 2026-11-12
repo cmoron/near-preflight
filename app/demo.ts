@@ -5,9 +5,9 @@
 // whose simulation is clean is blocked by its template's reputation. (3) A healthy token: allow, NEAR
 // signs the buy, a keyless relay broadcasts it on the Base fork. (4) The compromised agent bypasses its
 // wrapper: the contract and the protocol refuse.
-// --full adds, unchanged: the agent's exit, a warn refused then approved by the human, a trap aimed at
-// the guard's own EVM address, a second agent, and with the key the injection count and the model's
-// own USDC buy. demo.sh adds the armer's bounds, the emergency stop and the withdrawal.
+// --full adds: the agent's exit, a warn refused then approved by the human, a trap aimed at
+// the guard's own EVM address, a second agent refused the farm token the first one's check got
+// quarantined, and with the key the injection count and the model's own USDC buy. demo.sh adds the armer's bounds, the emergency stop and the withdrawal.
 // The commands that verify this run (replay, attest) are written to proofs/verify.txt.
 // Usage: bun --env-file=.env --env-file=.env.agent [--env-file=.env.llm] app/demo.ts [--full]
 import { formatNearAmount, nearToYocto } from "near-api-js";
@@ -16,7 +16,7 @@ import tokens from "../evm/tokens.json";
 import { agent, BUY_GAS, guardedBuy, requestCheck, sellAll, waitVerdict } from "./agent";
 import { GUARD_PATH, MPC_CONTRACT } from "./derive";
 import { boundSystem, costUsd, guardTools, inbox, injectionRuns, MODEL, runAgent, type Step, type Usage } from "./llm";
-import { call, env, reason, view, type Entry } from "./near";
+import { call, env, reason, view, type Entry, type Sentinels } from "./near";
 import { WETH } from "./verifier";
 
 const FULL = process.argv.includes("--full");
@@ -37,7 +37,12 @@ const buyArgs = (id: number, wei: bigint) => ({ id, amount_wei: wei.toString() }
 const spawnEnv = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
 /** Commands that verify this run, written to proofs/verify.txt for demo.sh to print last. */
 const verify: string[] = [];
-const replayCmd = (id: number, what: string) => verify.push(`bun --env-file=.env app/replay.ts proofs/${id}.json --check   # ${what}`);
+/** One command per sentinel: each wrote its own proof of the check (app/sentinel.ts), each is a vote. */
+const SENTINELS = (await view<Sentinels>("sentinels")).sentinels.length;
+const replayCmd = (id: number, what: string) => {
+  verify.push(`bun --env-file=.env app/replay.ts proofs/${id}.json --check   # ${what}`);
+  for (let n = 2; n <= SENTINELS; n++) verify.push(`bun --env-file=.env app/replay.ts proofs/${id}.s${n}.json --check   # the same check, sentinel ${n}'s vote`);
+};
 
 /** An attempt that must fail for the reason `want`; otherwise the demo fails (exit code 1). */
 async function mustFail(what: string, want: string, attempt: () => Promise<unknown>, by = "contract") {
@@ -96,7 +101,7 @@ async function moment(name: string, run: () => Promise<void>): Promise<void> {
 
 /** A recorded decision (app/fixtures), anchored on our deployment: verified when there is no key. */
 const FIXTURE = "app/fixtures/decision.json";
-const FIXTURE_GUARD = "guard.goblin-guard-13713.testnet";
+const FIXTURE_GUARD = "guard.goblin-guard-69369.testnet";
 const FIXTURE_CHECK = 1;
 const KEY = process.env.NEAR_AI_API_KEY;
 const usage: Usage = { prompt_tokens: 0, completion_tokens: 0 };
@@ -111,16 +116,47 @@ async function unlist(token: Address): Promise<void> {
   if ((await p.exited) !== 0) throw new Error(`unlist ${token} failed`);
 }
 
-/** request_check on `token`. A run interrupted before its verdicts leaves checks that the sentinel judges
- *  first in this run: one of them can list the trap again after setup. The owner then unlists it again. */
+/** The owner ends `token`'s quarantine (app/human.ts lift, own process, the owner's key): a block of an
+ *  earlier run keeps a token from being checked for 30 minutes. */
+async function lift(token: Address): Promise<void> {
+  const p = Bun.spawn(["bun", "--env-file=.env", "app/human.ts", "lift", token], { env: spawnEnv, stdout: "inherit", stderr: "inherit" });
+  if ((await p.exited) !== 0) throw new Error(`lift ${token} failed`);
+}
+
+/** Before a moment checks `token`: the owner removes what an earlier run left on it, a listing or a
+ *  quarantine (a run interrupted before its verdicts leaves checks the sentinels judge during this one,
+ *  after the setup). Nothing to do on a first run. */
+async function ready(token: Address): Promise<void> {
+  if (await view<Entry | null>("get_entry", { token })) {
+    console.log(`[demo] ${token} is listed by an earlier run's check: the owner removes the entry`);
+    await unlist(token);
+  }
+  if (await view<string | null>("quarantined_until", { token })) {
+    console.log(`[demo] ${token} is quarantined by an earlier run's check: the owner lifts it`);
+    await lift(token);
+  }
+}
+
+/** request_check on `token`. A run interrupted before its verdicts leaves checks that the sentinels judge
+ *  first in this run: one of them can list or quarantine the trap again after setup, or still hold the
+ *  token's one pending check. The owner then unlists or lifts it again; a pending check is waited for. */
 async function requestUnlisted(token: Address): Promise<number> {
   for (let tries = 1; ; tries++) {
     try {
       return await requestCheck(token, WEI);
     } catch (e) {
-      if (tries === 3 || !reason(e).includes("target is on the shared blocklist")) throw e;
-      console.log(`[demo] ${token} was listed again, by a check an earlier run left pending: the owner removes the entry`);
-      await unlist(token);
+      const why = reason(e);
+      if (tries === 6) throw e;
+      if (why.includes("target is on the shared blocklist")) {
+        console.log(`[demo] ${token} was listed again, by a check an earlier run left pending: the owner removes the entry`);
+        await unlist(token);
+      } else if (why.includes("target is quarantined")) {
+        console.log(`[demo] ${token} was quarantined again, by a check an earlier run left pending: the owner lifts it`);
+        await lift(token);
+      } else if (why.includes("already awaiting its verdict")) {
+        console.log(`[demo] ${token} has a check an earlier run left pending: waiting for its verdict`);
+        await Bun.sleep(15_000);
+      } else throw e;
     }
   }
 }
@@ -131,6 +167,12 @@ await moment("setup", async () => {
     if (!(await view<Entry | null>("get_entry", { token }))) continue;
     console.log(`[demo] ${token} is still listed by a previous run: the owner removes the entry`);
     await unlist(token);
+  }
+  // A previous run's blocks quarantined their tokens for 30 minutes: the owner lifts them.
+  for (const token of [TRAP, GUARD_TRAP, FRESH, USDC]) {
+    if (!(await view<string | null>("quarantined_until", { token }))) continue;
+    console.log(`[demo] ${token} is still quarantined by a previous run's block: the owner lifts it`);
+    await lift(token);
   }
   tools = KEY ? await guardTools(inbox(TRAP, USDC), WEI) : null;
 });
@@ -181,6 +223,7 @@ await moment("moment 1", async () => {
 
 step(`2. A farm token (${FRESH}): its simulation is clean, but its code template launched 5 pools that their creators drained 2 blocks after funding.`);
 await moment("moment 2", async () => {
+  await ready(FRESH);
   const farm = await guardedBuy(FRESH, WEI);
   const farmVerdict = await waitVerdict(farm.id); // a plain view may hit an RPC node behind the verdict
   const farmListed = await view<Entry | null>("get_entry", { token: FRESH });
@@ -194,6 +237,7 @@ await moment("moment 2", async () => {
 
 step(`3. A healthy token, USDC: three copies of its code were funded and drained on this fork, yet copies cannot get it blocked (its pool predates the template index). Verdict allow, the guard builds the swap, NEAR signs it, a relay with no key broadcasts it on the Base fork.`);
 await moment("moment 3", async () => {
+  await ready(USDC);
   witness = await guardedBuy(USDC, WEI);
   const v = await waitVerdict(witness.id);
   console.log(`  [sentinel] #${witness.id}: ${v?.verdict?.toUpperCase()} (${v?.reasons})`);
@@ -242,6 +286,7 @@ if (FULL) {
   const TAX = tokens.sell_tax_20 as Address;
   step(`6. A token with a 20 % sale tax (${TAX}): WARN. The wrapper asks the human and waits; nobody approves.`);
   await moment("moment 6", async () => {
+    await ready(TAX);
     const ignored = await guardedBuy(TAX, WEI, { approvalWaitMs: 10_000 });
     if (ignored.signed) process.exitCode = 1;
     await mustFail(`buy(#${ignored.id}) on the unapproved warn, wrapper bypassed`, "warn verdict not approved by the owner", () => call(agent, "buy", buyArgs(ignored.id, WEI), 0n, BUY_GAS));
@@ -255,19 +300,20 @@ if (FULL) {
 
   step(`8. A trap aimed at the guard's own EVM address (${GUARD_TRAP} freezes the tokens it holds): block, but not listed, since it rests on the guard's state, which anyone can change.`);
   await moment("moment 8", async () => {
+    await ready(GUARD_TRAP);
     const aimed = await guardedBuy(GUARD_TRAP, WEI);
     const aimedListed = await view<Entry | null>("get_entry", { token: GUARD_TRAP });
     console.log(`  [contract] get_entry ${GUARD_TRAP}: ${aimedListed ? "LISTED" : "not listed"}`);
     if (aimed.signed || aimedListed) process.exitCode = 1;
   });
 
-  console.log(`\n9. A second agent, its own process and key, asks for a check of the farm token:`);
+  console.log(`\n9. A second agent, its own process and key, asks for a check of the farm token blocked in moment 2: a block is remembered for every agent, nobody draws again at once.`);
   await moment("moment 9", async () => {
     const second = Bun.spawn(["bun", "--env-file=.env", "--env-file=.env.agent2", "app/check.ts", FRESH], { env: spawnEnv, stdout: "pipe", stderr: "pipe" });
     const said = (await new Response(second.stdout).text()).trim();
     console.log(said);
-    if ((await second.exited) !== 0 || !said.includes("verdict=block") || !said.includes("reasons=template ")) {
-      console.log("  !!! the second agent's check was not blocked by the template's reputation");
+    if ((await second.exited) === 0 || !said.includes("target is quarantined after a block verdict")) {
+      console.log("  !!! the second agent's check of a token blocked minutes ago was not refused by its quarantine");
       process.exitCode = 1;
     }
   });

@@ -19,13 +19,13 @@ The agent holds no key for Base, the chain it buys on: the contract builds the t
 <p align="center"><img src="docs/assets/flow.svg" alt="One purchase, read left to right. Outside near-preflight, dashed: the AI agent (untrusted, no key for Base), NEAR Chain Signatures and the Base blockchain. Inside the green near-preflight frame: the guard contract on NEAR, the sentinel and the proof anyone can replay. 1: the agent asks the guard. 2: the sentinel simulates the buy and the resale on Base. 3: it stores the verdict on the guard. 4: Chain Signatures signs the swap the guard built. Then anyone can broadcast the signed swap to Base, no key needed." width="830"></p>
 
 1. **Asked.** The AI agent asks the guard to check a token and an amount. It is untrusted: a prompt injection may be steering it.
-2. **Simulated.** The sentinel reads the request and simulates on Base the buy the guard would sign, then the resale.
-3. **Verdict stored.** It posts `allow`, `warn` or `block` to the guard, with the sha256 of its evidence.
+2. **Simulated.** Each sentinel reads the request and simulates on Base the buy the guard would sign, then the resale.
+3. **Verdict stored.** Two sentinels each post `allow`, `warn` or `block`, with the sha256 of their evidence: an `allow` takes both, one `block` is enough.
 4. **Signed by NEAR.** On a fresh `allow` the agent buys, naming no route or recipient: the guard builds the simulated swap and Chain Signatures signs it.
 
 Anyone can then broadcast the signed swap, no key needed; the code calls that broadcaster the **relay**. In the demo it goes to a local fork of Base.
 
-The green frame is near-preflight: the **guard** is the NEAR contract, the **sentinel** an off-chain program the guard's owner appoints, whose NEAR key can only post verdicts. **Chain Signatures**, NEAR's threshold signing network, signs for the guard's Base address.
+The green frame is near-preflight: the **guard** is the NEAR contract, a **sentinel** an off-chain program the guard's owner appoints, whose NEAR key can only vote on checks. **Chain Signatures**, NEAR's threshold signing network, signs for the guard's Base address.
 
 Do not trust it blindly: anyone can [replay](docs/replay.md) a verdict, and the [threat model](docs/threat-model.md#a-lying-sentinel) says what a lying sentinel can still do.
 
@@ -45,9 +45,9 @@ First, the [status page](https://cmoron.github.io/near-preflight/journal.html) l
 
 ```sh
 git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun install
-export GUARD=guard.goblin-guard-13713.testnet   # the demo guard on NEAR testnet, read only
+export GUARD=guard.goblin-guard-69369.testnet   # the demo guard on NEAR testnet, read only
 
-# Check #103 (USDC on Base mainnet): resent, traced and its far sales mined on a local fork, re-judged, compared with NEAR
+# Check #21 (USDC on Base mainnet): resent, traced and its far sales mined on a local fork, re-judged, compared with NEAR
 bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
 #   REPLAY OK: verdict warn confirmed, same as on chain
 
@@ -57,7 +57,7 @@ bun app/attest.ts app/fixtures/decision.json --check 1
 
 # Every trap below, on a local Base fork, as CI runs it (about 30 s, then 5 min)
 echo GUARD=$GUARD > .env && evm/fork.sh   # then, in another terminal:
-bun test --timeout 30000                  #   308 pass, 0 fail
+bun test --timeout 30000                  #   333 pass, 0 fail
 ```
 
 USDC gets `warn` on mainnet because no template index covers mainnet (an unknown reputation is never a pass).
@@ -72,15 +72,19 @@ USDC gets `warn` on mainnet because no template index covers mainnet (an unknown
 | A token that sells only in a simulation, or at the delay a check would try | 🔴 block, listed                          | [tells](docs/threat-model.md#telling-the-check-from-a-real-sale) |
 | A token keyed on WETH or the factory, or that fails on a later Base block  | 🔴 block                                  | [state](docs/threat-model.md#state-base-moves-every-block)       |
 | Code that reads values no simulation can match (base fee, coinbase…)       | 🟠 warn; 🔴 block once the base fee moved | [opcodes](docs/threat-model.md#values-no-simulation-can-match)   |
+| A token whose own code reads the time or its pool, to change after the check | 🟠 warn, the owner decides              | [own code](docs/threat-model.md#what-the-tokens-own-code-did)    |
 | A prompt-injected agent changes the route, recipient or minimum output     | 🔴 ignored: NEAR signs what was simulated | [bypasses](docs/threat-model.md#agent-bypasses)                  |
+| One stolen sentinel key, or a Base node only one sentinel reads, says `allow` on a trap | 🔴 no allow: it takes both sentinels | [quorum](docs/threat-model.md#a-lying-sentinel)                  |
 | An honest token (USDC on the fork)                                         | 🟢 allow, NEAR signs the swap             | [honest](docs/threat-model.md#honest-tokens)                     |
 
 **Listed**: put on the guard's shared blocklist, refused to every agent. Each link gives the exact reason and the test that shows it.
 
 ## What it does not stop
 
-- **A lying sentinel.** Its `allow` on a trap can be bought within 120 s; replay shows the lie afterwards, if the sentinel published the proof file.
-- **What a token does later.** A pause, tax or blacklist after the buy; a change past the check's last sale, 15 min after the buy, run on a frozen copy of Base (a token keyed on time and on what Base moves meanwhile passes it).
+- **Both sentinels lying.** One alone can only block. In the demo both run on one machine and read one Base node: two keys, not two parties. Replay shows a lie afterwards.
+- **What a token does later.** A pause, tax or blacklist after the buy; a change past the check's last sale, 15 min after the buy, by code that read neither the time nor its pool during the check.
+- **Asking again, later.** A `block` [quarantines](docs/contract.md#token-limits) its token for 30 min, for every agent; after it an agent may ask again, with new draws.
+- **What no code shows.** A holder of most of the supply can sell into the pool; liquidity older than one hour is not read; each sentinel believes the Base node it reads.
 - **Front-running.** The signing request is public on NEAR before the swap reaches Base.
 - **Template evasion.** Changing the code makes a new template; fewer than 3 earlier pools give no finding.
 - **Other pools.** Only Uniswap V2 WETH pools on Base are checked and bought today, where copy-paste trap launches concentrate (29 new V2 WETH pools in 2.4 h on 2026-11-11, all of one code template, 24 of them drained); Uniswap V3 and V4 pools are not supported yet.
@@ -95,10 +99,10 @@ Every limit, with its reason: [threat model](docs/threat-model.md#what-it-does-n
 <details>
 <summary>Eight steps with a NEAR testnet account</summary>
 
-1. Install Rust with `cargo-near` 0.23, `near` CLI 0.31, `bun` 1.4, Foundry 1.8 and `jq`. `cargo test` gives `249 passed`; then `bun install`.
-2. Get a testnet account holding about 7 NEAR. The faucet gives 10; if it answers `429`, see [troubleshooting](docs/reproduce.md#troubleshooting).
-3. `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard and creates the agent, sentinel and armer accounts, each with a key limited to the guard.
-4. `evm/fork.sh` in another terminal, then `bun test --timeout 30000`: `308 pass`.
+1. Install Rust with `cargo-near` 0.23, `near` CLI 0.31, `bun` 1.4, Foundry 1.8 and `jq`. `cargo test` gives `295 passed`; then `bun install`.
+2. Get a testnet account holding about 8 NEAR. The faucet gives 10; if it answers `429`, see [troubleshooting](docs/reproduce.md#troubleshooting).
+3. `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard and creates the agent, armer and two sentinel accounts, each with a key limited to the guard.
+4. `evm/fork.sh` in another terminal, then `bun test --timeout 30000`: `333 pass`.
 5. `./demo.sh` exits 0 in 3 to 5 min (each check waits about 25 s for Base blocks): a poisoned message pushes the agent to a trap (blocked), a farm copy (blocked), USDC (allowed, signed by NEAR, broadcast to the fork), then the agent's bypasses (refused).
 6. It prints this run's `replay --check` and `attest --check` commands; each exits 0.
 7. Optional: `NEAR_AI_API_KEY` in `.env.llm` runs the live model; `./demo.sh --full` adds an exit, an approved `warn`, a second agent and the emergency stop.
