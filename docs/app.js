@@ -112,7 +112,19 @@ function el(tag, props = {}, ...kids) {
   return e;
 }
 const mono = (full, text) => el('code', { title: full || '' }, text ?? short(full));
-const badge = (v) => el('span', { class: 'badge ' + v }, v);
+const badge = (v) => el('b', { class: 'verdict ' + v }, v);
+// A verdict as the four lamps of a check (asked, simulated, stored, signed) and its word: the fourth lights only on allow.
+const lamps = (v) => el('span', { class: 'v ' + v }, el('span', { class: 'lamps', 'aria-hidden': 'true' }, el('i'), el('i'), el('i'), el('i')), badge(v));
+const REPLAY_DOC = 'https://github.com/cmoron/near-preflight/blob/main/docs/replay.md';
+
+// The tab icon: the four-lamp mark in the state of the newest verdict, in the browser's light or dark palette.
+const LAMP = { dark: { allow: '#00EC97', warn: '#FFB547', block: '#FF6B5F', off: '#2B3D57' }, light: { allow: '#00794D', warn: '#965A00', block: '#C8352B', off: '#D2D9E3' } };
+function favicon(v) {
+  const css = (p) => [0, 1, 2, 3].map((i) => '.l' + i + '{fill:' + (((i < 3 || v === 'allow') && p[v]) || p.off) + '}').join('');
+  const cells = [[0, 6], [4, 10], [8, 6], [12, 2]].map(([x, y], i) => '<rect class="l' + i + '" x="' + x + '" y="' + y + '" width="3" height="3"/>').join('');
+  $('icon').href = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges"><style>'
+    + css(LAMP.dark) + '@media (prefers-color-scheme:light){' + css(LAMP.light) + '}</style>' + cells + '</svg>');
+}
 // A token: its label over its shortened address in small type (inline: beside it); an unknown token: its address.
 function token(addr, inline) {
   const label = names.get(String(addr).toLowerCase());
@@ -155,11 +167,13 @@ function checkItem({ id, check: k }, open) {
     ['Model decision sha256', decisions.length ? el('span', { class: 'stack' }, ...decisions.map(([w, h]) => el('span', {}, w + ': ', mono(h, h)))) : 'none attached'],
     ['Signed by NEAR', sale ? (k.settled ? 'yes, or reserved after a signature that did not come back' : 'no')
       : k.signed_tx ? el('span', { class: 'stack' }, 'yes, ' + atob(k.signed_tx).length + ' bytes (base64):', el('code', { class: 'blob' }, k.signed_tx)) : 'no'],
+    k.verdict && ['How to verify', 'replay the proof file with ', el('code', {}, 'app/replay.ts --check'),
+      ...(decisions.length ? [', the model decision with ', el('code', {}, 'app/attest.ts')] : []), ': ', el('a', { href: REPLAY_DOC }, 'docs/replay.md')],
   ].filter(Boolean));
   const summary = el('summary', { class: 'row' },
     el('span', { class: 'id' }, '#' + id),
     el('span', { class: 'kind' }, token(k.target), sale ? el('small', {}, ' sale') : null),
-    el('span', {}, badge(verdictOf(k))),
+    lamps(verdictOf(k)),
     el('span', { class: 'why' }, firstReason(k), extra ? el('small', {}, ' (+' + extra + ' more)') : null));
   const d = el('details', { 'data-id': String(id) }, summary, body);
   d.open = open.has(String(id));
@@ -169,7 +183,7 @@ function checkItem({ id, check: k }, open) {
 // The latest purchase NEAR signed, told as the four steps.
 function renderSteps(checks) {
   const c = checks.find((x) => x.check && x.check.signed_tx);
-  if (!c) { $('steps-of').textContent = '(no purchase signed yet)'; return; }
+  if (!c) { $('steps-of').textContent = '(no purchase signed yet)'; $('steps').classList.remove('lit'); return; }
   const k = c.check;
   $('steps-of').textContent = '(check #' + c.id + ', the latest purchase signed)';
   const step = (title, ...text) => el('li', {}, el('b', {}, title), ' ', ...text);
@@ -182,6 +196,8 @@ function renderSteps(checks) {
     step('NEAR signs.', 'The guard built the swap (router, path, recipient = its own address, floor = quote minus slippage) and NEAR Chain Signatures signed it: ',
       atob(k.signed_tx).length + ' bytes, ready for a relay with no key to broadcast.'),
   );
+  // The four lamps light in order the first time (two frames, so the new steps are painted unlit first).
+  if (!$('steps').classList.contains('lit')) requestAnimationFrame(() => requestAnimationFrame(() => $('steps').classList.add('lit')));
 }
 
 function renderSummary(checks, last, listed) {
@@ -197,7 +213,7 @@ function renderSummary(checks, last, listed) {
   $('summary').replaceChildren(
     num(last), ' ', last === 1 ? 'request' : 'requests', ': ',
     num(n.block, 'block'), ' blocked, ', num(n.warn, 'warn'), ' warned, ', num(n.allow, 'allow'), ' allowed',
-    n.pending ? [', ', num(n.pending, 'pending'), ' waiting for a verdict'] : '', n.gone ? [', ', num(n.gone), ' refunded'] : '',
+    ...(n.pending ? [', ', num(n.pending, 'pending'), ' waiting for a verdict'] : []), ...(n.gone ? [', ', num(n.gone), ' refunded'] : []),
     '. ', num(n.signed), ' ', n.signed === 1 ? 'purchase' : 'purchases', ' signed by NEAR. ',
     num(listed), ' ', listed === 1 ? 'token' : 'tokens', ' on the shared blocklist.',
   );
@@ -270,6 +286,8 @@ async function refresh() {
     const listed = await renderBlocklist();
     renderSummary(checks, last, listed);
     renderSteps(checks);
+    const judged = checks.find((c) => c.check && c.check.verdict);
+    if (judged) favicon(judged.check.verdict); // none yet: the static mark stays
     await renderState(checks);
     if (!$('bounds').dataset.read) await renderBounds(); // owner settings, read once per page load
     $('updated').textContent = 'Last updated ' + new Date().toLocaleTimeString() + ', refreshed every ' + REFRESH_MS / 1000 + ' s.' + (names.size ? '' : ' Token names unavailable: addresses shown as is.');

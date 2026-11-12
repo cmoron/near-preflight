@@ -3,18 +3,45 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <meta
+      name="theme-color"
+      content="#0E1A2C"
+      media="(prefers-color-scheme: dark)"
+    />
+    <meta
+      name="theme-color"
+      content="#FFFFFF"
+      media="(prefers-color-scheme: light)"
+    />
     <title>near-preflight journal</title>
-    <link rel="icon" href="data:," />
+    <link rel="icon" id="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=B612+Mono:wght@400;700&family=Mona+Sans:wdth,wght@100..125,400..700&display=swap"
+    />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
     <header>
-      <h1>near-preflight</h1>
+      <div class="brand">
+        <picture>
+          <source
+            srcset="assets/logo-light.svg"
+            media="(prefers-color-scheme: light)"
+          />
+          <img src="assets/logo-dark.svg" width="48" height="48" alt="" />
+        </picture>
+        <h1>near-preflight</h1>
+      </div>
       <p class="lede">
         The journal of one demonstration guard, <code id="guard">…</code>, a
         contract on NEAR testnet. Each line is a purchase (or a sale) an AI
-        agent asked for, and what the guard answered before NEAR would sign
-        anything.
+        agent asked for, most often the demo's scripted agent, and what the
+        guard answered before NEAR would sign anything; a line names the model
+        decision behind it when one is attached.
       </p>
       <p class="note">
         The demo's tokens live on a local fork of Base (anvil), not on Base: the
@@ -50,14 +77,22 @@
           </li>
           <li>
             <b>The verdict is stored on NEAR.</b> With the sha256 of its
-            evidence, which anyone can replay, and the hash of the one
-            transaction the guard may sign.
+            evidence and the hash of the one transaction the guard may sign.
           </li>
           <li>
             <b>NEAR signs.</b> On <code>allow</code>, the guard builds the swap
             itself and NEAR Chain Signatures signs it.
           </li>
         </ol>
+        <p class="note">
+          Each lamp is one step; the fourth lights only on <code>allow</code>.
+          The evidence replays: the Base-mainnet check shipped in the repository
+          on any machine, a fork check against the team's fork and proof files
+          (<a
+            href="https://github.com/cmoron/near-preflight/blob/main/docs/replay.md"
+            >replay and attest</a
+          >).
+        </p>
       </section>
 
       <section aria-labelledby="h-state">
@@ -71,8 +106,8 @@
       <section aria-labelledby="h-checks">
         <h2 id="h-checks">Checks <small id="count"></small></h2>
         <p class="note">
-          Newest first. Open a line for its agent, hashes, model decision and
-          signed transaction.
+          Newest first. Open a line for its agent, hashes, model decision,
+          signed transaction and how to verify it.
         </p>
         <div class="log-head" aria-hidden="true">
           <span>Id</span><span>Token</span><span>Verdict</span

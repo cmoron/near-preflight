@@ -1,4 +1,6 @@
-<!-- banner -->
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="near-preflight: an AI agent cannot buy a token it could never sell." width="800">
+</p>
 
 # near-preflight
 
@@ -60,6 +62,8 @@ Do not trust it blindly: anyone can [replay](docs/replay.md) a verdict, and the 
 No NEAR account, no key. You need `bun` 1.4, Foundry 1.8 and `jq`; a **fork** below is a local copy of Base run by Foundry's anvil.
 
 First, the [status page](https://cmoron.github.io/near-preflight/) lists every check of the demo guard and its verdict.
+
+<a href="https://cmoron.github.io/near-preflight/"><img src="docs/assets/status-page.png" alt="The top of the status page: the verdicts so far, and the four steps of the latest purchase NEAR signed, each step a lit lamp." width="600"></a>
 
 ```sh
 git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun install
