@@ -49,6 +49,7 @@ main>section,details.more{margin-top:2.75rem;padding-top:1.25rem;border-top:1px 
  font:700 .8rem/1 var(--mono);background:var(--rule);color:var(--dim);transition:background-color .25s,color .25s}
 .steps li:not(:last-child)::after{content:"";position:absolute;left:calc(.875rem - 1px);top:calc(1.85rem + 4px);bottom:4px;width:2px;background:var(--rule)}
 .steps.lit li::before{background:var(--allow);color:var(--ground)}
+.steps.lit[data-v=warn] li::before{background:var(--warn)}
 .steps li:nth-child(2)::before{transition-delay:.18s} .steps li:nth-child(3)::before{transition-delay:.36s} .steps li:nth-child(4)::before{transition-delay:.54s}
 .steps li>b:first-child{display:block;font-weight:600}
 .steps q{quotes:"\201C" "\201D"}
@@ -59,15 +60,17 @@ main>section,details.more{margin-top:2.75rem;padding-top:1.25rem;border-top:1px 
 .stack{display:flex;flex-direction:column;gap:.15rem}
 .blob{display:block;max-height:6.5rem;overflow:auto;margin-top:.2rem;padding:.4rem .55rem;background:var(--ground);word-break:break-all;font-size:.78rem}
 
-/* A verdict: the four lamps in its state, then the word. The fourth lamp (NEAR signs) lights only on allow. */
+/* A check: its four lamps in the verdict's colour, then the word. Asked, simulated and stored light with the verdict;
+   the fourth (NEAR signs) only on .signed. Pending: asked only. */
 .verdict{font:700 .84em var(--mono);letter-spacing:.02em}
 .v{display:inline-flex;align-items:baseline;gap:.5rem;white-space:nowrap}
 .lamps{display:inline-flex;gap:3px;align-self:center}
 .lamps i{display:block;width:6px;height:6px;background:var(--rule)}
-.v.allow i{background:var(--allow)}
-.v.warn i:nth-child(-n+3){background:var(--warn)}
-.v.block i:nth-child(-n+3){background:var(--block)}
-.v.pending i:first-child{background:var(--dim)}
+.v:is(.allow,.warn,.block) i:nth-child(-n+3),.v.signed i,.v.pending i:first-child{background:currentColor}
+.legend{max-width:none;margin-top:-.35rem}
+.legend .lamps{vertical-align:.08em;margin-right:.45rem}
+.legend .lamps i{background:var(--dim)}
+code.acct{font-family:var(--sans);font-size:1em}
 
 /* The journal: one <details> per check, its summary laid out as a row. */
 .log-head,.row{display:grid;grid-template-columns:3rem minmax(0,15rem) 6.5rem minmax(0,1fr);gap:1rem;align-items:baseline}
@@ -121,7 +124,7 @@ footer p{margin:.25rem 0;max-width:none}
  .log summary{padding-left:1.5rem}
  .log summary::before{left:.45rem}
  .log details .facts{padding-left:1.5rem}
- .facts code{font-size:.8em}
+ .facts code:not(.acct){font-size:.8em}
  thead{position:absolute;left:-9999px}
  table,tbody,tr,td{display:block;width:100%}
  tr{border-top:1px solid var(--rule);padding:.5rem 0}
