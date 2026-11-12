@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2021"
 description = "Spend guard for agents: prepaid credit, armed budget with an expiry"
 license = "MIT"
+repository = "https://github.com/cmoron/near-preflight"
+
+# `cargo near build reproducible-wasm`: the committed source built in this image (NEP-330); the tag
+# names it, the digest pins it. Rust 1.98.1, the version CI lints and tests with.
+[package.metadata.near.reproducible_build]
+image = "sourcescan/cargo-near:0.22.0-rust-1.98.1"
+image_digest = "sha256:90cf2abe31d75946d82f1c6eee70802332b4d499ac39c01a5c41f228000ecb8a"
+passed_env = []
+container_build_command = ["cargo", "near", "build", "non-reproducible-wasm", "--locked"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

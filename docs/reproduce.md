@@ -150,8 +150,21 @@ measurements are in [sentinel](sentinel.md#measured-on-real-base).
 Check the code hash yourself: `view_account` on the guard returns it in base58; decoded, it is the
 wasm's sha256.
 
-A rebuild on another machine may differ. `cargo near build reproducible-wasm` works here (Docker), but
-its metadata names the git commit it was built from, so it can be published only from a pushed commit.
+### Rebuild the deployed wasm
+
+The wasm names the commit it was built from (NEP-330), so its hash belongs to that commit. Read it on chain,
+check it out, rebuild it in the Docker image `Cargo.toml` pins by digest (`sourcescan/cargo-near`, Rust 1.98.1):
+
+```sh
+near contract call-function as-read-only guard.goblin-guard-69369.testnet contract_source_metadata json-args {} network-config testnet now
+#   build_info.source_code_snapshot: git+https://github.com/cmoron/near-preflight?rev=<commit>
+git checkout <commit> && cargo near build reproducible-wasm    # about 35 s here, plus the image pull (500 MB)
+#   SHA-256 checksum hex : <hash, filled in after the final deployment>
+near account view-account-summary guard.goblin-guard-69369.testnet network-config testnet now
+#   Local Contract (SHA-256 checksum hex)  <the same hash>
+```
+
+The build ignores uncommitted changes. Two clones of one commit, in two directories, gave the same wasm.
 
 CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs on every push to `main`: `cargo fmt`,
 `clippy`, `cargo test`, `bunx tsc --noEmit`, then the fork and `bun test`.
