@@ -9,8 +9,8 @@
 //   the guard's transactions is then only the token's, its implementation's and the Uniswap contracts'.
 // - `opcodes`: the opcodes of the token's and its implementation's reachable code whose value no
 //   simulation can guarantee: at least a warn, the owner decides.
-// TIMESTAMP and NUMBER stay allowed: the simulated blocks follow Base's cadence up to 512 s, and the
-// sales there exercise them.
+// TIMESTAMP and NUMBER stay allowed: the simulated blocks follow Base's cadence up to the late sale (400 to
+// 510 s after the buy, derived per check), and the sales there exercise them.
 import { hexToBytes, toHex, type Address, type Hex } from "viem";
 import { FACTORY, ROUTER, rpc, short, WETH, type Finding, type Liquidity, type Request } from "./verifier";
 

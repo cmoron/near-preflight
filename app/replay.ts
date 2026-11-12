@@ -18,7 +18,7 @@ import {
   judge,
   judgeExit,
   labelsOf,
-  LATE_BLOCKS,
+  LATE_SALE_BLOCKS,
   liquidityFacts,
   NEXT_S,
   ok as succeeded,
@@ -62,7 +62,7 @@ type Evidence = {
   near: NearFacts;
   opcodes: string[];
   touched: string[] | null;
-  first_sale: Sale;
+  sales: Sale;
   list_target: boolean;
 };
 type ExitEvidence = { kind: "exit"; chain_id: number; block: number; method: string; request_sha256: string; amount: string; calls: string[]; quote: string; tx_hashes: string[] };
@@ -95,7 +95,7 @@ const blocksOf = (q: Request) => (q.params[0] as { blockStateCalls: BlockStateCa
 /** What replay compares of a call's result: status, return data and logs (emitter, topics, data). */
 const outcome = (r: Result) => JSON.stringify([r.status, r.returnData, (r.logs ?? []).map((l) => [l.address.toLowerCase(), l.topics, l.data])]);
 
-const EVIDENCE_KEYS = "amount_wei,block,calls,chain_id,code_hash,first_sale,implementation,liquidity,list_target,method,near,opcodes,quote,reputation,request_sha256,template,touched,tx_hashes";
+const EVIDENCE_KEYS = "amount_wei,block,calls,chain_id,code_hash,implementation,liquidity,list_target,method,near,opcodes,quote,reputation,request_sha256,sales,template,touched,tx_hashes";
 const EXIT_KEYS = "amount,block,calls,chain_id,kind,method,quote,request_sha256,tx_hashes";
 const REPUTATION_KEYS = "before_block,drained,from,index_sha256,median_drain_blocks,pools,template,to";
 /** Tolerated gap between the EVM block time and those of the NEAR request and verdict: clocks of
@@ -156,18 +156,19 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
     Array.isArray(e.opcodes) &&
     e.opcodes.every((o) => Object.values(ENV_OPCODES).includes(o as string)) &&
     (e.touched === null || (Array.isArray(e.touched) && e.touched.every((a) => typeof a === "string" && /^0x[0-9a-f]{40}$/.test(a)))) &&
-    isSale(e.first_sale) &&
+    isSale(e.sales) &&
     typeof e.list_target === "boolean";
   return typed ? (e as unknown as Evidence) : "evidence fields have unexpected types";
 }
 
-/** A first sale deriveProbes can give: 5 to 150 blocks after the buy, 13 % to 87 %, never a whole percent. */
+/** Sales deriveProbes can give: the first 5 to 150 blocks after the buy, 13 % to 87 %, never a whole
+ *  percent; the rest 200 to 255 blocks after the buy. */
+const within = (x: unknown, [lo, hi]: readonly [number, number]) => Number.isSafeInteger(x) && (x as number) >= lo && (x as number) <= hi;
 const isSale = (x: unknown): x is Sale =>
   isObj(x) &&
-  Object.keys(x).sort().join() === "blocks,bps" &&
-  Number.isSafeInteger(x.blocks) &&
-  (x.blocks as number) >= SALE_BLOCKS[0] &&
-  (x.blocks as number) <= SALE_BLOCKS[1] &&
+  Object.keys(x).sort().join() === "bps,first,late" &&
+  within(x.first, SALE_BLOCKS) &&
+  within(x.late, LATE_SALE_BLOCKS) &&
   Number.isSafeInteger(x.bps) &&
   (x.bps as number) > 1300 &&
   (x.bps as number) < 8700 &&
@@ -194,10 +195,11 @@ const SELECTOR = { buy: "0xb6f9de95", approve: "0x095ea7b3", sale: "0x791ac947" 
  *  between them: its buy alone in the first block, then (full proof) an approve, a swap, an approve and
  *  a swap, each alone in its block, each swap in the block after its approve, the last swap in the last
  *  block, the other blocks empty, every call from the same address and carrying its nonce. Where the
- *  first sale falls is rebuild's to check (evidence.first_sale), their content (amounts, recipient,
- *  path) guardShape's, the buy's hash the evidence's. */
+ *  sales fall is rebuild's to check (evidence.sales), their content (amounts, recipient, path)
+ *  guardShape's, the buy's hash the evidence's. */
 function guardOnly(bs: BlockStateCall[]): string | null {
-  if (bs.length !== 1 && bs.length !== Number(LATE_BLOCKS)) return `${bs.length} blocks, not 1 or ${LATE_BLOCKS}`;
+  const [lo, hi] = LATE_SALE_BLOCKS.map((n) => n + 1); // the buy's block, then the late swap n blocks after it
+  if (bs.length !== 1 && !within(bs.length, [lo, hi])) return `${bs.length} blocks, not 1 or ${lo} to ${hi}`;
   const want = bs.length === 1 ? [SELECTOR.buy] : [SELECTOR.buy, SELECTOR.approve, SELECTOR.sale, SELECTOR.approve, SELECTOR.sale];
   const filled = [...bs.entries()].filter(([, b]) => b.calls.length);
   const got = filled.map(([i, b]) => `${i + 1}: ${b.calls.map((c) => String(c.data).slice(0, 10)).join(", ")}`);
@@ -312,15 +314,15 @@ async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][]): P
     let stranger: Address | null = null;
     const full = !st.stop && !!e.liquidity;
     if (full) {
-      const layout = plan(token, { guard, buyer, stranger: NOBODY }, block, amount, SKELETON, { amounts: st.amounts, owner: st.owner, sale: e.first_sale });
+      const layout = plan(token, { guard, buyer, stranger: NOBODY }, block, amount, SKELETON, { amounts: st.amounts, owner: st.owner, sale: e.sales });
       stranger = at(layout.synthetic, sy, "transferFrom by a stranger")?.from ?? null;
       if (!stranger) return { error: "request has no stranger probe where checkToken puts one" };
       const sales = SALES.map((when) => [`${GUARD}approve router${when}`, `${GUARD}sale${when}`].map((l) => at(layout.guard, g, l)));
-      if (sales.flat().some((c) => !c)) return { error: `the guard's sales are not where evidence.first_sale puts them (${e.first_sale.blocks} blocks after the buy)` };
+      if (sales.flat().some((c) => !c)) return { error: `the guard's sales are not where evidence.sales puts them (${e.sales.first} and ${e.sales.late} blocks after the buy)` };
       txs.sales = sales.map((sale) => sale.map((c) => unsignedOf(c!, e.chain_id))) as [Hex[], Hex[]];
-      sides = plan(token, { guard, buyer, stranger }, block, amount, txs, { amounts: st.amounts, owner: st.owner, sale: e.first_sale });
+      sides = plan(token, { guard, buyer, stranger }, block, amount, txs, { amounts: st.amounts, owner: st.owner, sale: e.sales });
     }
-    const bad = guardShape(txs, token, guard, amount, txs.sales ? saleAmounts(st.amounts.guard, e.first_sale.bps) : null);
+    const bad = guardShape(txs, token, guard, amount, txs.sales ? saleAmounts(st.amounts.guard, e.sales.bps) : null);
     if (bad) return { error: bad };
     const owner = full ? st.owner : null;
     const want = await Promise.all(SIDES.map(async (k) => buildRequest(head, await balances(url, head, sides[k], fees, guard, owner), sides[k], fees)));
@@ -556,7 +558,7 @@ export async function replay(
           const same = c.verdict === proof.verdict && c.reasons === proof.reasons;
           add(same, same ? `on-chain verdict ${c.verdict} for #${proof.id} matches (same target, same reasons)` : `on-chain "${c.verdict}: ${c.reasons}" != file "${proof.verdict}: ${proof.reasons}"`);
         }
-        if (rebuilt) out.push(...(await derivation(proof.id, rebuilt, e.first_sale, c, blockHash, opts.guard ?? (await readGuard()))));
+        if (rebuilt) out.push(...(await derivation(proof.id, rebuilt, e.sales, c, blockHash, opts.guard ?? (await readGuard()))));
         out.push(...(await nearFacts(proof, e, opts.chain ?? readCheck, opts.entry ?? readEntry)));
         if (blockTs !== null) out.push(await timing(url, blockTs, c, opts.clock ?? (() => Date.now() / 1000)));
       }
@@ -679,21 +681,21 @@ async function replayExit(proof: Proof, e: ExitEvidence, url: string, opts: Opts
   return out;
 }
 
-/** The probes and the first sale must be deriveProbes(guard, #id, on-chain request time, EVM block
- *  hash) and the guard side must be the guard's derived EVM address: otherwise the sentinel chose who
- *  was simulated, or when and how much it sold. */
+/** The probes and the sales must be deriveProbes(guard, #id, on-chain request time, EVM block hash)
+ *  and the guard side must be the guard's derived EVM address: otherwise the sentinel chose who was
+ *  simulated, or when and how much it sold. */
 function derivation(id: number, r: Rebuilt, sale: Sale, c: NonNullable<OnChain>, blockHash: Hex | null, g: GuardInfo): Line[] {
   if (!blockHash) return [{ ok: false, line: "ERROR    probe derivation: EVM block hash unknown" }];
   const want = deriveProbes({ guard: g.account, id, requested_ns: c.requested_ns }, blockHash);
   const probesOk = same(r.buyer, want.buyer) && (r.stranger === null || same(r.stranger, want.stranger));
-  const saleOk = sale.blocks === want.sale.blocks && sale.bps === want.sale.bps;
+  const saleOk = sale.first === want.sale.first && sale.bps === want.sale.bps && sale.late === want.sale.late;
   const line = (ok: boolean, text: string): Line => ({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
   return [
     line(
       saleOk,
       saleOk
-        ? `first sale derived like the probes: ${sale.blocks} blocks after the buy, ${sale.bps / 100} % of the tokens bought`
-        : `first sale not derived from on-chain data: ${sale.blocks} blocks, ${sale.bps} bps (derived ${want.sale.blocks} blocks, ${want.sale.bps} bps)`,
+        ? `sales derived like the probes: ${sale.bps / 100} % of the tokens bought ${sale.first} blocks after the buy, the rest ${sale.late} blocks after it`
+        : `sales not derived from on-chain data: ${JSON.stringify(sale)} (derived ${JSON.stringify(want.sale)})`,
     ),
     line(
       probesOk,

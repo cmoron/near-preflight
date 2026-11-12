@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Local copy of Base (anvil) at block FORK_BLOCK, with our trap tokens and their Uniswap V2 pairs.
 # Deterministic: fresh deployer (nonce 0), same block, hence the same addresses on every run.
-# Writes evm/tokens.json, then keeps anvil in the foreground (Ctrl-C to stop).
+# Writes evm/tokens.json (and its copy docs/tokens.json, the status page's token names), then keeps
+# anvil in the foreground (Ctrl-C to stop).
 set -euo pipefail
 shopt -s inherit_errexit
 cd "$(dirname "$0")"
@@ -209,6 +210,7 @@ jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked
     usdc_copies: $copies, judge_trap: $judgetrap, untouched_buyer: $untouched, stranger_key: $strangerkey,
     pair_pull_tax: $pairpull, red_l1_trap: $redl1, basefee_trap: $basefee, helper_trap: $helper,
     next_block_key: $nbk, amount_trap: $amount}' > tokens.json
+cp tokens.json ../docs/tokens.json
 echo "guard_frozen freezes $GUARD_EVM"
 echo "Base fork at block $FORK_BLOCK ready on $RPC; tokens in evm/tokens.json:"
 cat tokens.json

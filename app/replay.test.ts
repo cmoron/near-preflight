@@ -24,11 +24,15 @@ const NO_NEAR: NearFacts = { listed: [], previous: null };
 const AMOUNT = 10_000_000_000_000n;
 /** Time of the fork's latest block: a check requested now (its swap deadline is 300 s later). */
 const headTime = async () => BigInt((await rpc<{ timestamp: Hex }>(RPC, "eth_getBlockByNumber", ["latest", false])).timestamp);
-const proofOf = async (token: Address = TRAP, probe?: Partial<Probe>, guard: Address = GUARD_EVM, requested_ns = "0", near = NO_NEAR): Promise<Proof> =>
+/** `probe` replaces part of what deriveProbes gives (a function gets the derived one). */
+const proofOf = async (token: Address = TRAP, probe?: Partial<Probe> | ((derived: Probe) => Partial<Probe>), guard: Address = GUARD_EVM, requested_ns = "0", near = NO_NEAR): Promise<Proof> =>
   toProof(
     1,
     token,
-    await checkToken(RPC, token, guard, (head) => ({ ...deriveProbes({ guard: GUARD_INFO.account, id: 1, requested_ns }, head.hash), ...probe }), {
+    await checkToken(RPC, token, guard, (head) => {
+      const derived = deriveProbes({ guard: GUARD_INFO.account, id: 1, requested_ns }, head.hash);
+      return { ...derived, ...(typeof probe === "function" ? probe(derived) : probe) };
+    }, {
       index: INDEX,
       near: async () => near,
       amount: AMOUNT,
@@ -92,7 +96,7 @@ describe("replay", () => {
   });
   test("two swapped labels in evidence.calls are detected", async () => {
     const proof = withEvidence(await proofOf(), (e) => {
-      const i = e.calls.findIndex((x: string) => x.startsWith("sale +256 blocks:"));
+      const i = e.calls.findIndex((x: string) => x.startsWith("sale late:"));
       [e.calls[0], e.calls[i]] = [e.calls[i], e.calls[0]];
     });
     const bad = failed(await replay(proof, RPC));
@@ -101,7 +105,7 @@ describe("replay", () => {
   });
   test("a request whose shape is not checkToken's is detected (token, buyer)", async () => {
     const proof = structuredClone(await proofOf(tokens.safe as Address));
-    const [swap] = callsIn(proof, 1, 255);
+    const [swap] = callsIn(proof, 1, evidenceOf(proof).sales.late); // the late swap, in the last block
     swap.from = "0x" + "11".repeat(20); // the probe's late sale comes from another address than the buyer
     const bad = failed(await replay(proof, RPC));
     expect(bad.some((l) => l.includes("request hash"))).toBe(true); // hash and shape fail together
@@ -157,7 +161,7 @@ describe("replay: the evidence string is the one posted on chain", () => {
   });
   test("a guard sale simulated with an approve of 2^256 - 1 instead of the exact amount is refused (request shape)", async () => {
     const proof = structuredClone(await proofOf(tokens.safe as Address));
-    const [approve] = callsIn(proof, 0, evidenceOf(proof).first_sale.blocks - 1); // the first sale's approve
+    const [approve] = callsIn(proof, 0, evidenceOf(proof).sales.first - 1); // the first sale's approve
     approve.data = encodeFunctionData({ abi: parseAbi(["function approve(address,uint256) returns (bool)"]), args: [ROUTER, maxUint256] });
     expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("request shape: sale 1: not approve(router"))).toBe(true);
   });
@@ -524,22 +528,34 @@ describe("replay rejects altered evidence on a clean token", () => {
   });
 });
 
-// Judge pass 6: the first sale's block and share are derived like the probes, and list_target is in
-// the evidence; a sentinel could otherwise choose a friendly sale, or list a token its proof clears.
-describe("replay: the first sale and list_target", () => {
+// Judge pass 6: both sales' blocks and the first one's share are derived like the probes, and
+// list_target is in the evidence; a sentinel could otherwise choose a friendly sale, or list a token
+// its proof clears.
+describe("replay: the sales and list_target", () => {
   test("a first sale chosen by the sentinel replays, but --check refuses it: not derived from on-chain data", async () => {
-    const proof = await proofOf(tokens.safe as Address, { sale: { blocks: 5, bps: 5001 } });
+    const proof = await proofOf(tokens.safe as Address, (d) => ({ sale: { ...d.sale, first: 5, bps: 5001 } }));
     expect(failed(await replay(proof, RPC))).toEqual([]);
     const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) }));
-    expect(bad).toEqual([expect.stringContaining("first sale not derived from on-chain data")]);
+    expect(bad).toEqual([expect.stringContaining("sales not derived from on-chain data")]);
   });
-  test("an evidence.first_sale other than the one simulated: refused", async () => {
-    const proof = withEvidence(await proofOf(tokens.safe as Address), (e) => (e.first_sale = { ...e.first_sale, blocks: e.first_sale.blocks === 5 ? 6 : 5 }));
-    expect(failed(await replay(proof, RPC)).some((l) => l.includes("the guard's sales are not where evidence.first_sale puts them"))).toBe(true);
+  test("a late sale chosen by the sentinel (its block fixed) replays, but --check refuses it", async () => {
+    const proof = await proofOf(tokens.safe as Address, (d) => ({ sale: { ...d.sale, late: d.sale.late === 255 ? 254 : 255 } }));
+    expect(failed(await replay(proof, RPC))).toEqual([]);
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) }));
+    expect(bad).toEqual([expect.stringContaining("sales not derived from on-chain data")]);
   });
-  test("a first sale of exactly half (a whole percent) is refused before anything is sent", async () => {
-    const proof = withEvidence(await proofOf(tokens.safe as Address), (e) => (e.first_sale.bps = 5000));
-    expect(failed(await replay(proof, RPC))).toEqual(["MISMATCH evidence fields have unexpected types (nothing sent to the node)"]);
+  test("an evidence.sales other than the one simulated: refused", async () => {
+    const proof = await proofOf(tokens.safe as Address);
+    const first = withEvidence(proof, (e) => (e.sales.first = e.sales.first === 5 ? 6 : 5));
+    expect(failed(await replay(first, RPC)).some((l) => l.includes("the guard's sales are not where evidence.sales puts them"))).toBe(true);
+    const late = withEvidence(proof, (e) => (e.sales.late = e.sales.late === 200 ? 201 : 200));
+    expect(failed(await replay(late, RPC)).some((l) => l.includes("the guard's sales are not where evidence.sales puts them"))).toBe(true);
+  });
+  test("a first sale of exactly half (a whole percent), or a late sale 256 blocks after the buy, is refused before anything is sent", async () => {
+    const proof = await proofOf(tokens.safe as Address);
+    for (const forge of [(e: any) => (e.sales.bps = 5000), (e: any) => (e.sales.late = 256)]) {
+      expect(failed(await replay(withEvidence(proof, forge), RPC))).toEqual(["MISMATCH evidence fields have unexpected types (nothing sent to the node)"]);
+    }
   });
   test("evidence.list_target flipped: the rejudged one differs", async () => {
     const proof = await proofOf(tokens.usdc as Address);

@@ -1,57 +1,90 @@
 # near-preflight: a pre-buy guard for AI agents, purchases signed by NEAR
 
-NEAR Hackathon, track **AI Security & Defense**. Repository: [github.com/cmoron/near-preflight](https://github.com/cmoron/near-preflight).
+[![ci](https://github.com/cmoron/near-preflight/actions/workflows/ci.yml/badge.svg)](https://github.com/cmoron/near-preflight/actions/workflows/ci.yml)
 
-An AI agent can buy a token on Base only through a NEAR contract, the guard. A spending cap stops an agent from spending too much, not from spending a little on a trap. The guard adds what a cap cannot: it judges the token before NEAR signs anything. In the track's terms, the payee is a Base token, judged before NEAR signs the payment. Verdicts: `allow` (buyable), `warn` (buyable once the owner approves), `block`.
+On one day of real Base (2026-11-11), 24 of the 29 new Uniswap V2 WETH pools were drained a median 2.2 hours after funding, and all 29 shared one code template: given that day's index, near-preflight blocks the template's next copy before NEAR signs a buy.
 
-- **Pre-buy simulation with a replayable proof.** A sentinel simulates on Base the guard's buy and sales, the exact bytes NEAR would sign and nothing else before or between them; a probe's twins and the takebacks (tokens pulled back from the buyer without approval) run apart. A token whose transfers depend on what a simulation cannot reproduce is not allowed: the guard's transactions are replayed on a local fork, and an address they touch outside the token, its pool and Uniswap is a `block` (Base's L1Block, a fee vault, a helper); an opcode no simulation can match in its code is a `warn`. Anyone can re-derive the verdict NEAR stores.
-- **Template reputation.** A token's template is its code with immutables and metadata masked, shared by its copies. Even with a clean simulation, a token is blocked when at least 3 pools of its template were funded (0.5 ETH of WETH net) before its own and at least 80 % of them were drained (90 % of their LP burned) within a day of funding.
-- **A purchase built by the contract and signed by NEAR Chain Signatures.** The agent picks the token and the amount when it asks for a check. It cannot pick what gets signed after the verdict: route, recipient and floor come from the guard, which signs only the transaction the sentinel simulated.
-- **An agent that is a NEAR AI enclave-attested model.** Each decision is signed inside a TEE; its signed request names the guard, the agent and a recent NEAR block, and its sha256 is stored with the one guard call it asked for (the guard refuses it a second time).
+NEAR Hackathon, track **AI Security & Defense**. Live status page: [cmoron.github.io/near-preflight](https://cmoron.github.io/near-preflight/).
 
-Deployed on testnet: `guard.goblin-guard-81427.testnet` (`src/lib.rs`, near-sdk 5, wasm of 361,064 bytes, sha256 `35bbcc91…f52d`, the code hash on chain). Status page: [`docs/`](docs/index.html). Checks, rules, roles, keys, every limit and what review found: [`docs/DETAILS.md`](docs/DETAILS.md). Measured once on real Base (2026-11-11, 24 h, read-only): 29 Uniswap V2 WETH pools, all of one code template, 24 drained within a day of funding; the rule blocks that template's next copy (DETAILS, Real Base).
+## What it is
 
-## Try it
+A spending cap stops an AI agent from spending too much, not from spending a little on a token it can never sell. Here the agent can buy on Base only through a NEAR contract, the **guard**, in three steps. The agent asks the guard to check a token and an amount. The **sentinel**, an off-chain service holding one NEAR key, simulates the exact buy NEAR would sign and two later sales of what it bought (previews: an exit is simulated again when the agent sells); the same trades from a fresh address, and transfers attempted without approval, run in separate requests. It posts a verdict, `allow`, `warn` (buyable once the owner approves) or `block`, and whether to put the token on a shared blocklist, with the sha256 of its evidence: anyone can replay it to re-derive both. On `allow`, the guard builds the swap itself and NEAR Chain Signatures (NEAR's threshold signing network, the MPC) signs it. Unlike a cap plus an allowlist, it judges tokens nobody has listed yet, and the agent never holds an EVM key nor picks the route, recipient or floor (the minimum output) of what gets signed.
+
+The demo agent is `z-ai/glm-5.3-flash` on NEAR AI Cloud, whose replies are signed inside an attested TEE. The agent may attach a reply's sha256 to its guard call; the guard stores it and refuses it a second time, and `app/attest.ts` verifies the reply afterwards. The guard neither requires nor verifies it: it does not rely on the model.
+
+## Verify without any account, in five minutes
+
+1. Open the [status page](https://cmoron.github.io/near-preflight/): the journal of the demonstration guard on NEAR testnet, each check and its verdict.
+2. With `bun` 1.4, Foundry 1.8 and `jq` (no NEAR account, no key; `GUARD` only names the contract to read):
+
+   ```sh
+   git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun install
+   # Check #19, USDC on Base mainnet: resent to mainnet.base.org, traced on a local anvil fork, re-judged, compared with NEAR (10 s)
+   GUARD=guard.goblin-guard-81427.testnet bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
+   #   -> REPLAY OK: verdict warn confirmed, same as on chain
+   # The model decision anchored on check #5: signature, TDX quote (asks Intel and NVIDIA), the guard's record of it
+   GUARD=guard.goblin-guard-81427.testnet bun app/attest.ts app/fixtures/decision.json --check 5
+   #   -> ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)
+   ```
+
+3. Every trap below on a local Base fork, as CI runs it: `echo GUARD=guard.goblin-guard-81427.testnet > .env && evm/fork.sh` (ready in about 1 min), then in another terminal `bun test --timeout 30000` -> `249 pass`, `0 fail` (about 1.5 min).
+
+## Attacks and what the guard answers
+
+Token names in parentheses are keys of `evm/tokens.json`. Each `bun test -t` needs `evm/fork.sh` running; `./demo.sh` needs a testnet account (Full reproduction).
+
+| Attack                                                                                                                    | What it answers (exact reason)                                                                                                                                       | Reproduce                                               |
+| ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Sale refused after the buy (`sell_blocked`)                                                                               | `block`, token listed: `sale refused 104 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)`                                                                | `bun test -t "sale closed from the buy"`                |
+| Owner takes tokens back without approval (`owner_reclaim`)                                                                | `block`, listed: `owner() 0x60B1…0001 takes tokens back by transferFrom without approval`                                                                            | `bun test -t "takeback by the owner"`                   |
+| Template farm: a clean copy of code whose earlier pools were drained (`farm_fresh`)                                       | `block`, never listed: `template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding`                                                          | `bun test -t "fresh token of a farm template"`          |
+| Transfers touch an address beyond the token, its pool and Uniswap, here Base's L1Block (`red_l1_trap`, `helper_trap`)     | `block`, not listed: `reads 0x4200..0015, 0x8bde..9881 during a transfer: state no simulation reproduces`                                                            | `bun test -t "RedL1Trap"`                               |
+| Code reads a value no simulation can match: BASEFEE, PREVRANDAO, COINBASE… (`basefee_trap`)                               | `warn`, the owner decides: `code reads BASEFEE: values no simulation can match`                                                                                      | `bun test -t "keyed on the base fee"`                   |
+| Sells only inside a simulation: zero gas price or base fee (`sim_detector`), a read only a simulator sends (`judge_trap`) | `block`, listed: `sale refused N blocks after the buy`                                                                                                               | `bun test -t "only in simulation"`, `-t "JudgeTrap"`    |
+| Sale only in the block right after the buy (`next_block_key`)                                                             | `block`, listed, `sale refused N blocks after the buy`: the first sale lands 5 to 150 blocks after the buy, drawn per check                                          | `bun test -t "NextBlockKey"`                            |
+| Sale only of half or all of the balance (`amount_trap`)                                                                   | `block`, listed, `sale refused N blocks after the buy`: the first sale sells 13 % to 87 %, drawn per check                                                           | `bun test -t "AmountTrap"`                              |
+| Sale only at the check's late block                                                                                       | the late sale lands 200 to 255 blocks after the buy, drawn per check; `replay --check` refuses a schedule the sentinel chose: `sales not derived from on-chain data` | `bun test -t "sales derive"`, `-t "late sale chosen"`   |
+| Freezes only the guard's public EVM address (`guard_frozen`)                                                              | `block`, not listed: `guard address only, not listed: sale refused …`                                                                                                | `bun test -t "freezes only the guard"`                  |
+| Agent injects a target, recipient, router or `min_out` into `buy`                                                         | ignored: NEAR signs the swap the sentinel simulated                                                                                                                  | `./demo.sh`, moment 4                                   |
+| Agent calls the MPC signer, or moves NEAR, directly                                                                       | NEAR protocol: `Access key receiver … does not match transaction receiver v1.signer-prod.testnet`, `Access key requires full access`                                 | `./demo.sh`, moment 4                                   |
+| Agent buys another amount than checked, or above the owner's limit                                                        | `amount is not the one checked`, `amount above the owner's per-buy limit`                                                                                            | `cargo test another_amount`, `cargo test per_buy_limit` |
+| One signed model decision reused for a second call                                                                        | `decision already anchored on check #n`                                                                                                                              | `cargo test digest`                                     |
+| A lying sentinel asks to list an honest token                                                                             | `replay --check`: `on-chain list_target true != evidence.list_target false`                                                                                          | `bun test -t "list_target true"`                        |
+| **Not stopped:** a lying sentinel posts `allow` on a trap                                                                 | bought if the agent buys within 120 s; replay shows the lie only afterwards                                                                                          | none                                                    |
+| **Not stopped:** the token's owner pauses, taxes or blacklists after the buy                                              | nothing: the simulation saw the token before                                                                                                                         | none                                                    |
+| **Not stopped:** a token that changes after the late sale (over 510 s after the buy)                                      | nothing: no later sale is simulated                                                                                                                                  | none                                                    |
+
+## Full reproduction
 
 1. With Rust and `cargo-near` 0.23, `near` CLI 0.31, `bun` 1.4, Foundry 1.8 and `jq`: `cargo test` -> `247 passed`, then `bun install`.
-2. Get a testnet account holding about 7 NEAR (setup moves 6.35 NEAR). The faucet gives 10:
+2. Get a testnet account holding about 7 NEAR (setup moves 6.35 NEAR). The faucet gives 10: `near account create-account sponsor-by-faucet-service <you>.testnet autogenerate-new-keypair save-to-keychain network-config testnet create`. It rate-limits by IP (`429 Too Many Requests`); a failed call leaves `~/.near-credentials/testnet/<you>.testnet.json` and the folder `<you>.testnet/` beside it: delete both before retrying, or create the account from any account holding 7.5 NEAR (`near account create-account fund-myself <you>.testnet '7.5 NEAR' autogenerate-new-keypair save-to-keychain sign-as <funded>.testnet network-config testnet sign-with-keychain send`).
+3. `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard and creates `agent.`, `agent2.`, `sentinel.` and `armer.`, each with a function-call key limited to the guard. The armer, a key apart from the agent's, opens the agent's armed budget: what it may spend before a deadline.
+4. `evm/fork.sh` in another terminal starts an anvil fork of Base with the demo tokens; the sentinel and replay also start throwaway anvil forks. Then `bun test --timeout 30000` -> `249 pass` and `bunx tsc --noEmit` -> exit 0.
+5. `./demo.sh` -> exit 0 in about 1 to 2 min (96 s here), four moments: a poisoned inbox message pushes the agent to a trap, `BLOCK (sale refused N blocks after the buy …)`, and the contract refuses the buy (`verdict does not allow the purchase`); a farm token whose simulation is clean, `BLOCK (template 0x9c69..94c8: 5 of 5 earlier pools drained …)`; USDC, `ALLOW`, the guard builds the swap, NEAR signs it, a relay with no key broadcasts it to the fork, `receipt status 1`; the agent bypasses its wrapper and every attempt fails as in the table.
+6. The demo ends by printing this run's `app/replay.ts … --check` and `app/attest.ts … --check` commands: each exits 0. If a role logs `429 Rate limits exceeded`, the NEAR RPC is limiting your IP: wait a few minutes.
+7. Optional: with `NEAR_AI_API_KEY=...` in `.env.llm` ([cloud.near.ai](https://cloud.near.ai)), moment 1 runs the live model (0.0003 USD here); without it, a recorded decision is verified. `./demo.sh --full` (209 s here) adds an exit, a `warn` the owner approves, a trap aimed at the guard's address, a second agent, three concurrent model runs, the emergency stop and a withdrawal.
+8. `./check-mainnet.sh` -> exit 0 in 23 s: USDC simulated on Base mainnet (read-only), traced on a fork of it, replayed with `--check`; verdict `warn`, since there is no template index for mainnet and an unknown reputation is never a pass.
 
-   ```sh
-   near account create-account sponsor-by-faucet-service <you>.testnet autogenerate-new-keypair save-to-keychain network-config testnet create
-   ```
-
-   It rate-limits by IP (`429 Too Many Requests`). A failed call creates no account but leaves a key that was never added, in two places: the file `~/.near-credentials/testnet/<you>.testnet.json` and the folder `~/.near-credentials/testnet/<you>.testnet/`. Delete both (the CLI will not overwrite them), then retry later, or create the account from any testnet account holding 7.5 NEAR:
-
-   ```sh
-   near account create-account fund-myself <you>.testnet '7.5 NEAR' autogenerate-new-keypair save-to-keychain sign-as <funded>.testnet network-config testnet sign-with-keychain send
-   ```
-
-3. `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard and creates `agent.`, `agent2.`, `sentinel.` and `armer.` (the armer, a key apart from the agent's, opens the agent's armed budget: what it may spend before a deadline), each with a function-call key limited to the guard.
-4. `evm/fork.sh` in another terminal starts an anvil fork of Base with the demo tokens (including the traps and USDC code copies from earlier reviews); the sentinel and replay also run throwaway anvil forks. Then `bun test` -> `248 pass` and `bunx tsc --noEmit` -> exit 0.
-5. `./demo.sh` -> exit 0 in 75 to 115 s, four moments:
-   1. A poisoned inbox message pushes the agent to a trap: the sentinel answers `BLOCK (sale refused N blocks after the buy ...)` and the contract refuses the buy (`verdict does not allow the purchase`).
-   2. A farm token whose simulation is clean: `BLOCK (template 0x9c69..94c8: 5 of 5 earlier pools drained ...)`.
-   3. USDC, whose code three drained copies share on the fork: `ALLOW (... template reputation not applied ...)`, the guard builds the swap, NEAR signs it, a relay with no key broadcasts it: `receipt status 1`.
-   4. The agent bypasses its wrapper: the protocol refuses a direct MPC call and a NEAR transfer, the contract a 1 ETH check (`amount above the owner's per-buy limit`) and a buy of another amount than the one checked (`amount is not the one checked`), and ignores an injected target, recipient and `min_out`.
-6. The demo ends by printing this run's `app/replay.ts ... --check` and `app/attest.ts ... --check` commands: each exits 0. If the roles log `429 Rate limits exceeded`, the NEAR RPC (fastnear) is limiting your IP: wait a few minutes and run again.
-7. Optional: with `NEAR_AI_API_KEY=...` in `.env.llm` ([cloud.near.ai](https://cloud.near.ai)), moment 1 runs the live attested model (about 0.0004 USD); without it, one line says so and a recorded decision is verified instead. `./demo.sh --full` (about 3.5 min) adds the exit, a `warn` approved by the human, a trap aimed at the guard's own address, a second agent, the injection count, the emergency stop and the withdrawal.
-8. `./check-mainnet.sh` -> exit 0: USDC simulated on Base mainnet (read-only), its transactions traced on a fork of it (they touch USDC, its implementation, its pool and WETH only) and replayed, verdict `warn` (no template index for mainnet: an unknown reputation is never a pass).
+Deployed: `guard.goblin-guard-81427.testnet`, built from `src/` at commit `d832e22` (`cargo near build non-reproducible-wasm`, near-sdk 5): wasm of 361,064 bytes, sha256 `35bbcc91…f52d`, the code hash on chain. A rebuild on another machine may differ until the reproducible build ships ([DETAILS](docs/DETAILS.md#limits)).
 
 ## What NEAR enforces
 
 - The agent's key can call only the guard's `request_check`, `buy`, `refund_check`, `request_exit` and `sell_quoted`: no transfer, no MPC call. Its 0.5 NEAR allowance only caps gas.
-- A buy needs an `allow`, or a `warn` the owner approved, less than 120 s old, on a check requested after the owner's last stop, for the amount stated at the check (at most the owner's per-buy limit), on a token neither listed nor held for another agent, within the armed budget. A sale never needs buying budget: an exit's quote and gas come from the agent's credit.
-- For an agent's buy or exit, the guard signs only the transactions whose hashes the verdict carries, built by the guard itself (chain 8453, router, path, recipient = its own address, floor = sentinel quote minus 3 %, nonce, gas, fees) and simulated as is by the sentinel. If anything moved since, it signs nothing and the agent asks a new check. The owner's `sell`, `withdraw_eth` and `sign_replacement` sign without a verdict. The blocklist holds tokens, never a code template.
-- The owner can have NEAR sign a sale of any token the guard's address holds, at any floor and with any approve, the maximum included, whatever the agent's state, once a signature in progress returns (about 6 s); after a stop, that sale is mined after the buy in flight.
-- A signature that does not come back may still be published by the MPC: its nonce, charge and tokens stay reserved; the owner signs a replacement at that nonce (only a reserved nonce can be replaced), and only then can refund it. A signing slot whose callback never ran is released by the owner after 600 s, reserved the same way (DETAILS).
+- A buy needs an `allow`, or a `warn` the owner approved, less than 120 s old, requested after the owner's last stop, for the amount stated at the check (at most the owner's per-buy limit), on a token neither listed nor held for another agent, within the armed budget.
+- The guard signs only the transaction whose hash the verdict carries, built by the guard itself: chain 8453, router, path, recipient = its own EVM address, floor = the sentinel's quote minus 3 %, nonce, gas and fees. If anything moved since, it signs nothing and the agent asks a new check.
+- A sale never needs buying budget: an exit's quote and gas come from the agent's credit (an agent frozen by the owner's emergency stop cannot sell; the owner can, any token the guard's address holds, at any floor, once the signature in progress returns).
+- A signature that does not come back keeps its nonce and charge reserved until the owner settles it ([DETAILS](docs/DETAILS.md#what-near-enforces)).
 
-## Limits
+## What we do not stop
 
-- The sentinel is one key on one machine, no TEE: a lying `allow` can be bought within 120 s, and replay catches it only afterwards. The owner replaces a compromised key (`set_sentinel`).
-- A simulation cannot prove that a token will be sellable later. Closed: tokens keyed on the guard's gas, fees, amount, approve or calldata, on extra calls of the simulation, on state or opcodes the simulation cannot reproduce (L1Block, fee vaults, the base fee...), and on where or what the check sells: its first sale lands 5 to 150 blocks after the buy and sells 13 % to 87 % of it, both derived per check from the EVM block hash. Open: a token keyed on a sale amount or delay the check did not sample (an exit sells the agent's holding, when it chooses), an owner action after the buy, behaviour that changes beyond the 512 s horizon (TIMESTAMP, NUMBER), an admin other than `owner()`.
-- The signing request and the signed transaction are public on NEAR before broadcast: a token owner can react before the swap's 300 s deadline.
-- Reputation judges a token only against pools funded before its own: a token whose pool held 0.5 ETH before the index window is not judged by it (its reasons say so).
-- A transaction signed for chain 8453 is valid on Base mainnet: never fund the derived address. The relay broadcasts only to anvil. The build is not reproducible yet (DETAILS, Build).
+- **A lying sentinel.** One key on one machine, no TEE: its `allow` on a trap can be bought within 120 s, and replay catches the lie only afterwards. The owner replaces the key (`set_sentinel`).
+- **What a token does later.** An owner action after the buy (pause, tax, blacklist; any admin, not only `owner()`); behaviour that changes after the late sale (400 to 510 s after the buy); a sale size or delay the check did not sample (an exit sells the agent's holding, when it chooses); a token keyed on the guard's own ETH balance.
+- **Front-running.** The signing request and the signed transaction are public on NEAR before anyone broadcasts them: a token owner can react before the swap's 300 s deadline.
+- **Template evasion.** A template is the code with `PUSH32` operands and metadata masked, so changing any other constant makes a new one; a template with fewer than 3 earlier pools gets no finding; a pool that held 0.5 ETH before the index window is not judged; without an index (as in `check-mainnet.sh`) the verdict is `warn`.
+- **The model's decision.** Its digest is optional: a compromised agent can omit it or attach another one.
+- **Operations.** One signature at a time for all agents; the NEAR/ETH rate is fixed by the owner, with no oracle; only Uniswap V2 WETH pools are read; a transaction signed for chain 8453 is valid on Base mainnet (never fund the derived address; the relay broadcasts only to anvil); the build is not reproducible yet.
+
+Every check, rule, role and key, and what review found: [docs/DETAILS.md](docs/DETAILS.md).
 
 ## Disclosure
 

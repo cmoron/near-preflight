@@ -1,44 +1,126 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>near-preflight, live on NEAR testnet</title>
-<link rel="icon" href="data:,">
-<link rel="stylesheet" href="style.css">
-</head>
-<body>
-<header>
-  <h1>near-preflight</h1>
-  <p>A pre-buy guard for AI agents: an agent can buy a token on Base only through a NEAR contract, after a sentinel checked it, and the purchase is signed by NEAR. This page reads the guard <code id="guard">…</code> on NEAR testnet.</p>
-  <p class="note">The tokens checked here live on a local fork of Base (anvil), not on Base itself: the demo's traps and its buys run there, and the guard's signed transactions are broadcast only to that fork. The verdicts, checks and blocklist shown are real, on NEAR testnet.</p>
-  <p class="status" role="status" aria-live="polite"><span id="updated">Loading…</span> <span id="error" class="err" hidden></span></p>
-</header>
-<main>
-  <section aria-labelledby="h-bounds">
-    <h2 id="h-bounds">Human bounds and roles</h2>
-    <dl id="bounds"><dt>Loading</dt><dd>…</dd></dl>
-  </section>
-  <section aria-labelledby="h-checks">
-    <h2 id="h-checks">Checks <small id="count"></small></h2>
-    <table id="checks">
-      <thead><tr><th>Id</th><th>Kind</th><th>Verdict</th><th>Target token</th><th>Agent</th><th>Reasons</th><th>Human OK</th><th>Signed</th><th>Evidence sha256</th><th>Model decision sha256</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </section>
-  <section aria-labelledby="h-block">
-    <h2 id="h-block">Shared blocklist <small id="listed"></small></h2>
-    <p class="note">Every listed token, read with <code>list_entries</code>. The guard refuses a check or a buy of these; a sentinel listing's note names the verdict it rests on.</p>
-    <table id="blocklist">
-      <thead><tr><th>Token</th><th>Reporter</th><th>Listed at</th><th>Evidence sha256</th><th>Note</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </section>
-</main>
-<footer>
-  Read-only. Data straight from the NEAR testnet RPC, no backend, no wallet, no key. RPC in use: <span id="rpc">-</span>.
-  <a href="https://github.com/cmoron/near-preflight">Repository</a> · <a href="https://github.com/cmoron/near-preflight#readme">README (steps to reproduce)</a>
-</footer>
-<script src="app.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>near-preflight journal</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>near-preflight</h1>
+      <p class="lede">
+        The journal of one demonstration guard, <code id="guard">…</code>, a
+        contract on NEAR testnet. Each line is a purchase (or a sale) an AI
+        agent asked for, and what the guard answered before NEAR would sign
+        anything.
+      </p>
+      <p class="note">
+        The demo's tokens live on a local fork of Base (anvil), not on Base: the
+        traps and the buys run there, and the guard's signed transactions are
+        broadcast only to that fork. Checks from
+        <code>check-mainnet.sh</code> simulate USDC on Base mainnet, read-only,
+        and nothing is ever sent to Base. The verdicts, checks and blocklist
+        below are real, read from NEAR testnet.
+      </p>
+      <p class="status" role="status" aria-live="polite">
+        <span id="updated">Loading…</span>
+        <span id="error" class="err" hidden></span>
+      </p>
+    </header>
+    <main>
+      <section aria-labelledby="h-summary">
+        <h2 id="h-summary">So far</h2>
+        <p id="summary" class="summary">Loading…</p>
+        <div id="bar" class="bar" aria-hidden="true"></div>
+      </section>
+
+      <section aria-labelledby="h-steps">
+        <h2 id="h-steps">How one check goes <small id="steps-of"></small></h2>
+        <ol id="steps" class="steps">
+          <li>
+            <b>The agent asks.</b> It names a token and an amount, and pays for
+            the check.
+          </li>
+          <li>
+            <b>The sentinel simulates.</b> An off-chain service runs the buy
+            NEAR would sign, then two sales of what it bought, and judges the
+            token.
+          </li>
+          <li>
+            <b>The verdict is stored on NEAR.</b> With the sha256 of its
+            evidence, which anyone can replay, and the hash of the one
+            transaction the guard may sign.
+          </li>
+          <li>
+            <b>NEAR signs.</b> On <code>allow</code>, the guard builds the swap
+            itself and NEAR Chain Signatures signs it.
+          </li>
+        </ol>
+      </section>
+
+      <section aria-labelledby="h-state">
+        <h2 id="h-state">State now</h2>
+        <dl id="state" class="facts">
+          <dt>Loading</dt>
+          <dd>…</dd>
+        </dl>
+      </section>
+
+      <section aria-labelledby="h-checks">
+        <h2 id="h-checks">Checks <small id="count"></small></h2>
+        <p class="note">
+          Newest first. Open a line for its agent, hashes, model decision and
+          signed transaction.
+        </p>
+        <div class="log-head" aria-hidden="true">
+          <span>Id</span><span>Token</span><span>Verdict</span
+          ><span>Reason</span>
+        </div>
+        <ul id="checks" class="log"></ul>
+      </section>
+
+      <section aria-labelledby="h-block">
+        <h2 id="h-block">Shared blocklist <small id="listed"></small></h2>
+        <p class="note">
+          The guard refuses a check or a buy of these tokens. A sentinel listing
+          names the verdict it rests on; only the owner can unlist.
+        </p>
+        <table id="blocklist">
+          <thead>
+            <tr>
+              <th>Token</th>
+              <th>Listed by</th>
+              <th>When</th>
+              <th>Note</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <details class="more">
+        <summary><h2 id="h-bounds">Bounds and roles</h2></summary>
+        <dl id="bounds" class="facts">
+          <dt>Loading</dt>
+          <dd>…</dd>
+        </dl>
+      </details>
+    </main>
+    <footer>
+      <p>
+        Read-only: this page calls the guard's view methods on the NEAR testnet
+        RPC, with no backend, no wallet and no key. RPC in use:
+        <span id="rpc">-</span>.
+      </p>
+      <p>
+        <a href="https://github.com/cmoron/near-preflight">Repository</a>,
+        <a href="https://github.com/cmoron/near-preflight#readme"
+          >README with the steps to reproduce</a
+        >
+      </p>
+    </footer>
+    <script src="app.js"></script>
+  </body>
 </html>

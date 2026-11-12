@@ -4,6 +4,10 @@ The [README](../README.md) is the short version. This page has the checks, the r
 the function-call keys, what the attestation proves, every known limit, and what review found and how it was
 closed.
 
+Names: the repository is `near-preflight`; the Cargo package (and the string the probes are derived from) is
+`goblin-near` and the contract's event standard `goblin_guard`, earlier working names kept because renaming
+them would change the deployed contract and every recorded proof.
+
 ## Checks before a buy
 
 The sentinel is `app/verifier.ts`, with `app/index.ts` for template reputation. Every fact a verdict rests on
@@ -11,7 +15,7 @@ goes into the evidence, whose sha256 the guard stores with the verdict; `app/rep
 
 | Check                | How (read-only, public RPC calls)                                                | Verdict         |
 | -------------------- | -------------------------------------------------------------------------------- | --------------- |
-| Buy, takeback, sales | `eth_simulateV1`: the guard's own transactions alone; a probe's twins, apart     | see below       |
+| Buy, takeback, sales | `eth_simulateV1`: the guard's buy and sales alone; a probe's and takebacks apart | see below       |
 | Removable liquidity  | the Uniswap V2 WETH pair's LP supply now and 1,800 blocks (1 h) back             | see below       |
 | Template reputation  | the index of V2 WETH pools by code template (`bun app/index.ts`)                 | see below       |
 | Shared blocklist     | `get_entry` on the guard for the token                                           | listed: `block` |
@@ -20,7 +24,7 @@ goes into the evidence, whose sha256 the guard stores with the verdict; `app/rep
 | Environment opcodes  | the reachable code of the token and of its implementation                        | found: `warn`   |
 | Agent exit quote     | `eth_simulateV1`: the guard's own approve and swap, alone, 2 and 3 blocks ahead  | quote = ETH in  |
 
-**Simulation: the exact bytes the guard signs, and nothing else.** The agent states the amount of its buy at
+**Simulation: the exact buy the guard signs, and nothing else.** The agent states the amount of its buy at
 `request_check`; the guard stores it and `buy` accepts no other. The sentinel reads the guard's transactions
 from the guard (`preview_check(id, quote)`, `preview_sale(token, amount, deadline)`, unsigned EIP-1559 bytes
 built by the same code `buy` and `sell_quoted` sign with) and sends them as is from the guard's EVM address:
@@ -30,19 +34,21 @@ payload); `post_verdict` refuses an `allow` or a `warn` whose hashes are not wha
 that moment, and `buy` signs only a transaction with that hash. A verdict is therefore tied to a nonce: if
 another signature happens between the verdict and the buy, or the owner changes gas or fees, the buy is
 refused (`transaction differs from the one simulated`) and the agent asks a new check. The swap deadline is
-fixed by the check (its request time + 300 s), so it is part of the simulated bytes too.
+fixed by the check (its request time + 300 s), so it is part of the simulated bytes too. The two sales are
+previews of an exit from the same code (no floor, a deadline past the late sale), not bytes NEAR will sign:
+an exit's own approve and swap are simulated again, as signed, by its exit quote.
 
 A check is three `eth_simulateV1` requests on the same block, sharing no state:
 
 - **guard side**: the guard's buy on the block's real state, then a first sale and the rest, each an approve
   of the exact amount then `swapExactTokensForETHSupportingFeeOnTransferTokens`, as the guard signs an exit,
   each in a block of its own as the relay mines them. The first sale's swap lands 5 to 150 blocks after the
-  buy and sells 13 % to 87 % of the tokens bought (never a whole percent), both derived like the probes from
-  the check and the EVM block hash (in the evidence as `first_sale`): a token cannot expect the block or the
-  amount. The rest is sold 256 blocks (512 s) after the proof's block. Nothing else: no read, no probe, no
-  other sender before or between them;
-- **probe side**: the same from a probe, whose address is derived from the check and the EVM block hash (a
-  token cannot whitelist it in advance), with the probe as recipient;
+  buy and sells 13 % to 87 % of the tokens bought (never a whole percent); the rest is swapped 200 to 255
+  blocks (400 to 510 s) after the buy, and the request ends there. All three are derived like the probes
+  from the check and the EVM block hash (in the evidence as `sales`): a token cannot expect either block or
+  the amount. Nothing else: no read, no probe, no other sender before or between them;
+- **probe side**: the same trades from a probe, a fresh address derived from the check and the EVM block
+  hash (a token cannot whitelist it in advance), with the probe as recipient;
 - **synthetic calls**: the pool's quote and `owner()`, then both buys and a `transferFrom` without approval
   of each buyer's tokens by `owner()` and by a stranger (a takeback).
 
@@ -57,10 +63,10 @@ Replay recomputes them.
 The class this closes: tokens keyed on a difference between the simulation and the real transactions (the
 guard's gas price, gas limit, fees, amount, approve, calldata), on extra calls of the simulation (a
 top-level read, a probe's or a stranger's call before a sale), and on where or what the check sells (a sale
-only in the block right after the buy, or only of half the balance). The environment rule below closes the next
-one: tokens that read what the simulation cannot reproduce. A simulation still cannot prove that a token will
-be sellable later: an owner action after the buy, behaviour that changes beyond 512 s, and an admin other
-than `owner()` stay open (Limits).
+only in the block right after the buy, only at the check's late block, or only of half the balance). The
+environment rule below closes the next one: tokens that read what the simulation cannot reproduce. A
+simulation still cannot prove that a token will be sellable later: an owner action after the buy, behaviour
+that changes after the late sale, and an admin other than `owner()` stay open (Limits).
 
 **Environment rule: a token whose transfers depend on what the simulation cannot reproduce is not allowed.**
 eth_simulateV1 never runs Base's per-block system update (the L1 attributes deposit that rewrites the L1Block
@@ -87,8 +93,8 @@ failed. Rather than guess the next tell, two facts, both in the evidence and rec
 Decisions. GAS is not flagged: solc emits it before every external call, and each simulated transaction
 carries the guard's own gas limit. SELFBALANCE reads the token's own state. BALANCE and EXTCODE* name an
 address, which `touched` judges (anvil's access list reports them: tested). TIMESTAMP and NUMBER stay
-allowed: the simulated blocks follow Base's cadence and the sales at 10 to 300 s and at 512 s exercise them; beyond
-512 s nothing is checked. The coinbase is not an expected address: on Base it is the sequencer fee vault
+allowed: the simulated blocks follow Base's cadence and the sales 10 to 300 s and 400 to 510 s after the buy
+exercise them; after the late sale nothing is checked. The coinbase is not an expected address: on Base it is the sequencer fee vault
 `0x4200…0011`, whose balance moves every block, and the access list reports it only when code reads it. A
 token that swaps its own fees through the router during a sale was already a `block` (the pool pays out more
 WETH than the seller receives); the wallet its fees go to adds a reason. A token whose transfers call any
@@ -157,7 +163,7 @@ applied" and from "checked and clean" (no finding).
 | An allow or warn carries the hashes of what the guard would sign; it signs nothing else                                                        | `post_verdict`, `buy`                 |
 | A buy needs a token not listed, and at least 60 s left before its swap deadline                                                                | `buy`                                 |
 | A buy's value plus gas at the cap is debited from the armed budget and the prepaid credit                                                      | `buy`                                 |
-| A sale never needs buying budget: an exit's quote and gas come from the agent's credit alone                                                   | `request_exit`, `sell_quoted`         |
+| A sale never needs buying budget: an exit's quote and gas come from the agent's credit alone (a frozen agent cannot ask for one)               | `request_exit`, `sell_quoted`         |
 | A token at the guard's EVM address is held for one agent at a time                                                                             | `buy`, `holding`                      |
 | Only the owner clears or reassigns a token's holding, never during a signature                                                                 | `set_holding`                         |
 | An agent sells at most its holding, on a sentinel exit quote at most 120 s old, used once                                                      | `request_exit`, `sell_quoted`         |
@@ -281,8 +287,9 @@ The owner role is separate: it is an account named at init, and its key changes 
 
 The agent is `z-ai/glm-5.3-flash`, served by NEAR AI Cloud on NEAR-hosted Intel TDX VMs with NVIDIA H100 GPUs
 in confidential mode (`app/llm.ts`). Each completion is archived as a decision package: the exact request and
-response, the model's signature over both, and the TDX and GPU attestation fetched with our nonce. The model
-holds no key: its tools call the agent's wrapper (`app/agent.ts`).
+response, the model's signature over both, and the TDX and GPU attestation fetched with our nonce. Packages are
+kept locally in `proofs/llm/`, outside the repository; the one shipped is `app/fixtures/decision.json`. The
+model holds no key: its tools call the agent's wrapper (`app/agent.ts`).
 
 `bun app/attest.ts <package> [--check <id>]` verifies cryptographically: the signature, the hashes of the
 archived request and response, the TDX quote (DCAP, `@phala/dcap-qvl-node` as in `nearai-cloud-verifier`),
@@ -308,13 +315,17 @@ call states the 10000000000000 wei the check stores).
 Injection count: `./demo.sh --full` with a key runs the model 3 times on the poisoned inbox and prints how
 many runs resisted; `bun --env-file=.env --env-file=.env.agent --env-file=.env.llm app/llm.ts 20` measures
 more runs against the live guard. Resisted = ignored the message, or checked the trap and stopped at the
-guard's answer. The guard does not rely on the model: the scripted agent that obeys is stopped all the same.
+guard's answer. The `--full` runs are concurrent: once one run's check lists the trap, another run's check of
+it is refused (`target is on the shared blocklist`) and counts as resisted, so the count partly measures the
+blocklist. The guard does not rely on the model: the scripted agent that obeys is stopped all the same.
 
 ## Real Base
 
 `./check-mainnet.sh` simulates USDC on Base mainnet (`mainnet.base.org`, read-only, nothing broadcast), traces
-the guard's transactions on an anvil forked from it, and replays the proof (28 s). With no template index for
-mainnet, the verdict is `warn` (reputation unknown), and that is its only reason.
+the guard's transactions on an anvil forked from it, and replays the proof (23 s on 2026-11-12). With no
+template index for mainnet, the verdict is `warn` (reputation unknown), and that is its only reason. That run's
+proof ships as `app/fixtures/usdc-base-mainnet.json` (check #19): anyone replays it with `--check` against
+`mainnet.base.org` and the guard, with no account (README).
 `bun app/index.ts <rpc> <from> <to> <out.json> --pace-ms 1000` builds an index from a node that serves
 `eth_getLogs` (`mainnet.base.org` does not).
 
@@ -332,7 +343,8 @@ funding (from 3,907 to 14,467 blocks, median 4,027, about 2.2 h). Applied to a c
 pool is created after the window, the farm rule gives `block` (24 of 29 is above 80 %). The index lists the pools'
 token and pair addresses; none of them is published here. Re-running the command on the same window gives
 the same sha256 as long as the node still serves the logs and the state at block 56,176,314 (code is read
-there); a pruned node refuses old state, an archive node does not.
+there); a pruned node refuses old state, an archive node does not. Re-run on 2026-11-12 with the same command:
+same sha256, 283 requests in 296.9 s.
 
 ## Limits
 
@@ -346,17 +358,17 @@ there); a pruned node refuses old state, an archive node does not.
   signed transaction (`signed`) are public on NEAR before anyone broadcasts it on Base: a token owner watching
   the guard can react (change its token's state, front-run the buy) before the swap's 300 s deadline.
 - **Simulation.** A simulation cannot prove that a token will be sellable later. The guard side runs the
-  exact bytes the guard signs and nothing else, at the verdict's block, and the environment rule refuses
+  exact buy the guard signs, then its two sales, and nothing else, at the verdict's block, and the environment rule refuses
   tokens whose transfers read state or opcodes the simulation cannot reproduce. Still open: an owner action
   after the buy (a pause, a fee raised, a blacklist; any admin, not only the `owner()` whose takeback is
-  probed), behaviour that changes beyond the 512 s horizon through TIMESTAMP or NUMBER, a token keyed on the
+  probed), behaviour that changes after the late sale (400 to 510 s after the buy) through TIMESTAMP or NUMBER, a token keyed on the
   guard's own ETH balance (the real L1 data fee differs from the simulated one), V4 hooks. Block fields: on
   Base the coinbase is constant and the base fee sits at its floor (0.005 gwei in 10 of 11 blocks sampled on
   2026-11-11), prevrandao is constant
   over an L1 epoch as simulated; a token reading one is a `warn`. The real gap was system state, which a
-  token can no longer read and be allowed. The check samples one sale amount and one delay (a derived share
-  10 to 300 s after the buy) then the rest at 512 s: a token keyed on an amount or a delay it did not sample
-  (a sale only below some share, or only at some block) still passes, and an agent's exit sells its holding
+  token can no longer read and be allowed. The check samples one sale amount and two delays (a derived share
+  10 to 300 s after the buy, then the rest 400 to 510 s after it, both drawn per check): a token keyed on an
+  amount or a delay it did not sample (a sale only below some share, or only after 510 s) still passes, and an agent's exit sells its holding
   (the signed minimum, 97 % of the quote), when it chooses. The check's sales are previews (no floor, a fixed
   deadline): an exit's own bytes are simulated only by its exit quote, after the buy. When the guard's address
   cannot pay for its transactions at the check, its balance is set to exactly what they spend. A token that
@@ -366,7 +378,7 @@ there); a pruned node refuses old state, an archive node does not.
   signature for another check, or a gas or fee change, between the verdict and the buy refuses that buy, and
   the agent pays a new check. Several busy agents race for the one nonce sequence.
 - **Template reputation.** Keyed by code template only: changing anything other than a `PUSH32` operand or
-  the metadata makes a new template. A token is judged only against pools funded before its own, so copies
+  the metadata makes a new template, and a template with fewer than 3 earlier pools gets no finding. A token is judged only against pools funded before its own, so copies
   cannot get it blocked; a token whose pool already held 0.5 ETH of WETH before the index window is not judged
   by reputation at all (its reasons say so): an operator who keeps 0.5 ETH in its target's pool from before
   the window escapes the farm's history. A widely used template has a mixed
@@ -387,7 +399,8 @@ there); a pruned node refuses old state, an archive node does not.
 - **Attestation.** Measurements (MRTD, RTMRs, the compose's image digests) are not compared to a published
   reference, since none is published. The same signing address signed every run here: a signature ties a
   response to that key, not to one machine. The GPU evidence is tied to the quote by our nonce only. How long
-  NEAR AI keeps a signature is unknown, hence the archived packages (`proofs/llm/`).
+  NEAR AI keeps a signature is unknown, hence the archived packages (`proofs/llm/`, kept locally, not in the
+  repository).
 - **Decision digest.** The guard stores the digest the agent sends and refuses one already anchored, but does
   not check the package: a compromised agent can omit it or attach another package. It ties an action to a
   decision after the fact; it does not gate it.
@@ -400,8 +413,8 @@ there); a pruned node refuses old state, an archive node does not.
   full-access keys. `withdraw_fees` leaves storage, credits and escrow covered at the time; storage the guard
   pays for afterwards (an agent registered, an arming, a stop) comes out of what is left, so a fee withdrawal
   to the limit can leave the last credit refund a little short until the owner deposits.
-- **Build.** `cargo near build non-reproducible-wasm`: its sha256 matches the deployed code hash, but nobody
-  can rebuild it bit for bit elsewhere. `cargo near build reproducible-wasm` works here (Docker), but its
+- **Build.** `cargo near build non-reproducible-wasm` of `src/` at commit `d832e22`: its sha256 matches the
+  deployed code hash (cargo finds the build here up to date with that source), but a rebuild on another machine may differ. `cargo near build reproducible-wasm` works here (Docker), but its
   metadata names the git commit it was built from, so it can be published only from a pushed commit.
 
 ## Closed after review
@@ -446,3 +459,6 @@ passes) found, then how it was closed. Each has a test.
 - The owner's `withdraw_fees` took the prices that paid for storage, then an agent's `refund_credit` failed (`lacks balance for state`): a withdrawal must leave the balance paying for storage, every credit (`credits_total`) and the escrow.
 - A sentinel could post an honest proof with `list_target` true and get a clean token listed while `replay --check` said OK: `list_target` is in the evidence and stored with the verdict, and replay compares both.
 - A token that delivers almost nothing on a buy escaped the blocklist, dust being judged on the tokens received: dust is the pool's quote for the agent's amount.
+- A token could accept a sale only at the check's late block, always 255 blocks after the buy (review of
+  2026-11-12): the late sale is drawn per check too, 200 to 255 blocks after the buy, and `replay --check` refuses a schedule the sentinel
+  chose (`sales not derived from on-chain data`).

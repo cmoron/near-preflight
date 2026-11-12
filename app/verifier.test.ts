@@ -53,11 +53,11 @@ describe("sentinel verdict", () => {
     expect(r.reasons).toMatch(/sale refused \d+ blocks after the buy/);
     expect(r.list_target).toBe(true);
   });
-  test("sale closed 5 minutes after the buy: block on the sale 256 blocks (512 s) later", async () => {
+  test("sale closed 5 minutes after the buy: block on the late sale, 200 to 255 blocks after the buy", async () => {
     const r = await check(tokens.sell_blocked_later);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toContain("256 blocks (512 s) after the buy");
-    expect(r.reasons).not.toMatch(/sale refused \d+ blocks after the buy/);
+    expect(r.reasons).toContain(`sale refused ${r.evidence.sales.late} blocks after the buy`);
+    expect(r.reasons).not.toContain(`sale refused ${r.evidence.sales.first} blocks after the buy`);
     expect(r.list_target).toBe(true);
   });
   test("90 % tax on the sale: block", async () => {
@@ -69,7 +69,7 @@ describe("sentinel verdict", () => {
   test("90 % tax only on the late sale: block", async () => {
     const r = await check(tokens.sell_tax_later);
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toContain("256 blocks (512 s) after the buy");
+    expect(r.reasons).toContain(`tax on the sale ${r.evidence.sales.late} blocks after the buy`);
     expect(r.list_target).toBe(true);
   });
   test("a token that freezes only the guard's public EVM address: block, but not listed (it rests on the guard's own state)", async () => {
@@ -155,7 +155,7 @@ describe("nothing but the guard's own transactions before each one it signs", ()
     const r = await check(tokens.usdc);
     const [guardSide] = r.request.map((q) => (q.params[0] as { blockStateCalls: { calls: Record<string, string>[]; stateOverrides?: Record<string, unknown> }[] }).blockStateCalls);
     expect(guardSide.filter((b) => b.calls.length).map((b) => b.calls.length)).toEqual([1, 1, 1, 1, 1]); // buy; approve; swap; approve; swap
-    expect(guardSide.length).toBe(256); // the blocks between the two sales are there, empty
+    expect(guardSide.length).toBe(r.evidence.sales.late + 1); // the blocks between the two sales are there, empty; the late swap ends it
     const calls = guardSide.flatMap((b) => b.calls);
     expect(calls.every((c) => c.from.toLowerCase() === GUARD_EVM.toLowerCase() && c.nonce !== undefined)).toBe(true);
     expect(calls.map((c) => c.data.slice(0, 10))).toEqual(["0xb6f9de95", "0x095ea7b3", "0x791ac947", "0x095ea7b3", "0x791ac947"]);
@@ -215,10 +215,13 @@ describe("the check's sales are where and what a token cannot expect", () => {
     expect(r.reasons).toMatch(/^sale refused \d+ blocks after the buy/);
     expect(r.list_target).toBe(true);
   });
-  test("the first sale derives from the ticket and the block hash: 5 to 150 blocks after the buy, 13 % to 87 %, never a whole percent (pure)", () => {
+  test("the sales derive from the ticket and the block hash: the first 5 to 150 blocks after the buy, 13 % to 87 %, never a whole percent; the rest 200 to 255 blocks after the buy (pure)", () => {
     const sales = Array.from({ length: 3000 }, (_, id) => deriveProbes({ guard: "guard.test", id, requested_ns: "0" }, keccak256(toHex(id))).sale);
-    expect(Math.min(...sales.map((s) => s.blocks))).toBe(5);
-    expect(Math.max(...sales.map((s) => s.blocks))).toBe(150);
+    expect(Math.min(...sales.map((s) => s.first))).toBe(5);
+    expect(Math.max(...sales.map((s) => s.first))).toBe(150);
+    expect(Math.min(...sales.map((s) => s.late))).toBe(200);
+    expect(Math.max(...sales.map((s) => s.late))).toBe(255); // eth_simulateV1 refuses a block 256 past the proof's: the buy is in the 1st
+    expect(new Set(sales.map((s) => s.late)).size).toBe(56);
     expect(sales.every((s) => s.bps > 1300 && s.bps < 8700 && s.bps % 100 !== 0)).toBe(true);
     expect(new Set(sales.map((s) => s.bps)).size).toBeGreaterThan(1000);
     const ticket = { guard: "guard.test", id: 1, requested_ns: "0" };
@@ -229,7 +232,7 @@ describe("the check's sales are where and what a token cannot expect", () => {
     const [g] = r.request.map((q) => (q.params[0] as { blockStateCalls: { calls: { data: Hex }[] }[] }).blockStateCalls.flatMap((b) => b.calls));
     const amounts = [g[1], g[3]].map((c) => decodeAbiParameters([{ type: "address" }, { type: "uint256" }], `0x${c.data.slice(10)}`)[1]); // the two approves
     const bought = amounts[0] + amounts[1];
-    expect(amounts[0]).toBe((bought * BigInt(r.evidence.first_sale.bps)) / 10_000n);
+    expect(amounts[0]).toBe((bought * BigInt(r.evidence.sales.bps)) / 10_000n);
   });
 });
 
@@ -292,8 +295,8 @@ describe("dust is the pool's quote for the amount, not what the token delivers (
   const judged = async (quoted: bigint, got: bigint) => {
     const p = localPreviews({ guard: w.guard, target: token, amount: AMOUNT });
     const txs = { buy: (await p.check(0n))[0], sales: [await p.sale(1n, 0n), await p.sale(1n, 0n)] as [Hex[], Hex[]] };
-    const first_sale = { blocks: 5, bps: 5001 };
-    const full = got >= 10n ? { amounts: { guard: got, probe: got }, owner: null, sale: first_sale } : undefined; // under 10 units the check stops at the buy
+    const sales = { first: 5, bps: 5001, late: 230 };
+    const full = got >= 10n ? { amounts: { guard: got, probe: got }, owner: null, sale: sales } : undefined; // under 10 units the check stops at the buy
     const labels = labelsOf(plan(token, w, 100n, AMOUNT, txs, full));
     const results = labels.map((l): Result => {
       if (l === "buy quote") return okWith([], encodeAbiParameters([{ type: "uint256[]" }], [[AMOUNT, quoted]]));
@@ -302,7 +305,7 @@ describe("dust is the pool's quote for the amount, not what the token delivers (
       return l.includes("transferFrom") ? { status: "0x0", returnData: "0x" } : okWith();
     });
     const liquidity = { pair, supply: "1", supply_before: "1", created: null, candidates: 0, holders: null }; // old: no finding
-    return judge(labels, results, { block: 100, code_hash: `0x${"00".repeat(32)}`, implementation: null, liquidity, reputation: null, near: NO_NEAR, opcodes: [], touched: [], first_sale }, w);
+    return judge(labels, results, { block: 100, code_hash: `0x${"00".repeat(32)}`, implementation: null, liquidity, reputation: null, near: NO_NEAR, opcodes: [], touched: [], sales }, w);
   };
   test("a buy that delivers 500 units where the pool quotes 10^18: block, listed", async () => {
     const r = await judged(10n ** 18n, 500n);
@@ -526,11 +529,11 @@ describe("proof", () => {
       }
     }
     const guardSide = (r.request[0].params[0] as { blockStateCalls: { blockOverrides: Record<string, string>; calls: unknown[] }[] }).blockStateCalls;
-    const first = BigInt(r.evidence.first_sale.blocks);
-    // buy; the first sale's approve and its swap `first` blocks after the buy; the late approve and swap, 512 s after the proof's block
-    expect(guardSide.filter((b) => b.calls.length).map((b) => BigInt(b.blockOverrides.number) - block)).toEqual([1n, first, first + 1n, 255n, 256n]);
-    expect(guardSide.map((b) => BigInt(b.blockOverrides.number) - block)).toEqual(Array.from({ length: 256 }, (_, i) => BigInt(i + 1))); // no gap for the node to fill
-    expect(new Set(guardSide.map((b) => b.blockOverrides.prevRandao)).size).toBe(Number(epochOf(block + 256n)) + 1);
+    const [first, late] = [BigInt(r.evidence.sales.first), BigInt(r.evidence.sales.late)];
+    // buy; each sale's approve, then its swap `first` and `late` blocks after the buy; nothing after the late swap
+    expect(guardSide.filter((b) => b.calls.length).map((b) => BigInt(b.blockOverrides.number) - block)).toEqual([1n, first, first + 1n, late, late + 1n]);
+    expect(guardSide.map((b) => BigInt(b.blockOverrides.number) - block)).toEqual(Array.from({ length: Number(late) + 1 }, (_, i) => BigInt(i + 1))); // no gap for the node to fill
+    expect(new Set(guardSide.map((b) => b.blockOverrides.prevRandao)).size).toBe(Number(epochOf(block + late + 1n)) + 1);
   });
   test("carries a proxy's implementation (USDC)", async () => {
     const r = await check(tokens.usdc);
