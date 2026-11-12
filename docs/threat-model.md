@@ -116,7 +116,9 @@ The owner replaces a compromised key with `set_sentinel`; verdicts it already po
 | USDC on Base mainnet                        | 🟠 `warn`, only because no template index covers mainnet                                     | `./check-mainnet.sh`                       |
 
 A refused sale lists the token only if the late sale is refused too: a refusal that clears with time
-blocks that check alone, or any agent could repeat checks until one lists an honest token.
+blocks that check alone, or any agent could repeat checks until one lists an honest token. The price:
+a trap that sells only in the late sale's window (200 to 255 blocks after the buy) is blocked at every
+check, since the first sale always comes earlier, but never reaches the shared blocklist.
 
 ## What it does not stop
 
