@@ -169,4 +169,8 @@ The build ignores uncommitted changes. Two clones of one commit, in two director
 CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs on every push to `main`: `cargo fmt`,
 `clippy`, `cargo test`, `bunx tsc --noEmit`, then the fork and `bun test`.
 
+Coverage, measured once at commit `904c453` with `cargo llvm-cov --summary-only` (cargo-llvm-cov 0.9.1):
+98.1 % of `src/lib.rs`'s lines, its test module included; for the contract code above that module, 94.3 %
+of lines (1,300 of 1,378) and 89.4 % of regions.
+
 The public pages open on `docs/snapshot.json`, then read only what changed: regenerate it with `bun app/snapshot.ts docs/snapshot.json` after a demo run (`demo.sh` does it) or a redeploy, and commit it.
