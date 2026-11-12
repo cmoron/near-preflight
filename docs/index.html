@@ -87,8 +87,8 @@
         <p class="lede">
           The agent buys on the Base blockchain only through the guard, a NEAR
           contract. Before
-          NEAR signs, a sentinel simulates the buy and the resale, checks
-          whether the token's code has drained pools before, and stores a
+          NEAR signs, two sentinels simulate the buy and the resale, check
+          whether the token's code has drained pools before, and vote a
           verdict anyone can replay: <span class="vw allow">allow</span>,
           <span class="vw warn">warn</span> (the owner decides) or
           <span class="vw block">block</span>.
@@ -371,8 +371,8 @@
             <text class="name" x="32" y="320">AI agent</text>
             <text class="sub" x="32" y="344">no key for Base</text>
             <rect class="box" x="176" y="282" width="130" height="88" />
-            <text class="name" x="192" y="320">sentinel</text>
-            <text class="sub" x="192" y="344">off-chain</text>
+            <text class="name" x="192" y="320">sentinels</text>
+            <text class="sub" x="192" y="344">off-chain, two</text>
             <rect class="box" x="366" y="282" width="178" height="88" />
             <text class="name" x="382" y="320">Base blockchain</text>
             <text class="sub" x="382" y="344">a local fork here</text>

@@ -153,11 +153,12 @@ function renderLive(guard, last, checks, note) {
 // What each lamp's line says, from the check's own fields.
 function lines(c, choice, addr) {
   const k = c.check;
-  const reasons = k.reasons ? k.reasons.split(' ; ') : [];
+  // The guard stores at most 280 characters of reasons: a cut one ends with an ellipsis, not mid-word.
+  const reasons = k.reasons ? (k.reasons.length >= 280 ? k.reasons + '…' : k.reasons).split(' ; ') : [];
   const bytes = k.signed_tx ? atob(k.signed_tx).length : 0;
   const w1 = [el('code', { class: 'acct' }, k.agent), ' asked to buy ', el('strong', {}, eth(k.amount_wei)), ' of token ', mono(addr),
     ', and paid for the check.'];
-  const w2 = ['The sentinel simulated the buy NEAR would sign, then two sales of what it bought, and answered ',
+  const w2 = ['Each sentinel simulated the buy NEAR would sign, then two sales of what it bought. The verdict came ',
     secs(k.judged_ns) - secs(k.requested_ns) + ' s after the request. The buy quotes ' + units(k.quote) + ' token units.'];
   const votes = k.votes || [], same = votes.filter((v) => v.verdict === k.verdict).length;
   const tally = !votes.length ? '' : k.verdict === 'block' ? ' (blocked by ' + same + ' of ' + votes.length + (votes.length === 1 ? ' vote)' : ' votes)')

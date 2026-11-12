@@ -151,9 +151,12 @@ const signedOf = (k) => (kindOf(k) === 'sale' ? k.settled : !!k.signed_tx); // a
 const votesOf = (k) => k.votes || [];
 const tally = (k) => {
   const v = votesOf(k), same = v.filter((x) => x.verdict === k.verdict).length;
+  if (kindOf(k) === 'sale') return 'an exit quote takes one vote';
   return k.verdict === 'block' ? 'blocked by ' + same + ' of ' + v.length + (v.length === 1 ? ' vote' : ' votes') : same + ' of ' + v.length + (v.length === 1 ? ' sentinel' : ' sentinels');
 };
-const firstReason = (k) => (k.verdict ? (k.reasons ? k.reasons.split(' ; ')[0] : '-') : 'waiting for the sentinels' + (votesOf(k).length ? ' (' + votesOf(k).length + ' voted)' : ''));
+// The guard stores at most 280 characters of reasons: a cut one ends with an ellipsis, not mid-word.
+const reasonsOf = (k) => (k.reasons && k.reasons.length >= 280 ? k.reasons + '…' : k.reasons);
+const firstReason = (k) => (k.verdict ? (k.reasons ? reasonsOf(k).split(' ; ')[0] : '-') : 'waiting for the sentinels' + (votesOf(k).length ? ' (' + votesOf(k).length + ' voted)' : ''));
 
 async function mapBatches(items, fn) {
   const out = [];
@@ -178,8 +181,8 @@ function checkItem({ id, check: k }, open) {
     ['Asked', sale ? 'a sale of ' + k.exit_amount + ' token units (exit quote)' : 'a buy of ' + eth(k.amount_wei)],
     ['Requested', when(k.requested_ns)],
     ['Judged', k.verdict ? when(k.judged_ns) + ' (' + (secs(k.judged_ns) - secs(k.requested_ns)) + ' s later)' : 'not yet'],
-    ['Votes', votesOf(k).length ? el('span', { class: 'stack' }, ...(k.verdict ? [tally(k) + ':'] : []), ...votesOf(k).map((v) => el('span', {}, v.verdict + ' by ' + v.sentinel + ', evidence ', mono(v.evidence_sha256, v.evidence_sha256)))) : 'none yet'],
-    ['Reasons', k.reasons || '-'],
+    ['Votes', votesOf(k).length ? el('span', { class: 'stack' }, ...(k.verdict ? [tally(k) + ':'] : []), ...votesOf(k).map((v) => el('span', { class: 'vote' }, badge(v.verdict), ' ', acct(v.sentinel), el('small', {}, ' evidence ', mono(v.evidence_sha256))))) : 'none yet'],
+    ['Reasons', reasonsOf(k) || '-'],
     ['Quote', sale ? eth(k.quote) + ' for the sale' : k.quote + ' token units for the buy'],
     k.verdict === 'warn' && ['Owner approval', k.approved ? 'approved' : 'not approved'],
     k.verdict === 'block' && ['Asked to list the token', k.list_target ? 'yes' : 'no'],
@@ -287,12 +290,17 @@ async function renderState(checks) {
 }
 
 async function renderBounds() {
-  const [b, e] = await Promise.all([view('bounds'), view('evm_config')]);
+  // A guard deployed before the quorum has neither view: its two lines say so, the rest still shows.
+  const opt = (m) => view(m).catch((err) => { console.warn(m + ' not read:', err); return null; });
+  const span = (s) => (s % 3600 ? s / 60 + ' min' : s / 3600 + ' h');
+  const [b, e, s, t] = await Promise.all([view('bounds'), view('evm_config'), opt('sentinels'), opt('token_limits')]);
   facts($('bounds'), [
     ['Max budget per arming', near(b.max_budget)],
     ['Max arming duration', b.max_duration_s + ' s'],
     ['Max armed over 7 days', near(b.max_7d)],
     ['Max per buy', eth(b.max_buy_wei)],
+    ['Sentinels', s ? el('span', { class: 'stack' }, ...s.sentinels.map(acct), s.quorum + ' matching votes for an allow or a warn; one block vote blocks') : 'not read on this guard'],
+    ['Per token, all agents', t ? 'a block closes the token for ' + span(t.quarantine_s) + '; at most ' + eth(t.cap_wei) + ' bought per ' + span(t.cap_period_s) : 'not read on this guard'],
     ['EVM address NEAR signs for', mono(e.address, e.address)],
     ['Withdrawal address (owner)', mono(e.withdraw_to, e.withdraw_to)],
     ['Floor under the quote', (e.max_slippage_bps / 100) + ' % (' + e.max_slippage_bps + ' bps)'],

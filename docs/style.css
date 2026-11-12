@@ -61,6 +61,7 @@ main>section,details.more{margin-top:2.75rem;padding-top:1.25rem;border-top:1px 
 .facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:.4rem 1.5rem;margin:0;padding:1rem 1.25rem;background:var(--raised)}
 .facts dt{color:var(--dim)} .facts dd{margin:0;overflow-wrap:anywhere;min-width:0}
 .stack{display:flex;flex-direction:column;gap:.15rem}
+.vote small{color:var(--dim);font-size:.82rem;margin-left:.35rem}
 .blob{display:block;max-height:6.5rem;overflow:auto;margin-top:.2rem;padding:.4rem .55rem;background:var(--ground);word-break:break-all;font-size:.78rem}
 
 /* A check: its four lamps in the verdict's colour, then the word. Asked, simulated and stored light with the verdict;
