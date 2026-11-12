@@ -214,8 +214,40 @@ describe("replay: the evidence string is the one posted on chain", () => {
   test("a tampered proxy implementation in evidence is detected (USDC)", async () => {
     const proof = withEvidence(await proofOf(tokens.usdc as Address), (e) => (e.implementation = DEPLOYER.toLowerCase()));
     const bad = failed(await replay(proof, RPC));
-    expect(bad.length).toBe(1);
-    expect(bad[0]).toContain("implementation");
+    expect(bad.some((l) => l.includes("proxy implementation"))).toBe(true);
+    // and the real implementation the trace touched is no longer expected: the rejudged verdict differs
+    expect(bad.some((l) => l.includes("verdict/reasons differ"))).toBe(true);
+  });
+});
+
+// The environment rule: what the guard's transactions touch and the opcodes in the code are facts of
+// the evidence, recomputed by replay; a proof that leaves one out cannot pass.
+describe("replay of the environment facts", () => {
+  test("RedL1Trap's block replays identically: the guard's transactions traced again touch L1Block", async () => {
+    const proof = await proofOf(tokens.red_l1_trap as Address);
+    expect(proof.verdict).toBe("block");
+    const lines = await replay(proof, RPC);
+    expect(failed(lines)).toEqual([]);
+    expect(lines.some((l) => l.ok && l.line.includes("traced again on a local fork"))).toBe(true);
+  });
+  test("evidence that omits L1Block from the addresses touched, verdict rejudged allow: detected", async () => {
+    const forged = withEvidence(await proofOf(tokens.red_l1_trap as Address), (e) => {
+      e.touched = e.touched.filter((a: string) => a.startsWith("0x4752") || a === e.liquidity.pair || a === tokens.red_l1_trap.toLowerCase() || a.startsWith("0x4200000000000000000000000000000000000006"));
+    });
+    const lines = await replay({ ...forged, verdict: "allow", reasons: "buy, takeback probes and sales simulated without anomaly" }, RPC);
+    expect(failed(lines).length).toBe(1);
+    expect(failed(lines)[0]).toContain("addresses touched: evidence");
+  });
+  test("evidence that omits BASEFEE from the opcodes, verdict rejudged allow: detected", async () => {
+    const forged = withEvidence(await proofOf(tokens.basefee_trap as Address), (e) => (e.opcodes = []));
+    expect(forged.verdict).toBe("warn");
+    const lines = await replay({ ...forged, verdict: "allow", reasons: "buy, takeback probes and sales simulated without anomaly" }, RPC);
+    expect(failed(lines).length).toBe(1);
+    expect(failed(lines)[0]).toContain("opcodes in the code: BASEFEE, evidence says none");
+  });
+  test("an opcode name that is not one of the rule's: refused before anything is sent", async () => {
+    const forged = withEvidence(await proofOf(tokens.basefee_trap as Address), (e) => (e.opcodes = ["SSTORE"]));
+    expect(failed(await replay(forged, RPC))).toEqual(["MISMATCH evidence fields have unexpected types (nothing sent to the node)"]);
   });
 });
 

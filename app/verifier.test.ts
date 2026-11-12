@@ -155,6 +155,42 @@ describe("nothing but the guard's own transactions before each one it signs", ()
   });
 });
 
+// Red team, after the fifth judge run: RedL1Trap sells only while the L1Block predeploy is unchanged since
+// the buy. Base rewrites it every block, eth_simulateV1 never does: every simulated sale passes, every
+// real one fails. The rule closes the class: what the guard's transactions touch, and opcodes.
+describe("a token whose transfers read what the simulation cannot reproduce", () => {
+  const helperOf = async (token: string) => `0x${(await rpc<Hex>(RPC, "eth_call", [{ to: token, data: "0x63b0e66a" }, "latest"])).slice(-40)}`; // helper()
+  test("RedL1Trap, every simulated sale passes: block, naming L1Block, not listed", async () => {
+    const r = await check(tokens.red_l1_trap);
+    expect(r.evidence.calls.filter((c) => c.includes("sale")).every((c) => c.endsWith(": ok"))).toBe(true);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toMatch(/^reads 0x4200\.\.0015, .* during a transfer/); // and L1Block's implementation, behind its proxy
+    expect(r.evidence.touched).toContain("0x4200000000000000000000000000000000000015");
+    expect(r.list_target).toBe(false);
+  });
+  test("its sibling reaching L1Block through a delegatecall to a helper: block, naming both", async () => {
+    const r = await check(tokens.helper_trap);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toContain("0x4200..0015");
+    expect(r.evidence.touched).toContain((await helperOf(tokens.helper_trap)).toLowerCase());
+  });
+  test("its sibling keyed on the base fee, which the simulation keeps constant: warn naming BASEFEE, never allow", async () => {
+    const r = await check(tokens.basefee_trap);
+    expect(r.evidence.calls.filter((c) => c.includes("sale")).every((c) => c.endsWith(": ok"))).toBe(true);
+    expect(r.verdict).toBe("warn");
+    expect(r.reasons).toContain("code reads BASEFEE");
+    expect(r.evidence.opcodes).toEqual(["BASEFEE"]);
+  });
+  test("USDC touches its proxy, its implementation, its pool, the router and WETH only: allow", async () => {
+    const r = await check(tokens.usdc);
+    expect(r.verdict).toBe("allow");
+    expect(r.evidence.opcodes).toEqual([]);
+    const expected = [tokens.usdc, r.evidence.implementation!, r.evidence.liquidity!.pair, ROUTER, WETH, GUARD_EVM].map((a) => a.toLowerCase());
+    expect(r.evidence.touched!.every((a) => expected.includes(a))).toBe(true);
+    expect(r.evidence.touched).toContain(r.evidence.implementation!);
+  });
+});
+
 describe("a sale's tax is what the seller receives", () => {
   test("a token that swaps 90 % of each sale into the pool itself and sends that WETH to its owner: block", async () => {
     const r = await check(tokens.pair_pull_tax);
@@ -341,7 +377,7 @@ describe("proof", () => {
     const { result: code } = (await res.json()) as { result: `0x${string}` };
     expect(r.evidence.code_hash).toBe(keccak256(code));
   });
-  test("simulated blocks follow Base's cadence: 2 s per block, the real base fee and coinbase, a prevrandao per block", async () => {
+  test("simulated blocks follow Base's cadence: 2 s per block, the real base fee and coinbase, one prevrandao per L1 epoch of 6 blocks", async () => {
     const r = await check(tokens.safe);
     const res = await fetch(RPC, {
       method: "POST",
@@ -350,13 +386,16 @@ describe("proof", () => {
     });
     const { result: h } = (await res.json()) as { result: { baseFeePerGas: string; mixHash: Hex; miner: string; timestamp: string } };
     const block = BigInt(r.evidence.block);
+    const seq = BigInt(await rpc<Hex>(RPC, "eth_call", [{ to: "0x4200000000000000000000000000000000000015", data: "0x64ca23ef" }, toHex(block)])); // L1Block.sequenceNumber()
+    const epochOf = (n: bigint) => (seq + n - block) / 6n;
     for (const q of r.request) {
       const blocks = (q.params[0] as { blockStateCalls: { blockOverrides: Record<string, string>; calls: Record<string, string>[] }[] }).blockStateCalls;
       for (const b of blocks) {
         const n = BigInt(b.blockOverrides.number);
         expect(BigInt(b.blockOverrides.time) - BigInt(h.timestamp)).toBe(2n * (n - block)); // number and time agree
         expect(b.blockOverrides).toMatchObject({ baseFeePerGas: h.baseFeePerGas, feeRecipient: h.miner });
-        expect(b.blockOverrides.prevRandao).toBe(keccak256(concat([h.mixHash, toHex(n, { size: 32 })])));
+        // as on Base, the L1 origin's for the rest of the proof block's epoch, then one per later epoch
+        expect(b.blockOverrides.prevRandao).toBe(epochOf(n) === 0n ? h.mixHash : keccak256(concat([h.mixHash, toHex(epochOf(n), { size: 32 })])));
         for (const c of b.calls) {
           expect(BigInt(c.maxPriorityFeePerGas)).toBeGreaterThan(0n);
           expect(BigInt(c.maxFeePerGas)).toBeGreaterThan(BigInt(h.baseFeePerGas));
@@ -367,7 +406,7 @@ describe("proof", () => {
     const guardSide = (r.request[0].params[0] as { blockStateCalls: { blockOverrides: Record<string, string>; calls: unknown[] }[] }).blockStateCalls;
     expect(guardSide.filter((b) => b.calls.length).map((b) => BigInt(b.blockOverrides.number) - block)).toEqual([1n, 2n, 256n]); // buy, next block, 512 s later
     expect(guardSide.map((b) => BigInt(b.blockOverrides.number) - block)).toEqual(Array.from({ length: 256 }, (_, i) => BigInt(i + 1))); // no gap for the node to fill
-    expect(new Set(guardSide.map((b) => b.blockOverrides.prevRandao)).size).toBe(256);
+    expect(new Set(guardSide.map((b) => b.blockOverrides.prevRandao)).size).toBe(Number(epochOf(block + 256n)) + 1);
   });
   test("carries a proxy's implementation (USDC)", async () => {
     const r = await check(tokens.usdc);

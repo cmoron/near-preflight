@@ -1,6 +1,6 @@
 'use strict';
 // Guard account to read. Override with ?guard=<account id>.
-const DEFAULT_GUARD = 'guard.goblin-guard-63518.testnet';
+const DEFAULT_GUARD = 'guard.goblin-guard-54109.testnet';
 const RPCS = ['https://test.rpc.fastnear.com', 'https://rpc.testnet.near.org'];
 const LAST_N = 20, REFRESH_MS = 15000, BATCH = 5, PAGE = 50;
 

@@ -13,7 +13,7 @@
 // Usage: bun [--env-file=.env] app/attest.ts <package.json> [--check <id>]   (--check reads GUARD)
 import { js_get_collateral, js_verify } from "@phala/dcap-qvl-node";
 import { recoverMessageAddress, sha256, type Hex } from "viem";
-import { BINDING, digest, type Package } from "./llm";
+import { BINDING, digest, MODEL, type Package } from "./llm";
 import type { Check } from "./near";
 
 export type Line = { ok: boolean; skipped?: boolean; line: string };
@@ -51,8 +51,10 @@ export async function attest(p: Package, deps: Deps = live): Promise<Line[]> {
       return {};
     }
   })();
-  const modelOk = p.signature.text.split(":").length === 3 && model === p.model && req.model === p.model && req.stream === false;
-  out.push(line(modelOk, modelOk ? `signed by the model itself for ${model}, the canonical name requested, non-streaming` : `signed text names ${model}, request asks ${req.model} (stream ${req.stream}): not a model signature of this request`));
+  // Pinned: the agent's model, not merely the one the package says it is.
+  const named = [model, p.model, req.model, ...(p.attestation.model_name === undefined ? [] : [p.attestation.model_name])];
+  const modelOk = p.signature.text.split(":").length === 3 && named.every((m) => m === MODEL) && req.stream === false;
+  out.push(line(modelOk, modelOk ? `signed by the model itself for ${MODEL}, the agent's model, its canonical name requested, non-streaming` : `signed text names ${model}, request asks ${req.model}, attestation names ${p.attestation.model_name} (stream ${req.stream}): not a signature of ${MODEL} for this request`));
   out.push(line(hashOf(p.request) === reqHash, `request hash ${reqHash?.slice(0, 12)}... ${hashOf(p.request) === reqHash ? "matches" : "differs from"} sha256 of the archived request`));
   out.push(line(hashOf(p.response) === resHash, `response hash ${resHash?.slice(0, 12)}... ${hashOf(p.response) === resHash ? "matches" : "differs from"} sha256 of the archived response`));
   // 3. TDX quote, then what it binds
@@ -98,7 +100,7 @@ export async function attest(p: Package, deps: Deps = live): Promise<Line[]> {
 /** The package's sha256 against check #id read on the guard: stored as the decision of request_check
  *  or of buy, anchored by the guard on that check alone (`anchored`: decision_of, the check the guard
  *  says this digest backs; it refuses a digest twice), and the signed response asked for that very
- *  action. */
+ *  action: buy of that check, or request_check of its target for the amount stored with it. */
 export function onChain(p: Package, sha: string, id: number, check: Check | null, anchored: string | null): Line[] {
   if (!check) return [line(false, `check #${id} not found on the guard`)];
   const kind = check.decision_sha256 === sha ? "request_check" : check.buy_decision_sha256 === sha ? "buy" : null;
@@ -108,8 +110,11 @@ export function onChain(p: Package, sha: string, id: number, check: Check | null
   out.push(line(alone, alone ? `the guard anchors this decision on check #${id} alone (it refuses a digest already anchored)` : `the guard anchors this decision on ${anchored ? `check #${anchored}` : "no check"}, not #${id}`));
   const calls = (JSON.parse(p.response).choices?.[0]?.message?.tool_calls ?? []) as { function: { name: string; arguments: string } }[];
   const asked = calls.map((c) => ({ name: c.function.name, args: JSON.parse(c.function.arguments || "{}") }));
-  const match = asked.find((c) => c.name === kind && (kind === "buy" ? Number(c.args.check_id) === id : String(c.args.token).toLowerCase() === check.target.toLowerCase()));
-  out.push(line(!!match, match ? `the signed response asked for ${kind}(${kind === "buy" ? `#${id}` : check.target}), the action on chain` : `the signed response asked for ${asked.map((c) => `${c.name}(${JSON.stringify(c.args)})`).join(", ") || "nothing"}, not ${kind} of check #${id} (${check.target})`));
+  const match = asked.find((c) =>
+    c.name === kind && (kind === "buy" ? Number(c.args.check_id) === id : String(c.args.token).toLowerCase() === check.target.toLowerCase() && String(c.args.amount_wei) === check.amount_wei),
+  );
+  const action = kind === "buy" ? `#${id}` : `${check.target}, ${check.amount_wei} wei`;
+  out.push(line(!!match, match ? `the signed response asked for ${kind}(${action}), the action on chain` : `the signed response asked for ${asked.map((c) => `${c.name}(${JSON.stringify(c.args)})`).join(", ") || "nothing"}, not ${kind}(${action}) of check #${id}`));
   return out;
 }
 

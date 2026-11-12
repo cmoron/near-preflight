@@ -36,7 +36,7 @@ WETH=$(cast call $ROUTER 'WETH()(address)' -r $RPC)
 deploy() { # name symbol trap [special address] -> token address, with 5 ETH of liquidity against 500,000 tokens
   local token pair
   token=$(forge create --rpc-url $RPC --unlocked --from $DEPLOYER --broadcast --json \
-    src/DemoToken.sol:DemoToken --constructor-args "$1" "$2" "$3" "${4:-0x0000000000000000000000000000000000000000}" | jq -r .deployedTo)
+    "${CONTRACT:-src/DemoToken.sol:DemoToken}" --constructor-args "$1" "$2" "$3" "${4:-0x0000000000000000000000000000000000000000}" | jq -r .deployedTo)
   cast send -r $RPC --unlocked --from $DEPLOYER "$token" 'approve(address,uint256)' $ROUTER 500000ether >/dev/null
   cast send -r $RPC --unlocked --from $DEPLOYER --value 5ether $ROUTER \
     'addLiquidityETH(address,uint256,uint256,uint256,address,uint256)' \
@@ -53,7 +53,8 @@ LATER=$(deploy "Demo Sale Closed Later" CLOSEDLATER 3)
 TAX=$(deploy "Demo Tax 90" TAX90 4)
 TAX_LATER=$(deploy "Demo Tax 90 Later" TAX90LATER 5)
 HOLD=$(deploy "Demo Hold One Block" HOLDONE 6)
-SIM=$(deploy "Demo Simulation Detector" SIMDETECT 7)
+# Its own contract (src/SimToken.sol), same arguments and address: the other demo tokens' code reads no fee field.
+SIM=$(CONTRACT=src/SimToken.sol:SimToken deploy "Demo Simulation Detector" SIMDETECT 7)
 # Deployed after the others: the earlier addresses do not change.
 FROZEN=$(deploy "Demo Frozen Guard" FROZEN 8 "$GUARD_EVM")
 TAX20=$(deploy "Demo Tax 20" TAX20 9)
@@ -179,17 +180,27 @@ UNTOUCHED=$(side src/SideTrap.sol:SideTrap --constructor-args "Side Untouched Bu
 STRANGER_KEY=$(side src/SideTrap.sol:SideTrap --constructor-args "Side Stranger Key" STRANGERKEY 1)
 PAIR_PULL=$(side src/SideTrap.sol:SideTrap --constructor-args "Side Pair Pull Tax" PAIRPULL 2)
 
+# Deployed last, every address above stays: the red team's RedL1Trap (a sale only while the L1Block
+# predeploy is unchanged since the buy, which Base rewrites every block and a simulation never does) and
+# two siblings (src/EnvTraps.sol): one keyed on the base fee, one reaching L1Block through a delegatecall
+# to a helper whose address sits in storage.
+RED_L1=$(side src/RedL1Trap.sol:RedL1Trap --constructor-args "Red L1 Trap" REDL1)
+BASEFEE_TRAP=$(side src/EnvTraps.sol:BaseFeeTrap --constructor-args "Env Base Fee" BASEFEE)
+L1_HELPER=$(forge create --rpc-url $RPC --unlocked --from $DEPLOYER --broadcast --json src/EnvTraps.sol:L1Helper | jq -r .deployedTo)
+HELPER_TRAP=$(side src/EnvTraps.sol:HelperTrap --constructor-args "Env Helper L1" HELPERL1 "$L1_HELPER")
+
 jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked "$BLOCKED" \
   --arg later "$LATER" --arg tax "$TAX" --arg taxlater "$TAX_LATER" --arg hold "$HOLD" --arg sim "$SIM" \
   --arg frozen "$FROZEN" --arg tax20 "$TAX20" --arg late "$LATE" --arg lpburned "$LP_BURNED" --arg lpheld "$LP_HELD" --arg fresh "$FARM_FRESH" --arg gashungry "$GAS_HUNGRY" \
   --arg approvemax "$APPROVE_MAX_ONLY" --arg buy001 "$BUY_001_ONLY" --argjson copies "$(printf '%s\n' "${COPIES[@]}" | jq -R . | jq -s .)" --argjson block "$FORK_BLOCK" \
   --arg judgetrap "$JUDGE_TRAP" --arg untouched "$UNTOUCHED" --arg strangerkey "$STRANGER_KEY" --arg pairpull "$PAIR_PULL" \
+  --arg redl1 "$RED_L1" --arg basefee "$BASEFEE_TRAP" --arg helper "$HELPER_TRAP" \
   '{fork_block: $block, usdc: $usdc, safe: $safe, owner_reclaim: $reclaim, sell_blocked: $blocked,
     sell_blocked_later: $later, sell_tax: $tax, sell_tax_later: $taxlater, hold_one_block: $hold, sim_detector: $sim,
     guard_frozen: $frozen, sell_tax_20: $tax20, late_liquidity: $late, lp_burned: $lpburned, lp_held: $lpheld,
     farm_fresh: $fresh, gas_hungry: $gashungry, approve_max_only: $approvemax, buy_001_only: $buy001,
     usdc_copies: $copies, judge_trap: $judgetrap, untouched_buyer: $untouched, stranger_key: $strangerkey,
-    pair_pull_tax: $pairpull}' > tokens.json
+    pair_pull_tax: $pairpull, red_l1_trap: $redl1, basefee_trap: $basefee, helper_trap: $helper}' > tokens.json
 echo "guard_frozen freezes $GUARD_EVM"
 echo "Base fork at block $FORK_BLOCK ready on $RPC; tokens in evm/tokens.json:"
 cat tokens.json

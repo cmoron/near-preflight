@@ -4,7 +4,7 @@
 // fetches them live).
 import { describe, expect, test } from "bun:test";
 import { attest, bound, onChain, summary, type Deps, type Line } from "./attest";
-import { BINDING, bindingLine, digest, SYSTEM, type Package } from "./llm";
+import { BINDING, bindingLine, digest, MODEL, SYSTEM, type Package } from "./llm";
 import type { Check } from "./near";
 
 const RAW = await Bun.file(`${import.meta.dir}/fixtures/decision.json`).text();
@@ -72,6 +72,13 @@ describe("tampered copies fail", () => {
     const lines = await attest(pkg(), { ...offline, nras: async () => bad });
     expect(failed(lines).join("\n")).toContain("GPU");
   });
+  test("a package that names another model throughout: the agent's model is pinned", async () => {
+    const out = await tamper((p) => {
+      p.model = "other/model";
+      p.request = p.request.replace(`"model":"${MODEL}"`, '"model":"other/model"');
+    });
+    expect(out).toContain(`not a signature of ${MODEL}`);
+  });
   test("a network failure is a failure, not a pass", async () => {
     const lines = await attest(pkg(), { ...offline, collateral: async () => Promise.reject(new Error("PCS unreachable")) });
     expect(failed(lines).join("\n")).toContain("PCS unreachable");
@@ -82,9 +89,13 @@ describe("the package against the check on NEAR (--check)", () => {
   const sha = digest(RAW);
   const call = JSON.parse(JSON.parse(RAW).response).choices[0].message.tool_calls?.[0];
   const args = JSON.parse(call?.function.arguments ?? "{}");
-  const check = (over: Partial<Check>): Check => ({ target: args.token ?? "0x0", decision_sha256: null, buy_decision_sha256: null, ...over }) as Check;
-  test("the recorded package is a decision that calls a guard tool", () => {
-    expect(["request_check", "buy"]).toContain(call?.function.name);
+  const check = (over: Partial<Check>): Check => ({ target: args.token ?? "0x0", amount_wei: args.amount_wei ?? "0", decision_sha256: null, buy_decision_sha256: null, ...over }) as Check;
+  test("the recorded package is a decision that asks a check, stating the amount in its signed tool call", () => {
+    expect(call?.function.name).toBe("request_check");
+    expect(args.amount_wei).toMatch(/^[1-9]\d*$/);
+  });
+  test("a check of another amount than the signed tool call stated: MISMATCH (the wrapper does not choose it)", () => {
+    expect(failed(onChain(pkg(), sha, 7, check({ decision_sha256: sha, amount_wei: "1" }), "7"))).toEqual([expect.stringContaining("not request_check")]);
   });
   test("its sha256 stored with the check, for the action the signed response asked for: OK", () => {
     const field = call.function.name === "buy" ? "buy_decision_sha256" : "decision_sha256";

@@ -99,7 +99,7 @@ export async function buy(id: number, wei: bigint, verdict = "", decision?: stri
   const { value: signed, tx, burnt } = await call<string | null>(agent, "buy", args, 0n, BUY_GAS);
   const secs = ((Date.now() - started) / 1000).toFixed(1);
   if (!signed) {
-    log(`#${id} : ${verdict}, but the MPC returned no signature in ${secs} s: credit and budget restored  ${tx}`);
+    log(`#${id} : ${verdict}, but the MPC returned no signature in ${secs} s: its nonce, credit and budget stay reserved until the owner settles it (app/human.ts replace, clear)  ${tx}`);
     return null;
   }
   log(`#${id} : ${verdict ? `${verdict}, ` : ""}buy of ${formatEther(wei)} ETH signed by NEAR in ${secs} s (${burnt}): ${signed.slice(0, 18)}...  ${tx}`);

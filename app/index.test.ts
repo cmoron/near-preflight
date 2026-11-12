@@ -51,7 +51,7 @@ describe("index rebuilt from chain logs", async () => {
   });
   test("the demo tokens (LP burned or held, never removed) are not drained", async () => {
     const demo = index.templates[templateOf(await codeOf(tokens.safe))];
-    expect(demo.length).toBe(16); // 14 demo tokens and the two Trap2 variants
+    expect(demo.length).toBe(15); // 13 demo tokens and the two Trap2 variants (the simulation detector has its own code)
     expect(demo.every((p) => p.drained === null)).toBe(true);
   });
   test("deterministic: rebuilt from the same chain state, same sha256", async () => {

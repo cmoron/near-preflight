@@ -2,6 +2,7 @@
 // The file carries the exact `evidence` string posted on chain; all of its content is rechecked.
 // Usage: bun app/replay.ts <proof.json> [rpc] [--check]
 import { decodeFunctionData, encodeFunctionData, keccak256, parseAbi, parseTransaction, serializeTransaction, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
+import { ENV_OPCODES, touched } from "./environment";
 import { beforeBlock, buildIndex, indexSha256, ownFunding, reputationOf, templateOf, type Reputation } from "./index";
 import {
   balances,
@@ -12,6 +13,7 @@ import {
   exitPlan,
   FACTORY,
   GUARD,
+  headAt,
   implementationAt,
   judge,
   judgeExit,
@@ -20,6 +22,7 @@ import {
   liquidityFacts,
   NEXT_S,
   ok as succeeded,
+  opcodesOf,
   plan,
   quoteOf,
   ROUTER,
@@ -54,6 +57,8 @@ type Evidence = {
   template: string;
   reputation: Reputation | null;
   near: NearFacts;
+  opcodes: string[];
+  touched: string[] | null;
 };
 type ExitEvidence = { kind: "exit"; chain_id: number; block: number; method: string; request_sha256: string; amount: string; calls: string[]; quote: string; tx_hashes: string[] };
 /** `skipped`: check not verifiable on this node, reported as such (neither passed nor failed). */
@@ -83,7 +88,7 @@ const blocksOf = (q: Request) => (q.params[0] as { blockStateCalls: BlockStateCa
 /** What replay compares of a call's result: status, return data and logs (emitter, topics, data). */
 const outcome = (r: Result) => JSON.stringify([r.status, r.returnData, (r.logs ?? []).map((l) => [l.address.toLowerCase(), l.topics, l.data])]);
 
-const EVIDENCE_KEYS = "amount_wei,block,calls,chain_id,code_hash,implementation,liquidity,method,near,quote,reputation,request_sha256,template,tx_hashes";
+const EVIDENCE_KEYS = "amount_wei,block,calls,chain_id,code_hash,implementation,liquidity,method,near,opcodes,quote,reputation,request_sha256,template,touched,tx_hashes";
 const EXIT_KEYS = "amount,block,calls,chain_id,kind,method,quote,request_sha256,tx_hashes";
 const REPUTATION_KEYS = "before_block,drained,from,index_sha256,median_drain_blocks,pools,template,to";
 /** Tolerated gap between the EVM block time and those of the NEAR request and verdict: clocks of
@@ -140,7 +145,10 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
         (e.reputation.before_block === null || Number.isSafeInteger(e.reputation.before_block)))) &&
     isObj(e.near) &&
     Array.isArray(e.near.listed) &&
-    (e.near.previous === null || isObj(e.near.previous));
+    (e.near.previous === null || isObj(e.near.previous)) &&
+    Array.isArray(e.opcodes) &&
+    e.opcodes.every((o) => Object.values(ENV_OPCODES).includes(o as string)) &&
+    (e.touched === null || (Array.isArray(e.touched) && e.touched.every((a) => typeof a === "string" && /^0x[0-9a-f]{40}$/.test(a))));
   return typed ? (e as unknown as Evidence) : "evidence fields have unexpected types";
 }
 
@@ -269,7 +277,7 @@ async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][]): P
     const guard = buyCall.from;
     const txs: GuardTxs = { buy: unsignedOf(buyCall, e.chain_id) };
     const fees: Fees = { gas: BigInt(buyCall.gas), maxFeePerGas: BigInt(buyCall.maxFeePerGas), maxPriorityFeePerGas: BigInt(buyCall.maxPriorityFeePerGas) };
-    const head = await blockOf(url, toHex(e.block));
+    const head = await headAt(url, toHex(e.block));
     const buyOnly = plan(token, { guard, buyer, stranger: NOBODY }, block, amount, txs);
     // The 1st simulation's calls open each request: their fresh results give the amounts and owner().
     const first = SIDES.flatMap((k, i) => fresh[i].slice(0, buyOnly[k].flatMap((b) => b.calls).length));
@@ -434,6 +442,15 @@ export async function replay(
       const j = judge(r.labels, now, { ...e, code_hash: e.code_hash as Hex, implementation: e.implementation as Address | null }, parties);
       const ok = j.verdict === proof.verdict && j.reasons === proof.reasons;
       add(ok, ok ? `verdict ${j.verdict} rejudged identically (same reasons)` : `verdict/reasons differ: file "${proof.verdict}: ${proof.reasons}" vs rejudged "${j.verdict}: ${j.reasons}"`);
+      // the addresses the guard's transactions touch, traced again on a local fork of this node (the
+      // requests are the ones checkToken builds, checked above)
+      try {
+        const t = e.liquidity ? await touched(url, proof.request[0], e.block) : null;
+        const same = JSON.stringify(t) === JSON.stringify(e.touched);
+        add(same, same ? `addresses the guard's transactions touch, traced again on a local fork at block ${e.block}: ${t ? t.length : "none, no pool"}, identical to evidence.touched` : `addresses touched: evidence ${JSON.stringify(e.touched)}, traced ${JSON.stringify(t)}`);
+      } catch (err) {
+        fail("tracing the guard's transactions on a local fork", err);
+      }
       const q = quoteOf(r.labels, now, parties).toString();
       add(q === e.quote, q === e.quote ? `quote ${q} tokens for ${e.amount_wei} wei recomputed identically` : `quote in evidence ${e.quote} != recomputed ${q}`);
       const h = keccak256(r.buy);
@@ -477,6 +494,9 @@ export async function replay(
     const impl = await implementationAt(url, proof.target as Address, BigInt(e.block));
     const same = impl?.toLowerCase() === e.implementation?.toLowerCase();
     add(same, same ? `proxy implementation (${impl ?? "none"}) matches evidence` : `proxy implementation ${impl ?? "none"} != evidence ${e.implementation ?? "none"}`);
+    const ops = await opcodesOf(url, code, impl, BigInt(e.block));
+    const sameOps = JSON.stringify(ops) === JSON.stringify(e.opcodes);
+    add(sameOps, sameOps ? `opcodes no simulation can match, in the target's and its implementation's code: ${ops.join(", ") || "none"}, as in evidence` : `opcodes in the code: ${ops.join(", ") || "none"}, evidence says ${e.opcodes.join(", ") || "none"}`);
   } catch (err) {
     fail("reading target code", err);
   }
@@ -580,7 +600,7 @@ async function replayExit(proof: Proof, e: ExitEvidence, url: string, opts: Opts
     add(id === e.chain_id, id === e.chain_id ? `chain id ${id} matches evidence` : `node chain id ${id} != evidence chain id ${e.chain_id}`);
     const calls = blocksOf(proof.request[0])[0].calls;
     seller = calls[0]?.from ?? null;
-    const head = await blockOf(url, toHex(e.block));
+    const head = await headAt(url, toHex(e.block));
     const token = proof.target as Address;
     const pair = `0x${(await rpc<Hex>(url, "eth_call", [{ to: FACTORY, data: encodeFunctionData({ abi: parseAbi(["function getPair(address,address) view returns (address)"]), args: [token, WETH] }) }, toHex(e.block)])).slice(-40)}` as Address;
     // the approve and swap the guard would sign (positions of exitPlan), from the request; shape checked, hashes against the evidence

@@ -17,6 +17,7 @@ import {
   type Address,
   type Hex,
 } from "viem";
+import { environmentFindings, envOpcodes, touched } from "./environment";
 import { beforeBlock, ownFunding, reputationFindings, reputationOf, templateOf, type Index, type Reputation } from "./index";
 
 export const ROUTER: Address = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"; // Uniswap V2 Router02 (Base)
@@ -130,6 +131,12 @@ export type Report = {
     reputation: Reputation | null;
     /** What the guard on NEAR said before the verdict: blocklist entries, code at the last verdict. */
     near: NearFacts;
+    /** Opcodes whose value no simulation can match, in the reachable code of the target and of its
+     *  implementation (app/environment.ts envOpcodes), sorted. */
+    opcodes: string[];
+    /** Every address the guard side's transactions touch, taken on a local fork that replays them at
+     *  their simulated blocks (app/environment.ts touched), lowercase, sorted; null without a pool. */
+    touched: string[] | null;
   };
   /** Full requests and responses, to replay the simulation at the same block: the guard side, the
    *  probe side and the synthetic calls (quote, owner(), takebacks), three requests sharing no state. */
@@ -184,14 +191,30 @@ export async function rpc<T>(url: string, method: string, params: unknown[]): Pr
 /** A simulated block: its number fixes its time (2 s per block after the proof's block) and its prevrandao. */
 export type Block = { number: bigint; calls: Call[] };
 /** Real block on top of which we simulate: its base fee and coinbase are reused, its prevrandao seeds
- *  each simulated block's; the node would otherwise set them to zero in the simulated blocks. */
-export type Header = { number: Hex; hash: Hex; timestamp: Hex; baseFeePerGas: Hex; mixHash: Hex; miner: Address };
+ *  each simulated block's; the node would otherwise set them to zero in the simulated blocks. `l1Seq`:
+ *  L1Block's sequenceNumber at that block, its position in its L1 epoch (headAt). */
+export type Header = { number: Hex; hash: Hex; timestamp: Hex; baseFeePerGas: Hex; mixHash: Hex; miner: Address; l1Seq: bigint };
+/** Base's L1Block predeploy, which the L1 attributes deposit rewrites at the start of every real block. */
+export const L1_BLOCK: Address = "0x4200000000000000000000000000000000000015";
+/** L2 blocks per L1 block on Base (12 s / 2 s): an L1 epoch, over which prevrandao is the L1 origin's. */
+export const EPOCH_BLOCKS = 6n;
+
+/** Block `tag` with its position in its L1 epoch (L1Block.sequenceNumber() there; 0 without L1Block). */
+export async function headAt(url: string, tag: string): Promise<Header> {
+  const h = await rpc<Omit<Header, "l1Seq">>(url, "eth_getBlockByNumber", [tag, false]);
+  const seq = await rpc<Hex>(url, "eth_call", [{ to: L1_BLOCK, data: "0x64ca23ef" }, h.number]); // sequenceNumber()
+  return { ...h, l1Seq: seq === "0x" ? 0n : BigInt(seq) };
+}
 
 /** Block `n`'s time at Base's cadence: the proof's block time plus 2 s per block after it. */
 export const timeOf = (head: Header, n: bigint) => BigInt(head.timestamp) + NEXT_S * (n - BigInt(head.number));
-/** A prevrandao per simulated block, derived from the proof's block so that replay recomputes it:
- *  keccak256(its prevrandao, n). A reused one would mark every simulated block as the same. */
-export const prevRandaoOf = (head: Header, n: bigint) => keccak256(concat([head.mixHash, toHex(n, { size: 32 })]));
+/** Block `n`'s prevrandao as Base sets it: the L1 origin's, one per epoch of EPOCH_BLOCKS blocks. The
+ *  proof block's for the rest of its epoch, then keccak256(it, epoch index) per later epoch, so that
+ *  replay recomputes it. One per block would itself tell a simulation from the chain. */
+export const prevRandaoOf = (head: Header, n: bigint) => {
+  const epoch = (head.l1Seq + n - BigInt(head.number)) / EPOCH_BLOCKS;
+  return epoch === 0n ? head.mixHash : keccak256(concat([head.mixHash, toHex(epoch, { size: 32 })]));
+};
 
 /** Full eth_simulateV1 request, as sent and saved in the proof. Every call gets `fees`, the guard's own;
  *  value and nonce are hex when present. traceTransfers reports each ETH transfer as a log: what a
@@ -468,19 +491,23 @@ export function nearFindings(n: NearFacts, codeHash: Hex, implementation: Addres
 /** Simulates buying `token` as two buyers, the probe and `guard` (the guard's EVM address); `probes`
  *  gets the block simulated on (the sentinel passes deriveProbes of its ticket). */
 export async function checkToken(url: string, token: Address, guard: Address, probes: (head: Header) => Probe, ctx: Context): Promise<Report> {
-  const head = await rpc<Header>(url, "eth_getBlockByNumber", ["latest", false]);
+  const head = await headAt(url, "latest");
   const who = { guard, ...probes(head) };
   const block = BigInt(head.number);
   const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
   const code = await rpc<Hex>(url, "eth_getCode", [token, toHex(block)]);
   const implementation = await implementationAt(url, token, block);
+  const opcodes = await opcodesOf(url, code, implementation, block);
   const liquidity = await liquidityFacts(url, token, block);
   const template = templateOf(code);
   const own = liquidity?.pair ?? null;
   const reputation = ctx.index?.chain_id === chainId ? reputationOf(ctx.index, template, beforeBlock(ctx.index, own, await ownFunding(url, ctx.index, own))) : null;
   const near = await ctx.near(token);
   const amount = ctx.amount;
-  const proof = { chain_id: chainId, block, code_hash: keccak256(code), implementation, liquidity, template, reputation, near, amount_wei: amount.toString() };
+  const proof = { chain_id: chainId, block, code_hash: keccak256(code), implementation, liquidity, template, reputation, near, amount_wei: amount.toString(), opcodes };
+  // The guard side as simulated, replayed on a local fork for the addresses it touches; without a pool
+  // the check stops at the buy with a warn, and nothing is traced.
+  const traced = async (request: Request[]) => (liquidity ? await touched(url, request[0], Number(block)) : null);
 
   // 1st simulation: the buys alone, the guard's with no minimum (quote 0), for the amounts bought; the
   // quote and owner() apart.
@@ -488,7 +515,7 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const first1 = plan(token, who, block, amount, { buy: buy0 });
   const first = await simulate(url, head, first1, sameFees([buy0]), guard, null);
   const st = buyStages(byLabel(labelsOf(first1), first.response.flat()), { token, ...who });
-  if (st.stop || !liquidity) return report(proof, first, labelsOf(first1), [keccak256(buy0)], { token, ...who });
+  if (st.stop || !liquidity) return report({ ...proof, touched: await traced(first.request) }, first, labelsOf(first1), [keccak256(buy0)], { token, ...who });
 
   // 2nd simulation: the guard's buy as it would be signed on this quote (minimum = quote - slippage),
   // then its two sales as it would sign them; their twins and the synthetic calls apart.
@@ -499,7 +526,13 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const fees = sameFees([buy, ...sales.flat()]);
   const sides = plan(token, who, block, amount, { buy, sales }, { amounts: st.amounts, owner: st.owner });
   const sim = await simulate(url, head, sides, fees, guard, st.owner);
-  return report(proof, sim, labelsOf(sides), [keccak256(buy)], { token, ...who });
+  return report({ ...proof, touched: await traced(sim.request) }, sim, labelsOf(sides), [keccak256(buy)], { token, ...who });
+}
+
+/** envOpcodes of the target's code and of its implementation's, at the block. */
+export async function opcodesOf(url: string, code: Hex, implementation: Address | null, block: bigint): Promise<string[]> {
+  const impl = implementation ? envOpcodes(await rpc<Hex>(url, "eth_getCode", [implementation, toHex(block)])) : [];
+  return [...new Set([...envOpcodes(code), ...impl])].sort();
 }
 
 /** The token and the addresses its judgment reads logs for. */
@@ -597,7 +630,7 @@ export function judge(labels: string[], results: Result[], facts: Facts, w: Part
   const list_target = findings.some((f) => f.level === "block");
   const seen = new Set(findings.map((f) => f.text));
   for (const f of sideFindings(r, GUARD, w, pair, stop)) if (!seen.has(f.text)) findings.push({ ...f, text: `guard address only, not listed: ${f.text}` });
-  findings.push(...liquidityFindings(facts.liquidity, facts.block));
+  findings.push(...liquidityFindings(facts.liquidity, facts.block), ...environmentFindings(facts, w));
   findings.unshift(...nearFindings(facts.near, facts.code_hash, facts.implementation), ...reputationFindings(facts.reputation));
   const rank = { block: 0, warn: 1, allow: 2 }; // an "allow" finding is a note: it changes no verdict
   findings.sort((a, b) => rank[a.level] - rank[b.level]); // stable: blocks first, so the 280-byte cut keeps them
@@ -618,7 +651,7 @@ export function quoteOf(labels: string[], results: Result[], w: Parties): bigint
 export const byLabel = (labels: string[], results: Result[]) => Object.fromEntries(labels.map((l, i) => [l, results[i]]));
 
 /** Facts beside the simulation that the verdict rests on, all in the evidence. */
-export type Facts = Pick<Report["evidence"], "block" | "code_hash" | "implementation" | "liquidity" | "reputation" | "near">;
+export type Facts = Pick<Report["evidence"], "block" | "code_hash" | "implementation" | "liquidity" | "reputation" | "near" | "opcodes" | "touched">;
 
 function report(
   proof: Omit<Facts, "block"> & { chain_id: number; block: bigint; template: Hex; amount_wei: string },
@@ -644,6 +677,8 @@ function report(
     template: proof.template,
     reputation: proof.reputation,
     near: proof.near,
+    opcodes: proof.opcodes,
+    touched: proof.touched,
   };
   if (JSON.stringify(evidence).length > 8000) throw new Error("evidence above 8000 characters");
   return { verdict, reasons, list_target, evidence, request: sim.request, response: sim.response };
@@ -680,7 +715,7 @@ export function judgeExit(labels: string[], results: Result[], w: { token: Addre
 /** `preview`: preview_check of the exit quote, the approve and swap the guard would sign with a quote.
  *  Simulated twice: with no floor for the quote, then exactly as signed on that quote. */
 export async function checkExit(url: string, token: Address, guard: Address, amount: bigint, preview: (quote: bigint) => Promise<Hex[]>): Promise<ExitReport> {
-  const head = await rpc<Header>(url, "eth_getBlockByNumber", ["latest", false]);
+  const head = await headAt(url, "latest");
   const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
   const pair = (await read(url, FACTORY, "getPair", [token, WETH], BigInt(head.number))) as Address;
   const run = async (txs: Hex[]) => {

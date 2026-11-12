@@ -63,14 +63,7 @@ export type Reputation = {
  *  the same source; the metadata hash differs with any change of comments or file names. Other
  *  operands stay: a minimal proxy (EIP-1167) keeps its implementation address (PUSH20). */
 export function templateOf(code: Hex): Hex {
-  const b = hexToBytes(code);
-  let end = b.length;
-  if (end >= 2) {
-    const meta = (b[end - 2] << 8) | b[end - 1];
-    const head = b[end - 2 - meta];
-    if (meta + 2 <= end && head >= 0xa1 && head <= 0xa5) end -= meta + 2; // CBOR map header
-  }
-  const out = b.slice(0, end);
+  const out = withoutMetadata(code);
   for (let i = 0; i < out.length; i++) {
     const op = out[i];
     if (op < 0x60 || op > 0x7f) continue;
@@ -78,6 +71,18 @@ export function templateOf(code: Hex): Hex {
     i += op - 0x5f;
   }
   return keccak256(out);
+}
+
+/** The runtime code's bytes without solc's CBOR metadata tail (data, never executed). */
+export function withoutMetadata(code: Hex): Uint8Array {
+  const b = hexToBytes(code);
+  let end = b.length;
+  if (end >= 2) {
+    const meta = (b[end - 2] << 8) | b[end - 1];
+    const head = b[end - 2 - meta];
+    if (meta + 2 <= end && head >= 0xa1 && head <= 0xa5) end -= meta + 2; // CBOR map header
+  }
+  return b.slice(0, end);
 }
 
 type Log = { address: Address; topics: Hex[]; data: Hex; blockNumber: Hex };

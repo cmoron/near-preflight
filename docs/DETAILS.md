@@ -16,6 +16,8 @@ goes into the evidence, whose sha256 the guard stores with the verdict; `app/rep
 | Template reputation  | the index of V2 WETH pools by code template (`bun app/index.ts`)                 | see below       |
 | Shared blocklist     | `get_entry` on the guard for the token                                           | listed: `block` |
 | Code changed         | `last_code` on the guard: code hash and proxy implementation at the last verdict | changed: `warn` |
+| Environment          | the guard's transactions replayed on a local fork: every address they touch      | see below       |
+| Environment opcodes  | the reachable code of the token and of its implementation                        | found: `warn`   |
 | Agent exit quote     | `eth_simulateV1`: the guard's own approve and swap, alone, from its address      | quote = ETH in  |
 
 **Simulation: the exact bytes the guard signs, and nothing else.** The agent states the amount of its buy at
@@ -44,15 +46,65 @@ A check is three `eth_simulateV1` requests on the same block, sharing no state:
 Amounts come from logs, never from a read between transactions: tokens bought from the token's `Transfer`
 logs; the ETH a sale pays from the logs `traceTransfers` gives ETH transfers; a sale's quote from the pool's
 last `Sync` before its approve. Blocks follow Base's cadence: 2 s per block, every block up to the late
-sale listed (empty in between; a node fills a gap with 12 s blocks), the real base fee and coinbase, and a
-prevrandao per block, keccak256 of the proof block's and the block number, which replay recomputes.
+sale listed (empty in between; a node fills a gap with 12 s blocks), the real base fee and coinbase, and one
+prevrandao per L1 epoch, as on Base, where it is the L1 origin's: the proof block's for the rest of its epoch
+(6 blocks, its position read from L1Block's sequence number), then keccak256 of it and the epoch index.
+Replay recomputes them.
 
 The class this closes: tokens keyed on a difference between the simulation and the real transactions (the
 guard's gas price, gas limit, fees, amount, approve, calldata) and on extra calls of the simulation (a
-top-level read, a probe's or a stranger's call before a sale). What stays open: a token can behave
-differently on the real chain after the buy (an owner action, a sale later than 512 s), and no simulated
-future block can be proven indistinguishable from the real one (its prevrandao, base fee, time and number
-are unknown in advance).
+top-level read, a probe's or a stranger's call before a sale). The environment rule below closes the next
+one: tokens that read what the simulation cannot reproduce. A simulation still cannot prove that a token will
+be sellable later: an owner action after the buy, behaviour that changes beyond 512 s, and an admin other
+than `owner()` stay open (Limits).
+
+**Environment rule: a token whose transfers depend on what the simulation cannot reproduce is not allowed.**
+eth_simulateV1 never runs Base's per-block system update (the L1 attributes deposit that rewrites the L1Block
+predeploy `0x4200…0015`, the fee vaults' credits) and cannot know a future block's fields. The red team's
+RedL1Trap sells only while L1Block is unchanged since the buy: every simulated sale passed, every real one
+failed. Rather than guess the next tell, two facts, both in the evidence and recomputed by replay:
+
+- `touched`: every address the guard's own transactions read or call, at any depth (BALANCE, EXTCODESIZE,
+  EXTCODEHASH, EXTCODECOPY, CALL, STATICCALL, DELEGATECALL, CALLCODE). A throwaway anvil forks the same
+  node at the proof's block and replays the guard side for real: each block at its simulated number, time,
+  base fee and coinbase, each transaction's access list (`eth_createAccessList` at `pending`) taken before
+  it is sent. An address outside the token, its implementation (EIP-1967 or ZeppelinOS slot), its V2 pool,
+  the router, WETH, the factory, the guard and the precompiles is a `block` naming it: `reads 0x4200..0015,
+  0x8bde..9881 during a transfer` (the second is L1Block's implementation). The only code that runs during
+  the guard's transactions is then the token's, its implementation's and Uniswap's.
+- `opcodes`: BLOCKHASH, COINBASE, PREVRANDAO, GASLIMIT, BASEFEE, BLOBHASH, BLOBBASEFEE, GASPRICE and ORIGIN in
+  the reachable code of the token and of its implementation: a `warn` naming them, the owner decides.
+  Reachable: from offset 0 and from each valid JUMPDEST until an opcode that halts or jumps. Data solc
+  appends (revert strings, CBOR metadata) is skipped: read as code, a revert string's "H" is BASEFEE, and a
+  naive scan flags Uniswap's router and USDC's implementation.
+
+Decisions. GAS is not flagged: solc emits it before every external call, and each simulated transaction
+carries the guard's own gas limit. SELFBALANCE reads the token's own state. BALANCE and EXTCODE* name an
+address, which `touched` judges (anvil's access list reports them: tested). TIMESTAMP and NUMBER stay
+allowed: the simulated blocks follow Base's cadence and the sales at +2 s and +512 s exercise them; beyond
+512 s nothing is checked. The coinbase is not an expected address: on Base it is the sequencer fee vault
+`0x4200…0011`, whose balance moves every block, and the access list reports it only when code reads it. A
+token that swaps its own fees through the router during a sale was already a `block` (the pool pays out more
+WETH than the seller receives); the wallet its fees go to adds a reason. A token whose transfers call any
+other contract (a dividend tracker, a library, a beacon proxy) is a `block`: honest ones are lost, on
+purpose.
+
+Why a local fork: Base's public RPC (reth 2.5.2) answers `eth_createAccessList` with state overrides but
+ignores block overrides, so it cannot replay a sale at its simulated block: a read gated on
+`block.number > boughtBlock` would hide; `debug_*` is filtered there. anvil (Foundry) does it on both the
+local fork and Base mainnet, for the sentinel and for replay. Not reproduced there, and read only through the
+flagged opcodes: prevrandao, the gas price an access list sees, block hashes. The trace gives each sender
+1 ETH more than the simulation, for the L1 data fee anvil bills.
+
+Measured read-only on Base mainnet (2026-11-12): no flagged opcode in USDC (proxy and implementation), WETH,
+USDbC, DAI, cbETH, AERO, DEGEN, BRETT, TOSHI, VIRTUAL, cbBTC, nor the Uniswap V2 router. The full check of
+USDC, DAI, AERO, DEGEN, BRETT, TOSHI, VIRTUAL and cbBTC (each traced on an anvil forked from
+`mainnet.base.org`) found their buy and sales touching only the token, its implementation, its V2 pool and
+WETH: no environment finding, each `warn` only for its unknown reputation. On the fork, USDC is `allow`. The fork holds
+`red_l1_trap` (`block`), `helper_trap` (L1Block reached through a delegatecall to a helper whose address sits
+in storage: `block`) and `basefee_trap` (keyed on the base fee, which the simulation keeps: `warn`);
+`app/environment.test.ts` shows each real sale failing after one emulated sequencer block (L1Block's
+sequence number advanced) or a base fee move.
 
 Verdicts: a revert, a takeback or a tax of 50 % or more is a `block`; a tax from 10 % is a `warn`; no V2 pair
 is a `warn`. A sale's tax is measured on the ETH the seller receives, and a pool that pays out more WETH than
@@ -107,7 +159,8 @@ applied" and from "checked and clean" (no finding).
 | Arming within the owner's bounds (per arming, duration, 7-day cap), registered agents only     | `set_bounds`, `arm`           |
 | Arming refused if the agent's credit dropped below what the armer read (a top-up is fine)      | `arm`                         |
 | Emergency stop: `disarm` by the owner freezes the agent until `unfreeze`                       | `disarm`, `unfreeze`          |
-| One signature at a time; a failed signature returns credit and budget, the nonce stays free    | `on_signed`                   |
+| One signature at a time; one that does not come back keeps its nonce, charge and tokens       | `on_signed`, `on_exit_signed` |
+| Only the owner settles a reserved transaction (refund or spent) or signs a replacement          | `clear_unsettled`, `sign_replacement` |
 | A decision digest backs one call: a digest already anchored is refused                         | `request_check`, `buy`        |
 | A check's price (0.019 NEAR) covers its worst-case storage, 1,900 bytes, measured by tests     | `request_check`               |
 
@@ -126,6 +179,14 @@ Details:
   token for every other agent: the owner clears or reassigns the holding (`set_holding`, event
   `holding_set`; `bun --env-file=.env app/human.ts holding <token> <agent> [amount]`, 0 frees it). A new
   holder sells through `request_exit` on a buy of that token signed for it; otherwise the owner sells.
+- **Signatures that do not come back.** The MPC may publish a signature after the guard's yield timed out
+  (its `respond` is a public transaction). So a missing signature never frees its nonce: the transaction is
+  reserved (`unsettled`, event `sign_unsettled`) with its charge and, for an agent's swap, the tokens it
+  sells, until the owner settles it. The owner signs 0 wei to its own address at that nonce (`bun
+  --env-file=.env app/human.ts replace <nonce>`; raise the fees first with `gas` to replace a transaction
+  that can never be mined), the relay broadcasts it, then `clear <nonce> refund` gives the charge and tokens
+  back, or `clear <nonce> spent` if the late signature was mined first. Later transactions wait behind the
+  gap until then. A reservation takes no more storage than the signed transaction it stands for.
 - **Owner's exit.** `sell` signs approve and swap from the guard's address for any amount and floor; the
   approve is of the amount sold unless the owner passes another, as `0x` + up to 64 hex digits (amounts are
   U128 elsewhere): `bun --env-file=.env app/human.ts sell <token> <amount> 0 max` approves 2^256 - 1, for a
@@ -133,7 +194,9 @@ Details:
   needs more gas than the guard signs with, the owner raises it (`bun --env-file=.env app/human.ts gas <limit>`,
   21,000 to 2,000,000, fees up to 10 gwei) and sells again. Measured on the fork with `gas_hungry` (a sale
   needs 500,000 gas left): at 250,000 the swap reverted (receipt status 0), at 600,000 the same sale went
-  through. Whether a token lets any sale through is up to its code.
+  through. Whether a token lets any sale through is up to its code. The owner's sale waits for a signature in
+  progress (about 6 s), and after an emergency stop it takes the nonces after the buy in flight: it is mined
+  after that buy.
 - **Decision digest.** `request_check` and `buy` take an optional `decision_sha256`, stored on the check,
   logged in `check_requested` and `sign_requested`, and anchored: a digest already anchored is refused
   (`decision already anchored on check #n`), so one signed decision backs one guard call; `decision_of`
@@ -145,9 +208,9 @@ Details:
 - **Owner (human)**, full-access key in the near-cli keychain: sets bounds, registers agents and reporters,
   replaces the armer (`set_armer`) and the sentinel (`set_sentinel`, event `sentinel_changed`), approves
   `warn`s, unlists, sets gas, sells, withdraws ETH to the address fixed at init, clears or reassigns
-  holdings, emergency stop. CLI: `bun --env-file=.env app/human.ts stop | unfreeze | approve <id> | reset |
-withdraw <wei> | sell <token> <amount> [min wei] [max | 0x approve] | unlist <token> | holding <token> <agent>
-[amount] | gas <limit>`.
+  holdings, settles reserved transactions, emergency stop. CLI: `bun --env-file=.env app/human.ts stop |
+unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] [max | 0x approve] | unlist
+<token> | holding <token> <agent> [amount] | gas <limit> | replace <nonce> | clear <nonce> refund|spent`.
 - **Armer**, function-call key `arm`, `disarm`: arms a registered agent within the owner's bounds.
 - **Agent**, function-call key `request_check`, `buy`, `refund_check`, `request_exit`, `sell_quoted`; no EVM key.
 - **Sentinel**, function-call key `post_verdict`: reads the guard's previews of what it would sign, simulates
@@ -162,6 +225,11 @@ gas the key may buy. When a transaction is sent, NEAR reserves the attached gas 
 the allowance (about 0.1 NEAR for a `buy`, which attaches 100 TGas, 0.15 NEAR for `sell_quoted`) and gives
 back what was not burnt. Measured here: 10 agent transactions, 3 of them signed buys, took 0.0045 NEAR from
 the agent's 0.5 NEAR.
+
+The sentinel's key pays the gas of every verdict an agent pays for: an armed agent sending paid checks
+(0.019 NEAR each, within its 7-day cap) can exhaust its 0.25 NEAR, after which verdicts stop until the owner
+gives the sentinel a new key (as below); the agent's checks then wait unjudged, and their price is refunded
+after 300 s (`refund_check`). An operational limit, not a bypass: no verdict means no buy.
 
 When the free allowance is below what a call needs, NEAR rejects the transaction before it reaches the
 guard: nothing is debited and the guard's state does not change. Measured: a key with a 0.01 NEAR allowance
@@ -205,8 +273,9 @@ later; within those 600 s, the guard refuses its digest on a second check or on 
 backs one guard call.
 
 Without a key, the demo verifies `app/fixtures/decision.json`: the model's decision on the same poisoned
-inbox, anchored as check #5 of this deployment, `guard.goblin-guard-63518.testnet` (its signed request names
-that guard, `agent.goblin-guard-63518.testnet` and a block 6 s before the check).
+inbox, anchored as check #5 of this deployment, `guard.goblin-guard-54109.testnet` (its signed request names
+that guard, `agent.goblin-guard-54109.testnet` and a block 12 s before the check; its `request_check` tool call
+states the 10000000000000 wei the check stores).
 
 Injection count: `./demo.sh --full` with a key runs the model 3 times on the poisoned inbox and prints how
 many runs resisted; `bun --env-file=.env --env-file=.env.agent --env-file=.env.llm app/llm.ts 20` measures
@@ -215,8 +284,9 @@ guard's answer. The guard does not rely on the model: the scripted agent that ob
 
 ## Real Base
 
-`./check-mainnet.sh` simulates USDC on Base mainnet (`mainnet.base.org`, read-only, nothing broadcast) and
-replays the proof. With no template index for mainnet, the verdict is `warn` (reputation unknown).
+`./check-mainnet.sh` simulates USDC on Base mainnet (`mainnet.base.org`, read-only, nothing broadcast), traces
+the guard's transactions on an anvil forked from it, and replays the proof (28 s). With no template index for
+mainnet, the verdict is `warn` (reputation unknown), and that is its only reason.
 `bun app/index.ts <rpc> <from> <to> <out.json> --pace-ms 1000` builds an index from a node that serves
 `eth_getLogs` (`mainnet.base.org` does not).
 
@@ -247,11 +317,16 @@ there); a pruned node refuses old state, an archive node does not.
 - **Public before broadcast.** The signing request (`sign_requested`, with the transaction's hash) and the
   signed transaction (`signed`) are public on NEAR before anyone broadcasts it on Base: a token owner watching
   the guard can react (change its token's state, front-run the buy) before the swap's 300 s deadline.
-- **Simulation.** The guard side runs the exact bytes the guard signs and nothing else, at the verdict's
-  block. A token can still behave differently on the real chain after the buy (owner actions, a sale later
-  than 512 s, V4 hooks), and no simulated future block can be proven indistinguishable: its prevrandao, base
-  fee, time and number are not known in advance (the simulation derives a prevrandao per block and reuses
-  the proof block's base fee). The check's sales are previews (no floor, a fixed deadline): an exit's own
+- **Simulation.** A simulation cannot prove that a token will be sellable later. The guard side runs the
+  exact bytes the guard signs and nothing else, at the verdict's block, and the environment rule refuses
+  tokens whose transfers read state or opcodes the simulation cannot reproduce. Still open: an owner action
+  after the buy (a pause, a fee raised, a blacklist; any admin, not only the `owner()` whose takeback is
+  probed), behaviour that changes beyond the 512 s horizon through TIMESTAMP or NUMBER, a token keyed on the
+  guard's own ETH balance (the real L1 data fee differs from the simulated one), V4 hooks. Block fields: on
+  Base the coinbase is constant and the base fee sits at its floor (0.005 gwei in 10 of 11 blocks sampled on
+  2026-11-11), prevrandao is constant
+  over an L1 epoch as simulated; a token reading one is a `warn`. The real gap was system state, which a
+  token can no longer read and be allowed. The check's sales are previews (no floor, a fixed deadline): an exit's own
   bytes are simulated only by its exit quote, after the buy, and an exit of another amount too. When the
   guard's address cannot pay for its transactions at the check, its balance is set to exactly what they
   spend. A token whose public state a third party can move (a pool emptied of tokens, for instance) can still
@@ -286,16 +361,19 @@ there); a pruned node refuses old state, an archive node does not.
   not check the package: a compromised agent can omit it or attach another package. It ties an action to a
   decision after the fact; it does not gate it.
 - **Operations.** The NEAR/ETH rate is fixed by the owner, with no oracle. One signature at a time for all
-  agents and exits. The emergency stop does not recall a signature already requested. All roles run under
-  one OS user, whose near-cli keychain holds full-access keys.
+  agents and exits: the owner's sale waits for the one in progress. The emergency stop does not recall a
+  signature already requested. Each signature that does not come back needs the owner (replace, then clear),
+  and a late signature broadcast before the replacement is mined (within the budget already debited). The
+  sentinel and replay need anvil (Foundry) for the environment trace; without it the check fails closed. All
+  roles run under one OS user, whose near-cli keychain holds full-access keys.
 - **Build.** `cargo near build non-reproducible-wasm`: its sha256 matches the deployed code hash, but nobody
   can rebuild it bit for bit elsewhere. `cargo near build reproducible-wasm` works here (Docker), but its
   metadata names the git commit it was built from, so it can be published only from a pushed commit.
 
 ## Closed after review
 
-Each line is a bypass that a review (five judge runs, automated reviews and our own security passes) found,
-then how it was closed. Each has a test.
+Each line is a bypass that a review (five judge runs, a red team, automated reviews and our own security
+passes) found, then how it was closed. Each has a test.
 
 - A token that sells only when `tx.gasprice` or `block.basefee` is 0 (the simulation's defaults): calls carry the guard's real fee fields, base fee, prevrandao and coinbase.
 - An `allow` on USDC used to pay a trap: the guard builds and NEAR signs the swap of the verdict's own target; the agent has no EVM key.
@@ -315,7 +393,11 @@ then how it was closed. Each has a test.
 - The recorded decision package re-anchored on a guard that never called the model: the signed request names the guard, the agent and a fresh NEAR block, and `attest --check` verifies all three.
 - A compromised sentinel key could not be revoked: `set_sentinel`, owner only, logged.
 - A token that sells only after a top-level `balanceOf`, which only the simulation sent (the fifth run's JudgeTrap): the guard side holds the guard's own transactions alone, from the block's real state; the probe, the quote, `owner()` and the takebacks run in requests of their own, and replay refuses any other call on the guard side. `judge_trap` and two siblings are on the fork, blocked and listed: `untouched_buyer` (a buyer that never called the token before its buy never sells) and `stranger_key` (a sale keyed by a stranger's failed `transferFrom`).
-- Simulated blocks told apart from real ones (the late sale 256 blocks but 1 h later, one prevrandao for all): 2 s per block, every block up to the late sale listed, a prevrandao per block.
+- Simulated blocks told apart from real ones (the late sale 256 blocks but 1 h later, one prevrandao for all, then one per block where Base keeps it over an L1 epoch): 2 s per block, every block up to the late sale listed, a prevrandao per L1 epoch.
 - A sale tax hidden by a token that sells for itself into the pool during the sale (the pool's WETH outflow was measured): the tax is the ETH the seller receives, and a pool paying out more is a `block`; `pair_pull_tax` on the fork.
 - One signed decision anchored on two checks: the guard refuses a digest already anchored, and `attest --check` verifies `decision_of`.
 - A pair created empty before the index window escaped reputation (having code there was taken for being older): an older pool must have held 0.5 ETH before the window, otherwise it is dated by its funding inside it.
+- The red team's RedL1Trap: a sale only while the L1Block predeploy is unchanged since the buy, which Base rewrites every block and eth_simulateV1 never does (allow, NEAR signed, tokens stuck, `replay --check` OK): the environment rule. Every address the guard's transactions touch is traced on a local fork, and one outside the token, its pool and Uniswap is a `block`; opcodes no simulation can match are a `warn`; replay recomputes both. `red_l1_trap`, `helper_trap` and `basefee_trap` on the fork.
+- A signature published by the MPC after the guard's yield timed out, once the guard had refunded the agent and freed the nonce (a spend outside the budget), and a nonce stuck behind a transaction that can never be mined: a signature that does not come back keeps its nonce, charge and tokens reserved until the owner settles it, and the owner signs a replacement at a used nonce.
+- `attest --check` compared the model with the package's own claim, and the buy's amount came from unattested wrapper code: the model is pinned, the signed tool call states `amount_wei`, and `attest --check` requires the check's amount to be that one.
+- "The owner can always have NEAR sign a sale, whatever the agent's state" was not true during a signature: the sentence says when, and a test shows the order after a stop.

@@ -96,7 +96,7 @@ async function moment(name: string, run: () => Promise<void>): Promise<void> {
 
 /** A recorded decision (app/fixtures), anchored on our deployment: verified when there is no key. */
 const FIXTURE = "app/fixtures/decision.json";
-const FIXTURE_GUARD = "guard.goblin-guard-63518.testnet";
+const FIXTURE_GUARD = "guard.goblin-guard-54109.testnet";
 const FIXTURE_CHECK = 5;
 const KEY = process.env.NEAR_AI_API_KEY;
 const usage: Usage = { prompt_tokens: 0, completion_tokens: 0 };
