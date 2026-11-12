@@ -18,7 +18,7 @@ import {
   type Hex,
 } from "viem";
 import { environmentFindings, envOpcodes, touched } from "./environment";
-import { beforeBlock, ownFunding, reputationFindings, reputationOf, templateOf, type Index, type Reputation } from "./index";
+import { beforeBlock, ownFunding, reputationFindings, reputationOf, templateOf, windowProblem, type Index, type Reputation } from "./index";
 
 export const ROUTER: Address = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"; // Uniswap V2 Router02 (Base)
 export const WETH: Address = "0x4200000000000000000000000000000000000006";
@@ -93,8 +93,9 @@ const pairAbi = parseAbi([
 ]);
 
 export type Verdict = "allow" | "warn" | "block";
-/** A simulated call. `nonce` only on the guard's own transactions, which carry the nonce they are signed at. */
-type Call = { label: string; from: Address; to: Address; data: Hex; value?: bigint; nonce?: number };
+/** A simulated call. `nonce` only on the guard's own transactions, which carry the nonce they are signed at;
+ *  `gas` only on a call that needs more than the guard's limit (others' createPair). */
+type Call = { label: string; from: Address; to: Address; data: Hex; value?: bigint; nonce?: number; gas?: bigint };
 /** Gas limit and fee fields of every simulated call: those of the guard's own transactions (evm_config). */
 export type Fees = { gas: bigint; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
 /** A log as eth_simulateV1 returns it (other fields ignored). */
@@ -147,7 +148,8 @@ export type Report = {
     list_target: boolean;
   };
   /** Full requests and responses, to replay the simulation at the same block: the guard side, the
-   *  probe side and the synthetic calls (quote, owner(), takebacks), three requests sharing no state. */
+   *  probe side, the synthetic calls (quote, owner(), takebacks) and the busy side, four requests sharing
+   *  no state. */
   request: Request[];
   response: Result[][];
 };
@@ -234,11 +236,12 @@ export function buildRequest(head: Header, balances: Record<string, bigint>, blo
     blockStateCalls: blocks.map((b, i) => ({
       blockOverrides: { number: toHex(b.number), time: toHex(timeOf(head, b.number)), prevRandao: prevRandaoOf(head, b.number), ...env },
       ...(i === 0 ? { stateOverrides: Object.fromEntries(Object.entries(balances).map(([a, v]) => [a, { balance: toHex(v) }])) } : {}),
-      calls: b.calls.map(({ label: _, value, nonce, ...c }) => ({
+      calls: b.calls.map(({ label: _, value, nonce, gas, ...c }) => ({
         ...c,
         ...(value ? { value: toHex(value) } : {}),
         ...(nonce === undefined ? {} : { nonce: toHex(nonce) }),
         ...f,
+        ...(gas ? { gas: toHex(gas) } : {}),
       })),
     })),
     validation: false,
@@ -253,7 +256,7 @@ export function buildRequest(head: Header, balances: Record<string, bigint>, blo
  *  fresh probe: FUND plus what it spends. */
 export async function balances(url: string, head: Header, blocks: Block[], fees: Fees, guard: Address, owner: Address | null) {
   const need = new Map<Address, bigint>();
-  for (const c of blocks.flatMap((b) => b.calls)) need.set(c.from, (need.get(c.from) ?? 0n) + (c.value ?? 0n) + fees.gas * fees.maxFeePerGas);
+  for (const c of blocks.flatMap((b) => b.calls)) need.set(c.from, (need.get(c.from) ?? 0n) + (c.value ?? 0n) + (c.gas ?? fees.gas) * fees.maxFeePerGas);
   const out: Record<string, bigint> = {};
   for (const [who, n] of need) {
     if (same(who, guard)) Object.assign(out, await topUp(url, head, who, n));
@@ -269,10 +272,10 @@ export async function topUp(url: string, head: Header, who: Address, need: bigin
   return BigInt(await rpc<Hex>(url, "eth_getBalance", [who, head.number])) < need ? { [who]: need } : {};
 }
 
-/** The three requests of a check, in this order; they share no state. */
-export type Sides = { guard: Block[]; probe: Block[]; synthetic: Block[] };
-export const SIDES = ["guard", "probe", "synthetic"] as const;
-/** Labels of every call, guard side first, then the probe side, then the synthetic calls. */
+/** The four requests of a check, in this order; they share no state. */
+export type Sides = { guard: Block[]; probe: Block[]; synthetic: Block[]; busy: Block[] };
+export const SIDES = ["guard", "probe", "synthetic", "busy"] as const;
+/** Labels of every call, guard side first, then the probe side, the synthetic calls, the busy side. */
 export const labelsOf = (s: Sides) => SIDES.flatMap((k) => s[k].flatMap((b) => b.calls.map((c) => c.label)));
 
 /** Simulates each side on top of `head` in its own request; `owner` is owner() once known. */
@@ -307,24 +310,49 @@ export const saleAmounts = (amount: bigint, bps: number): [bigint, bigint] => {
 };
 /** Suffixes of the two sales' labels. */
 export const SALES = [" first", " late"] as const;
-/** The addresses a check simulates: the guard's EVM address and the probes derived for it. */
-export type Who = { guard: Address; buyer: Address; stranger: Address };
+/** The addresses a check simulates: the guard's EVM address and the probes derived for it; `bystander`
+ *  is the other user whose activity the busy side runs. */
+export type Who = { guard: Address; buyer: Address; stranger: Address; bystander: Address };
 
-/** The three requests to simulate. Guard side: the guard's own transactions as is and nothing else,
+/** Label prefix of the busy side: the guard's own transactions again, each swap after others' activity. */
+export const BUSY = "busy: ";
+/** Gas of others' createPair (a Uniswap V2 pair is deployed: about 2.5 million), above the guard's limit. */
+const CREATE_PAIR_GAS = 3_000_000n;
+const others = parseAbi(["function withdraw(uint256)", "function createPair(address,address) returns (address)"]);
+/** What another user does before each of the guard's swaps on the busy side, none of it on the token or
+ *  its pool: wraps `d` wei and unwraps a third of it (WETH's supply and balances move), sends the guard a
+ *  seventh of it (its ETH balance moves), and creates a WETH pair with a fresh address (the factory's
+ *  state moves). `d`, 0.001 to 0.101 ETH, comes from the bystander's address, derived like the probes. */
+function othersBefore(bystander: Address, guard: Address, i: 0 | 1): Call[] {
+  const s = SALES[i];
+  const d = 10n ** 15n + (BigInt(bystander) % 10n ** 17n);
+  const fresh = `0x${keccak256(concat([bystander, toHex(i, { size: 1 })])).slice(-40)}` as Address;
+  return [
+    { label: `${BUSY}WETH deposit${s}`, from: bystander, to: WETH, data: "0xd0e30db0", value: d },
+    call(`${BUSY}WETH withdraw${s}`, bystander, WETH, others, "withdraw", [d / 3n]),
+    { label: `${BUSY}ETH to the guard${s}`, from: bystander, to: guard, data: "0x", value: d / 7n },
+    { ...call(`${BUSY}createPair${s}`, bystander, FACTORY, others, "createPair", [WETH, fresh]), gas: CREATE_PAIR_GAS },
+  ];
+}
+
+/** The four requests to simulate. Guard side: the guard's own transactions as is and nothing else,
  *  its buy on the block's real state in the next block, then (full proof) the first sale and the rest,
  *  where `sale` puts them, the request ending with the late swap; each sale an approve of its exact
  *  amount then the swap to ETH, each in a block of its own as the relay mines them, empty blocks in
  *  between. Probe side: their twins from the probe buyer (asProbe), in a request of its own. Synthetic: the pool's quote and owner() on the block's state, then (full proof) both buys
- *  followed by transferFrom without approval by owner() and by a stranger (takebacks). Without `full`
- *  (the 1st simulation, for the amounts bought and owner()): the buys, the quote and owner() only.
+ *  followed by transferFrom without approval by owner() and by a stranger (takebacks). Busy side: the
+ *  guard side again, with others' activity (othersBefore) in each swap's block before the swap: the state
+ *  a lone simulation keeps still and Base moves every block. Without `full` (the 1st simulation, for the
+ *  amounts bought and owner()): the buys, the quote and owner() only.
  *  Shared with app/replay.ts, which rebuilds the expected requests this way. */
 export function plan(token: Address, who: Who, block: bigint, amount: bigint, txs: GuardTxs, full?: { amounts: Amounts; owner: Address | null; sale: Sale }): Sides {
-  const { guard, buyer, stranger } = who;
+  const { guard, buyer, stranger, bystander } = who;
   const at = (n: bigint, calls: Call[]): Block => ({ number: block + n, calls });
   const guardBuy = guardTx(`${GUARD}buy`, guard, txs.buy).call;
   const probeBuy = asProbe(guardBuy, "buy", buyer);
+  const busy = (c: Call): Call => ({ ...c, label: `${BUSY}${c.label}` });
   const reads = [call("buy quote", buyer, ROUTER, router, "getAmountsOut", [amount, [WETH, token]]), call("owner()", buyer, token, erc20, "owner", [])];
-  if (!full) return { guard: [at(1n, [guardBuy])], probe: [at(1n, [probeBuy])], synthetic: [at(1n, reads)] };
+  if (!full) return { guard: [at(1n, [guardBuy])], probe: [at(1n, [probeBuy])], synthetic: [at(1n, reads)], busy: [at(1n, [busy(guardBuy)])] };
   if (!txs.sales) throw new Error("the full proof needs the guard's two sales");
   const { amounts, owner } = full;
   const sale = (p: string, seller: Address, i: 0 | 1): Call[] => {
@@ -348,10 +376,13 @@ export function plan(token: Address, who: Who, block: bigint, amount: bigint, tx
     ...(owner ? [call(`${p}transferFrom by owner()`, owner, token, erc20, "transferFrom", [holder, owner, 1n])] : []),
     call(`${p}transferFrom by a stranger`, stranger, token, erc20, "transferFrom", [holder, stranger, 1n]),
   ];
+  const busySide = side(GUARD, guard, guardBuy).map((b) => ({ ...b, calls: b.calls.map(busy) }));
+  for (const i of [0, 1] as const) busySide[Number(swaps[i]) - 1].calls.unshift(...othersBefore(bystander, guard, i));
   return {
     guard: side(GUARD, guard, guardBuy),
     probe: side("", buyer, probeBuy),
     synthetic: [at(1n, [...reads, { ...guardBuy, label: `${GUARD}buy before takebacks` }, { ...probeBuy, label: "buy before takebacks" }, ...takebacks(GUARD, guard), ...takebacks("", buyer)])],
+    busy: busySide,
   };
 }
 
@@ -371,9 +402,9 @@ function moved(r: Result): boolean {
   return r.returnData === "0x" || (uint(erc20, "transferFrom", r) as boolean);
 }
 
-/** Probe addresses and the sales: the sentinel derives them (deriveProbes); tests impose others
- *  (forged but consistent proofs). */
-export type Probe = { buyer: Address; stranger: Address; sale: Sale };
+/** Probe addresses, the busy side's other user and the sales: the sentinel derives them (deriveProbes);
+ *  tests impose others (forged but consistent proofs). */
+export type Probe = { buyer: Address; stranger: Address; bystander: Address; sale: Sale };
 /** On-chain inputs of the probe derivation: the guard account, the check id and its request time
  *  (`requested_ns`, set by the guard contract), all readable by anyone from a NEAR RPC. */
 export type Ticket = { guard: string; id: number; requested_ns: string };
@@ -392,6 +423,7 @@ export function deriveProbes(t: Ticket, blockHash: Hex): Probe {
   return {
     buyer: `0x${digest("buyer").slice(-40)}` as Address,
     stranger: `0x${digest("stranger").slice(-40)}` as Address,
+    bystander: `0x${digest("bystander").slice(-40)}` as Address,
     sale: { first: SALE_BLOCKS[0] + Number(x % span), bps: Number(bps), late: LATE_SALE_BLOCKS[0] + Number(late) },
   };
 }
@@ -539,6 +571,10 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const liquidity = await liquidityFacts(url, token, block);
   const template = templateOf(code);
   const own = liquidity?.pair ?? null;
+  // An index whose window is not bound to this block judges nothing: the check fails (the sentinel then
+  // posts a block), it never falls back to an unknown reputation.
+  const window = ctx.index?.chain_id === chainId ? windowProblem(Number(block), ctx.index.from, ctx.index.to) : null;
+  if (window) throw new Error(window);
   const reputation = ctx.index?.chain_id === chainId ? reputationOf(ctx.index, template, beforeBlock(ctx.index, own, await ownFunding(url, ctx.index, own))) : null;
   const near = await ctx.near(token);
   const amount = ctx.amount;
@@ -653,13 +689,34 @@ function sideFindings(r: Record<string, Result>, p: string, w: Parties, pair: Ad
     const before = [r[`${p}buy`], ...steps.slice(0, i).flat()];
     const quote = pair ? saleQuote(before, pair, w.token, saleAmounts(amount, sales.bps)[i]) : 0n;
     // A sale the pool quotes at less than DUST wei can fail or look taxed by rounding alone: not listed.
-    if (!ok(sale)) return findings.push({ level: "block", text: `sale refused ${when[i]} (${revertReason(sale)})`, list: listable && quote >= DUST });
+    // Nor is a refusal the late sale does not share: one that clears with time (an honest cooldown)
+    // blocks this check, and listing it would let any agent repeat checks until one draws it.
+    const late = r[`${p}sale${SALES[1]}`];
+    if (!ok(sale)) return findings.push({ level: "block", text: `sale refused ${when[i]} (${revertReason(sale)})`, list: listable && quote >= DUST && !ok(late) });
     const got = moves(steps[i], ETH_LOGS, who, "to");
     taxed(got, quote, `on the sale ${when[i]}`);
     // Not listed: a fee swap the buy's own fees can trigger (amount-dependent) does it too.
     if (pair && moves(steps[i], WETH, pair, "from") > got) findings.push({ level: "block", text: `the pool paid out more WETH than the seller received ${when[i]}` });
   });
   return findings;
+}
+
+/** The busy side against the guard side (plan): a sale of the guard's that goes through alone but is
+ *  refused, or pays another amount of ETH, once others used WETH and the factory and paid the guard is
+ *  keyed on state a lone simulation keeps still and Base moves every block (judge pass 7's WethKey). That
+ *  activity touches neither the token nor its pool: an honest sale pays the same. The first difference
+ *  only (a refused first sale changes the late one). Never listed: the guard's address is public. */
+function busyFindings(r: Record<string, Result>, w: Parties, sales: Sale): Finding[] {
+  for (const [i, s] of SALES.entries()) {
+    const [alone, busy] = [GUARD, `${BUSY}${GUARD}`].map((p) => [r[`${p}approve router${s}`], r[`${p}sale${s}`]]);
+    if (!alone[1] || !busy[1] || !ok(alone[1])) continue;
+    const when = `${i ? sales.late : sales.first} blocks after the buy`;
+    const activity = "after others' WETH, factory and ETH activity";
+    if (!ok(busy[1])) return [{ level: "block", text: `sale refused ${when} ${activity} (${revertReason(busy[1])})` }];
+    const [paid, busyPaid] = [alone, busy].map((x) => moves(x, ETH_LOGS, w.guard, "to"));
+    if (paid !== busyPaid) return [{ level: "block", text: `sale ${when} pays ${busyPaid} wei, not ${paid}, ${activity}` }];
+  }
+  return [];
 }
 
 /** Pure judgment: depends only on the call labels and their results, hence replayable
@@ -678,6 +735,7 @@ export function judge(labels: string[], results: Result[], facts: Facts, w: Part
   const list_target = findings.some((f) => f.level === "block" && f.list);
   const seen = new Set(findings.map((f) => f.text));
   for (const f of sideFindings(r, GUARD, w, pair, stop, facts.sales)) if (!seen.has(f.text)) findings.push({ ...f, text: `guard address only, not listed: ${f.text}` });
+  findings.push(...busyFindings(r, w, facts.sales));
   findings.push(...liquidityFindings(facts.liquidity, facts.block), ...environmentFindings(facts, w));
   findings.unshift(...nearFindings(facts.near, facts.code_hash, facts.implementation), ...reputationFindings(facts.reputation));
   const rank = { block: 0, warn: 1, allow: 2 }; // an "allow" finding is a note: it changes no verdict

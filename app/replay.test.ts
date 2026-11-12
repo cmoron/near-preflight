@@ -156,7 +156,8 @@ describe("replay: the evidence string is the one posted on chain", () => {
     const proof = structuredClone(await proofOf());
     const [buy] = callsIn(proof, 0, 0);
     buy.nonce = "0x7";
-    callsIn(proof, 2, 0)[2].nonce = "0x7"; // its copy before the takebacks too: a consistent forgery
+    callsIn(proof, 2, 0)[2].nonce = "0x7"; // its copies before the takebacks and on the busy side too: a consistent forgery
+    callsIn(proof, 3, 0)[0].nonce = "0x7";
     expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("the guard's buy simulated hashes to"))).toBe(true);
   });
   test("a guard sale simulated with an approve of 2^256 - 1 instead of the exact amount is refused (request shape)", async () => {
@@ -574,5 +575,32 @@ describe("replay: the sales and list_target", () => {
     const proof = await proofOf(tokens.next_block_key as Address);
     expect(evidenceOf(proof).list_target).toBe(true);
     expect(failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) }))).toEqual([]);
+  });
+});
+
+// Judge pass 7: the guard's sales run again after others' activity (a fourth request), and the template
+// index window is bound to the check's block.
+describe("replay: others' activity and the index window", () => {
+  test("WethKey's block replays identically, with --check: the activity's sender derived like the probes", async () => {
+    const proof = await proofOf(tokens.weth_key as Address);
+    expect(proof.verdict).toBe("block");
+    expect(proof.request.length).toBe(4);
+    const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) });
+    expect(failed(lines)).toEqual([]);
+    expect(lines.some((l) => l.ok && l.line.includes("verdict block rejudged identically"))).toBe(true);
+  });
+  test("others' activity sent from an address the sentinel chose: --check refuses it", async () => {
+    const proof = await proofOf(tokens.safe as Address, { bystander: rand() });
+    expect(failed(await replay(proof, RPC))).toEqual([]);
+    expect(failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) }))).toEqual([expect.stringContaining("not derived")]);
+  });
+  test("others' activity left out of the fourth request (WethKey then sells): refused", async () => {
+    const proof = structuredClone(await proofOf(tokens.weth_key as Address));
+    for (const b of (proof.request as any)[3].params[0].blockStateCalls) b.calls = b.calls.filter((c: Record<string, string>) => c.from.toLowerCase() === GUARD_EVM.toLowerCase());
+    expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("request shape"))).toBe(true);
+  });
+  test("a proof judged on an index window that does not cover the 2,000 blocks before its block: MISMATCH", async () => {
+    const proof = withEvidence(await proofOf(tokens.farm_fresh as Address), (e) => (e.reputation.from = e.block - 100));
+    expect(failed(await replay(proof, RPC)).some((l) => l.includes("template index window"))).toBe(true);
   });
 });

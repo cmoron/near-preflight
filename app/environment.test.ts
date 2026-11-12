@@ -124,4 +124,14 @@ describe("the real sale fails where the simulation's passes", () => {
     expect(await buyThenSell(tokens.basefee_trap as Address, async () => {}, pin(1_000_000n))).toBe(true);
     expect(await buyThenSell(tokens.basefee_trap as Address, pin(1_000_001n), pin(1_000_000n))).toBe(false);
   });
+  test("WethKey: the sale goes through while nobody else touches WETH, as in any simulation, and fails after one other deposit", async () => {
+    const wraps = async () => {
+      const other = `0x${Buffer.from(crypto.getRandomValues(new Uint8Array(20))).toString("hex")}` as Address;
+      await rpc(RPC, "anvil_setBalance", [other, toHex(parseEther("1"))]);
+      await rpc(RPC, "anvil_impersonateAccount", [other]);
+      expect(await send(other, WETH, "0xd0e30db0", 1n)).toBe(true); // deposit(): every real Base block has some
+    };
+    expect(await buyThenSell(tokens.weth_key as Address, async () => {})).toBe(true);
+    expect(await buyThenSell(tokens.weth_key as Address, wraps)).toBe(false);
+  });
 });

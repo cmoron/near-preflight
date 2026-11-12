@@ -3,10 +3,11 @@
 // Usage: bun app/replay.ts <proof.json> [rpc] [--check]
 import { decodeFunctionData, encodeFunctionData, keccak256, parseAbi, parseTransaction, serializeTransaction, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
 import { ENV_OPCODES, touched } from "./environment";
-import { beforeBlock, buildIndex, indexSha256, ownFunding, reputationOf, templateOf, type Reputation } from "./index";
+import { beforeBlock, buildIndex, INDEX_LAG_BLOCKS, INDEX_SPAN_BLOCKS, indexSha256, ownFunding, reputationOf, templateOf, windowProblem, type Reputation } from "./index";
 import {
   balances,
   buildRequest,
+  BUSY,
   buyStages,
   byLabel,
   deriveProbes,
@@ -215,7 +216,7 @@ function guardOnly(bs: BlockStateCall[]): string | null {
   return null;
 }
 
-type Rebuilt = { labels: string[]; buyer: Address; guard: Address; stranger: Address | null; owner: Address | null; buy: Hex };
+type Rebuilt = { labels: string[]; buyer: Address; guard: Address; stranger: Address | null; bystander: Address | null; owner: Address | null; buy: Hex };
 const NOBODY: Address = "0x0000000000000000000000000000000000000000";
 type RequestCall = { from: Address; to: Address; data: Hex; value?: Hex; nonce?: Hex; gas: Hex; maxFeePerGas: Hex; maxPriorityFeePerGas: Hex };
 const shape = parseAbi([
@@ -287,7 +288,7 @@ function saleShape(sale: Hex[], token: Address, guard: Address, x: bigint): stri
  *  at the proof's block. No fallback: a missing probe is a defect. */
 async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][]): Promise<Rebuilt | { error: string }> {
   try {
-    const [g, pr, sy] = p.request.map(blocksOf);
+    const [g, pr, sy, bu] = p.request.map(blocksOf);
     const token = p.target as Address;
     const block = BigInt(e.block);
     const amount = BigInt(e.amount_wei);
@@ -306,21 +307,25 @@ async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][]): P
     const txs: GuardTxs = { buy: unsignedOf(buyCall, e.chain_id) };
     const fees: Fees = { gas: BigInt(buyCall.gas), maxFeePerGas: BigInt(buyCall.maxFeePerGas), maxPriorityFeePerGas: BigInt(buyCall.maxPriorityFeePerGas) };
     const head = await headAt(url, toHex(e.block));
-    const buyOnly = plan(token, { guard, buyer, stranger: NOBODY }, block, amount, txs);
+    const unknown = { guard, buyer, stranger: NOBODY, bystander: NOBODY };
+    const buyOnly = plan(token, unknown, block, amount, txs);
     // The 1st simulation's calls open each request: their fresh results give the amounts and owner().
     const first = SIDES.flatMap((k, i) => fresh[i].slice(0, buyOnly[k].flatMap((b) => b.calls).length));
-    const st = buyStages(byLabel(labelsOf(buyOnly), first), { token, guard, buyer, stranger: NOBODY });
+    const st = buyStages(byLabel(labelsOf(buyOnly), first), { token, ...unknown });
     let sides = buyOnly;
     let stranger: Address | null = null;
+    let bystander: Address | null = null;
     const full = !st.stop && !!e.liquidity;
     if (full) {
-      const layout = plan(token, { guard, buyer, stranger: NOBODY }, block, amount, SKELETON, { amounts: st.amounts, owner: st.owner, sale: e.sales });
+      const layout = plan(token, unknown, block, amount, SKELETON, { amounts: st.amounts, owner: st.owner, sale: e.sales });
       stranger = at(layout.synthetic, sy, "transferFrom by a stranger")?.from ?? null;
       if (!stranger) return { error: "request has no stranger probe where checkToken puts one" };
       const sales = SALES.map((when) => [`${GUARD}approve router${when}`, `${GUARD}sale${when}`].map((l) => at(layout.guard, g, l)));
       if (sales.flat().some((c) => !c)) return { error: `the guard's sales are not where evidence.sales puts them (${e.sales.first} and ${e.sales.late} blocks after the buy)` };
       txs.sales = sales.map((sale) => sale.map((c) => unsignedOf(c!, e.chain_id))) as [Hex[], Hex[]];
-      sides = plan(token, { guard, buyer, stranger }, block, amount, txs, { amounts: st.amounts, owner: st.owner, sale: e.sales });
+      bystander = at(layout.busy, bu, `${BUSY}WETH deposit${SALES[0]}`)?.from ?? null;
+      if (!bystander) return { error: "request has no other user's activity where checkToken puts it" };
+      sides = plan(token, { guard, buyer, stranger, bystander }, block, amount, txs, { amounts: st.amounts, owner: st.owner, sale: e.sales });
     }
     const bad = guardShape(txs, token, guard, amount, txs.sales ? saleAmounts(st.amounts.guard, e.sales.bps) : null);
     if (bad) return { error: bad };
@@ -329,7 +334,7 @@ async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][]): P
     if (JSON.stringify(want) !== JSON.stringify(p.request)) return { error: "requests are not the ones checkToken builds for this target" };
     const labels = labelsOf(sides);
     if (labels.length !== fresh.flat().length) return { error: `expected ${labels.length} calls, node returned ${fresh.flat().length}` };
-    return { labels, buyer, guard, stranger, owner: st.owner, buy: txs.buy };
+    return { labels, buyer, guard, stranger, bystander, owner: st.owner, buy: txs.buy };
   } catch (err) {
     return { error: `request cannot be parsed (${msg(err)})` };
   }
@@ -346,6 +351,7 @@ async function probeProblems(url: string, e: Evidence, target: Address, r: Rebui
   ];
   const probes: [string, Address][] = [["buyer", r.buyer]];
   if (r.stranger) probes.push(["stranger", r.stranger]);
+  if (r.bystander) probes.push(["bystander", r.bystander]);
   const out: string[] = [];
   for (const [role, a] of probes) {
     for (const [name, k] of known) if (k && a.toLowerCase() === k.toLowerCase()) out.push(`${role} ${a} is the ${name}`);
@@ -395,7 +401,7 @@ export async function replay(
   const hash = sha256(stringToHex(JSON.stringify(proof.request)));
   add(hash === e.request_sha256, `request hash ${hash === e.request_sha256 ? "matches evidence" : `${hash} != ${e.request_sha256}`}`);
 
-  const bad = shapeError(proof, e, 3);
+  const bad = shapeError(proof, e, 4);
   if (bad) {
     add(false, `request shape: ${bad} (nothing sent to the node)`);
     return out;
@@ -467,7 +473,7 @@ export async function replay(
       const want = now.map((res, i) => `${r.labels[i]}: ${succeeded(res) ? "ok" : "revert"}`);
       const same = JSON.stringify(want) === JSON.stringify(e.calls);
       add(same, same ? "call labels rebuilt from the requests match evidence.calls" : "call labels in evidence.calls differ from those rebuilt from the requests");
-      const parties = { token: proof.target as Address, guard: r.guard, buyer: r.buyer, stranger: r.stranger ?? NOBODY };
+      const parties = { token: proof.target as Address, guard: r.guard, buyer: r.buyer, stranger: r.stranger ?? NOBODY, bystander: r.bystander ?? NOBODY };
       const j = judge(r.labels, now, { ...e, code_hash: e.code_hash as Hex, implementation: e.implementation as Address | null }, parties);
       const ok = j.verdict === proof.verdict && j.reasons === proof.reasons;
       add(ok, ok ? `verdict ${j.verdict} rejudged identically (same reasons)` : `verdict/reasons differ: file "${proof.verdict}: ${proof.reasons}" vs rejudged "${j.verdict}: ${j.reasons}"`);
@@ -503,6 +509,8 @@ export async function replay(
   if (!e.reputation) add(true, "no template index used: reputation unknown, which the verdict counts as a warn");
   else {
     const r = e.reputation;
+    const window = windowProblem(e.block, r.from, r.to);
+    add(!window, window ?? `template index window ${r.from}..${r.to} bound to block ${e.block}: it starts at least ${INDEX_SPAN_BLOCKS} blocks before it and ends at most ${INDEX_LAG_BLOCKS} before it`);
     try {
       const index = await buildIndex(url, r.from, r.to);
       const sha = indexSha256(index);
@@ -687,7 +695,7 @@ async function replayExit(proof: Proof, e: ExitEvidence, url: string, opts: Opts
 function derivation(id: number, r: Rebuilt, sale: Sale, c: NonNullable<OnChain>, blockHash: Hex | null, g: GuardInfo): Line[] {
   if (!blockHash) return [{ ok: false, line: "ERROR    probe derivation: EVM block hash unknown" }];
   const want = deriveProbes({ guard: g.account, id, requested_ns: c.requested_ns }, blockHash);
-  const probesOk = same(r.buyer, want.buyer) && (r.stranger === null || same(r.stranger, want.stranger));
+  const probesOk = same(r.buyer, want.buyer) && (r.stranger === null || same(r.stranger, want.stranger)) && (r.bystander === null || same(r.bystander, want.bystander));
   const saleOk = sale.first === want.sale.first && sale.bps === want.sale.bps && sale.late === want.sale.late;
   const line = (ok: boolean, text: string): Line => ({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
   return [
@@ -701,7 +709,7 @@ function derivation(id: number, r: Rebuilt, sale: Sale, c: NonNullable<OnChain>,
       probesOk,
       probesOk
         ? `probe addresses derived from ${g.account}, #${id}, request time ${c.requested_ns} ns on NEAR and EVM block hash ${blockHash.slice(0, 10)}...`
-        : `probe addresses not derived from on-chain data: buyer ${r.buyer} (derived ${want.buyer}), stranger ${r.stranger ?? "none"} (derived ${want.stranger})`,
+        : `probe addresses not derived from on-chain data: buyer ${r.buyer} (derived ${want.buyer}), stranger ${r.stranger ?? "none"} (derived ${want.stranger}), bystander ${r.bystander ?? "none"} (derived ${want.bystander})`,
     ),
     line(
       same(r.guard, g.evm),

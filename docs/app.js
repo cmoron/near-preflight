@@ -1,6 +1,6 @@
 'use strict';
 // Guard account to read. Override with ?guard=<account id>.
-const DEFAULT_GUARD = 'guard.goblin-guard-81427.testnet';
+const DEFAULT_GUARD = 'guard.goblin-guard-13713.testnet';
 const RPCS = ['https://test.rpc.fastnear.com', 'https://rpc.testnet.near.org'];
 const REFRESH_MS = 30000, BATCH = 5, PAGE = 50;
 // A check judged this long ago no longer changes (approval, buy and quoted exit end 120 s after the
@@ -39,6 +39,8 @@ const LABELS = {
   basefee_trap: 'trap: keyed on the base fee',
   next_block_key: 'trap: sells only in the next block',
   amount_trap: 'trap: sells only half or all',
+  weth_key: "trap: sells only while nobody else uses WETH",
+  cooldown_60: 'honest: 30-block cooldown after a buy',
 };
 
 const GUARD = new URLSearchParams(location.search).get('guard') || DEFAULT_GUARD;

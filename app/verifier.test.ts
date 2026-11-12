@@ -160,7 +160,7 @@ describe("nothing but the guard's own transactions before each one it signs", ()
     expect(calls.every((c) => c.from.toLowerCase() === GUARD_EVM.toLowerCase() && c.nonce !== undefined)).toBe(true);
     expect(calls.map((c) => c.data.slice(0, 10))).toEqual(["0xb6f9de95", "0x095ea7b3", "0x791ac947", "0x095ea7b3", "0x791ac947"]);
     expect(Object.keys(guardSide[0].stateOverrides ?? {}).every((a) => a.toLowerCase() === GUARD_EVM.toLowerCase())).toBe(true);
-    expect(r.request.length).toBe(3); // the probe's twins and the synthetic calls run apart
+    expect(r.request.length).toBe(4); // the probe's twins, the synthetic calls and the busy side run apart
   });
 });
 
@@ -236,6 +236,48 @@ describe("the check's sales are where and what a token cannot expect", () => {
   });
 });
 
+// Judge pass 7: WethKey sells only while WETH's total supply is what its own trades left. WETH is an
+// expected address and nobody else moves it in a simulation; on Base deposits and withdrawals move it
+// every block. The guard's sales run again after others' activity: a sale that differs is a block.
+describe("a token keyed on state others move every block", () => {
+  test("WethKey, every sale passes alone: block once others used WETH, the factory and paid the guard; not listed", async () => {
+    const r = await check(tokens.weth_key);
+    expect(r.evidence.calls.filter((c) => c.startsWith(`${GUARD}sale`)).every((c) => c.endsWith(": ok"))).toBe(true);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toMatch(/^sale refused \d+ blocks after the buy after others' WETH, factory and ETH activity/);
+    expect(r.list_target).toBe(false);
+  });
+  test("USDC sells the same after others' activity: both sales run again, allow", async () => {
+    const r = await check(tokens.usdc);
+    expect(r.evidence.calls.filter((c) => c.startsWith(`busy: ${GUARD}sale`))).toEqual([`busy: ${GUARD}sale first: ok`, `busy: ${GUARD}sale late: ok`]);
+    expect(r.verdict).toBe("allow");
+  });
+});
+
+// Judge pass 7: an honest token with a 30-block cooldown was listed whenever the first sale was drawn
+// within it. A refusal the late sale does not share clears with time: it blocks the check, never lists.
+describe("a sale refused only early never lists", () => {
+  const checkFirst = async (token: string, first: number) =>
+    checkToken(RPC, token as Address, GUARD_EVM, (h) => {
+      const p = probes(h);
+      return { ...p, sale: { ...p.sale, first } };
+    }, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(token, GUARD_EVM) });
+  test("Cooldown60, first sale 10 blocks after the buy: block, not listed (the late sale goes through)", async () => {
+    const r = await checkFirst(tokens.cooldown_60, 10);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toStartWith("sale refused 10 blocks after the buy");
+    expect(r.list_target).toBe(false);
+  });
+  test("Cooldown60, first sale 40 blocks after the buy: allow", async () => {
+    expect((await checkFirst(tokens.cooldown_60, 40)).verdict).toBe("allow");
+  });
+  test("a trap whose late sale is refused too still lists, whatever the first sale's block", async () => {
+    const r = await checkFirst(tokens.sell_blocked, 10);
+    expect(r.verdict).toBe("block");
+    expect(r.list_target).toBe(true);
+  });
+});
+
 describe("a sale's tax is what the seller receives", () => {
   test("a token that swaps 90 % of each sale into the pool itself and sends that WETH to its owner: block", async () => {
     const r = await check(tokens.pair_pull_tax);
@@ -286,8 +328,8 @@ describe("what the agent's amount decides never lists the token", () => {
 // Judge pass 6: dust was judged on the tokens the buy delivered, which the token decides, so a token that
 // delivers almost nothing was never listed. Dust is now the pool's quote for the agent's amount.
 describe("dust is the pool's quote for the amount, not what the token delivers (pure)", () => {
-  const [token, buyer, stranger, pair] = ["0xa1", "0xa2", "0xa3", "0xa4"].map((a) => pad(a as Hex, { size: 20 })) as Address[];
-  const w = { token, guard: GUARD_EVM, buyer, stranger };
+  const [token, buyer, stranger, pair, bystander] = ["0xa1", "0xa2", "0xa3", "0xa4", "0xa5"].map((a) => pad(a as Hex, { size: 20 })) as Address[];
+  const w = { token, guard: GUARD_EVM, buyer, stranger, bystander };
   const transfer = (to: Address, value: bigint) => ({ address: token, topics: [TRANSFER, pad(pair), pad(to)], data: pad(toHex(value)) });
   const okWith = (logs: Result["logs"] = [], returnData: Hex = "0x"): Result => ({ status: "0x1", returnData, logs });
   /** judge on a check where the pool quotes `quoted` tokens for the amount and each buy delivers `got`;
@@ -409,6 +451,12 @@ describe("template reputation", () => {
     expect(r.evidence.reputation?.before_block).toBeNull();
     expect(INDEX.templates[r.evidence.template].filter((p) => p.drained !== null).length).toBe(3);
   });
+  // Judge pass 7: a sentinel judged a farm copy on a window that missed its earlier pools.
+  test("an index window that misses the farm's earlier pools, or ends long before the check: refused, no verdict", async () => {
+    const head = Number(BigInt(await rpc<Hex>(RPC, "eth_blockNumber", [])));
+    await expect(check(tokens.farm_fresh, GUARD_EVM, await buildIndex(RPC, head - 3, head))).rejects.toThrow("template index window");
+    await expect(check(tokens.farm_fresh, GUARD_EVM, await buildIndex(RPC, tokens.fork_block + 1, head - 301))).rejects.toThrow("template index window");
+  });
   test("without an index the reputation is unknown: warn, never allow", async () => {
     const r = await check(tokens.safe, GUARD_EVM, null);
     expect(r.verdict).toBe("warn");
@@ -524,7 +572,7 @@ describe("proof", () => {
         for (const c of b.calls) {
           expect(BigInt(c.maxPriorityFeePerGas)).toBeGreaterThan(0n);
           expect(BigInt(c.maxFeePerGas)).toBeGreaterThan(BigInt(h.baseFeePerGas));
-          expect(c.gas).toBe("0x3d090"); // the guard's 250,000, not the block's limit
+          expect(c.gas).toBe(c.data.startsWith("0xc9c65396") ? "0x2dc6c0" : "0x3d090"); // the guard's 250,000, not the block's limit; others' createPair 3,000,000
         }
       }
     }
