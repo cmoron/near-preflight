@@ -75,8 +75,10 @@ failed. Rather than guess the next tell, two facts, both in the evidence and rec
 - `opcodes`: BLOCKHASH, COINBASE, PREVRANDAO, GASLIMIT, BASEFEE, BLOBHASH, BLOBBASEFEE, GASPRICE and ORIGIN in
   the reachable code of the token and of its implementation: a `warn` naming them, the owner decides.
   Reachable: from offset 0 and from each valid JUMPDEST until an opcode that halts or jumps. Data solc
-  appends (revert strings, CBOR metadata) is skipped: read as code, a revert string's "H" is BASEFEE, and a
-  naive scan flags Uniswap's router and USDC's implementation.
+  appends (revert strings, CBOR metadata) is skipped while nothing can run it: read as code, a revert
+  string's "H" is BASEFEE, and a naive scan flags Uniswap's router and USDC's implementation. A tail shaped
+  like metadata is not trusted: the whole code is scanned, so such a tail counts as data only when the code
+  before it halts and it holds no JUMPDEST.
 
 Decisions. GAS is not flagged: solc emits it before every external call, and each simulated transaction
 carries the guard's own gas limit. SELFBALANCE reads the token's own state. BALANCE and EXTCODE* name an
@@ -141,11 +143,12 @@ applied" and from "checked and clean" (no finding).
 | ---------------------------------------------------------------------------------------------- | ----------------------------- |
 | Only the agent's function-call key acts for it, and only on the guard                          | NEAR protocol                 |
 | A buy needs an `allow`, or a `warn` the owner approved, within 120 s of the verdict            | `buy`, `approve_warn`         |
-| A buy is of the amount stated at the check, which must fit in the armed budget                 | `request_check`, `buy`        |
+| A buy is of the amount stated at the check, at most the owner's per-buy limit, within the budget | `request_check`, `buy`, `set_bounds` |
 | The guard builds the swap: chain 8453, router, path, recipient = its address, gas, fees, floor | `buy`, `preview_check`        |
 | An allow or warn carries the hashes of what the guard would sign; it signs nothing else        | `post_verdict`, `buy`         |
 | A buy needs a token not listed, and at least 60 s left before its swap deadline                | `buy`                         |
-| Value plus gas at the cap is debited from the armed budget and the prepaid credit              | `buy`, `sell_quoted`          |
+| A buy's value plus gas at the cap is debited from the armed budget and the prepaid credit      | `buy`                         |
+| A sale never needs buying budget: an exit's quote and gas come from the agent's credit alone   | `request_exit`, `sell_quoted` |
 | A token at the guard's EVM address is held for one agent at a time                             | `buy`, `holding`              |
 | Only the owner clears or reassigns a token's holding, never during a signature                 | `set_holding`                 |
 | An agent sells at most its holding, on a sentinel exit quote at most 120 s old, used once      | `request_exit`, `sell_quoted` |
@@ -158,9 +161,10 @@ applied" and from "checked and clean" (no finding).
 | An `allow` on code that differs from the reference is refused                                  | `post_verdict`                |
 | Arming within the owner's bounds (per arming, duration, 7-day cap), registered agents only     | `set_bounds`, `arm`           |
 | Arming refused if the agent's credit dropped below what the armer read (a top-up is fine)      | `arm`                         |
-| Emergency stop: `disarm` by the owner freezes the agent until `unfreeze`                       | `disarm`, `unfreeze`          |
+| Emergency stop: `disarm` by the owner freezes the agent until `unfreeze`, and voids every check requested before it (no buy, no quoted exit) | `disarm`, `unfreeze` |
 | One signature at a time; one that does not come back keeps its nonce, charge and tokens       | `on_signed`, `on_exit_signed` |
-| Only the owner settles a reserved transaction (refund or spent) or signs a replacement          | `clear_unsettled`, `sign_replacement` |
+| A slot whose callback never ran is released by the owner after 600 s, its transactions reserved | `release_signing`             |
+| Only the owner replaces a transaction, at a reserved nonce only, and settles it: refund only once a replacement is signed there, spent anytime | `sign_replacement`, `clear_unsettled` |
 | A decision digest backs one call: a digest already anchored is refused                         | `request_check`, `buy`        |
 | A check's price (0.019 NEAR) covers its worst-case storage, 1,900 bytes, measured by tests     | `request_check`               |
 
@@ -183,10 +187,19 @@ Details:
   (its `respond` is a public transaction). So a missing signature never frees its nonce: the transaction is
   reserved (`unsettled`, event `sign_unsettled`) with its charge and, for an agent's swap, the tokens it
   sells, until the owner settles it. The owner signs 0 wei to its own address at that nonce (`bun
-  --env-file=.env app/human.ts replace <nonce>`; raise the fees first with `gas` to replace a transaction
-  that can never be mined), the relay broadcasts it, then `clear <nonce> refund` gives the charge and tokens
-  back, or `clear <nonce> spent` if the late signature was mined first. Later transactions wait behind the
-  gap until then. A reservation takes no more storage than the signed transaction it stands for.
+  --env-file=.env app/human.ts replace <nonce>`; raise the fees first with `gas` if the base fee is above
+  them), the relay broadcasts it, then `clear <nonce> refund` gives the charge and tokens back, or `clear
+  <nonce> spent` if the late signature was mined first. A refund is refused until a replacement was signed
+  at that nonce (the guard records it), and only a reserved nonce can be replaced: a buy that was signed
+  and charged is never voided. Later transactions wait behind the gap until then. A reservation takes no
+  more storage than the signed transaction it stands for.
+- **A callback that never runs.** If `on_signed` or `on_exit_signed` failed (out of gas, say), the slot
+  would stay taken. The owner frees it 600 s after the request, past the MPC's own timeout (its yield
+  expires after 200 blocks): `bun --env-file=.env app/human.ts release`, event `signing_released`. What it
+  was signing is reserved as above. Each callback names the request it answers, so a late one cannot settle
+  the next job. Measured on testnet (2026-11-12): `on_signed` burnt 2.75 TGas, `on_exit_signed` 2.93
+  TGas for an exit's two signatures and 2.02 for a withdrawal, against the 10 TGas reserved for each (the
+  unused gas of the call is added on top: 80 to 131 TGas attached in these runs).
 - **Owner's exit.** `sell` signs approve and swap from the guard's address for any amount and floor; the
   approve is of the amount sold unless the owner passes another, as `0x` + up to 64 hex digits (amounts are
   U128 elsewhere): `bun --env-file=.env app/human.ts sell <token> <amount> 0 max` approves 2^256 - 1, for a
@@ -200,7 +213,8 @@ Details:
 - **Decision digest.** `request_check` and `buy` take an optional `decision_sha256`, stored on the check,
   logged in `check_requested` and `sign_requested`, and anchored: a digest already anchored is refused
   (`decision already anchored on check #n`), so one signed decision backs one guard call; `decision_of`
-  names the check it backs. A refunded check or a failed signature frees its digest. Each anchor (at most
+  names the check it backs. A refunded check frees its digest; a failed signature's stays anchored until the
+  owner clears it with a refund. Each anchor (at most
   117 bytes) is paid by the check's price. The guard does not check the package itself (see Limits).
 
 ## Roles
@@ -210,7 +224,7 @@ Details:
   `warn`s, unlists, sets gas, sells, withdraws ETH to the address fixed at init, clears or reassigns
   holdings, settles reserved transactions, emergency stop. CLI: `bun --env-file=.env app/human.ts stop |
 unfreeze | approve <id> | reset | withdraw <wei> | sell <token> <amount> [min wei] [max | 0x approve] | unlist
-<token> | holding <token> <agent> [amount] | gas <limit> | replace <nonce> | clear <nonce> refund|spent`.
+<token> | holding <token> <agent> [amount] | gas <limit> | replace <nonce> | clear <nonce> refund|spent | release`.
 - **Armer**, function-call key `arm`, `disarm`: arms a registered agent within the owner's bounds.
 - **Agent**, function-call key `request_check`, `buy`, `refund_check`, `request_exit`, `sell_quoted`; no EVM key.
 - **Sentinel**, function-call key `post_verdict`: reads the guard's previews of what it would sign, simulates
@@ -226,8 +240,9 @@ the allowance (about 0.1 NEAR for a `buy`, which attaches 100 TGas, 0.15 NEAR fo
 back what was not burnt. Measured here: 10 agent transactions, 3 of them signed buys, took 0.0045 NEAR from
 the agent's 0.5 NEAR.
 
-The sentinel's key pays the gas of every verdict an agent pays for: an armed agent sending paid checks
-(0.019 NEAR each, within its 7-day cap) can exhaust its 0.25 NEAR, after which verdicts stop until the owner
+The sentinel's key pays the gas of every verdict an agent pays for: an agent sending paid checks
+(0.019 NEAR each, within its 7-day cap) or exit quotes (from its credit, while it holds a token) can exhaust
+its 0.25 NEAR, after which verdicts stop until the owner
 gives the sentinel a new key (as below); the agent's checks then wait unjudged, and their price is refunded
 after 300 s (`refund_check`). An operational limit, not a bypass: no verdict means no buy.
 
@@ -273,9 +288,9 @@ later; within those 600 s, the guard refuses its digest on a second check or on 
 backs one guard call.
 
 Without a key, the demo verifies `app/fixtures/decision.json`: the model's decision on the same poisoned
-inbox, anchored as check #5 of this deployment, `guard.goblin-guard-54109.testnet` (its signed request names
-that guard, `agent.goblin-guard-54109.testnet` and a block 12 s before the check; its `request_check` tool call
-states the 10000000000000 wei the check stores).
+inbox, anchored as check #15 of this deployment, `guard.goblin-guard-17060.testnet` (its signed request names
+that guard, `agent.goblin-guard-17060.testnet` and a block 10 s before the check; its `request_check` tool
+call states the 10000000000000 wei the check stores).
 
 Injection count: `./demo.sh --full` with a key runs the model 3 times on the poisoned inbox and prints how
 many runs resisted; `bun --env-file=.env --env-file=.env.agent --env-file=.env.llm app/llm.ts 20` measures
@@ -362,10 +377,11 @@ there); a pruned node refuses old state, an archive node does not.
   decision after the fact; it does not gate it.
 - **Operations.** The NEAR/ETH rate is fixed by the owner, with no oracle. One signature at a time for all
   agents and exits: the owner's sale waits for the one in progress. The emergency stop does not recall a
-  signature already requested. Each signature that does not come back needs the owner (replace, then clear),
-  and a late signature broadcast before the replacement is mined (within the budget already debited). The
-  sentinel and replay need anvil (Foundry) for the environment trace; without it the check fails closed. All
-  roles run under one OS user, whose near-cli keychain holds full-access keys.
+  signature already requested; it voids the checks requested before it. Each signature that does not come
+  back needs the owner (replace, then clear), and a late signature broadcast before the replacement is mined
+  (within the budget already debited). The sentinel and replay need anvil (Foundry) for the environment
+  trace; without it the check fails closed. All roles run under one OS user, whose near-cli keychain holds
+  full-access keys.
 - **Build.** `cargo near build non-reproducible-wasm`: its sha256 matches the deployed code hash, but nobody
   can rebuild it bit for bit elsewhere. `cargo near build reproducible-wasm` works here (Docker), but its
   metadata names the git commit it was built from, so it can be published only from a pushed commit.
@@ -398,6 +414,12 @@ passes) found, then how it was closed. Each has a test.
 - One signed decision anchored on two checks: the guard refuses a digest already anchored, and `attest --check` verifies `decision_of`.
 - A pair created empty before the index window escaped reputation (having code there was taken for being older): an older pool must have held 0.5 ETH before the window, otherwise it is dated by its funding inside it.
 - The red team's RedL1Trap: a sale only while the L1Block predeploy is unchanged since the buy, which Base rewrites every block and eth_simulateV1 never does (allow, NEAR signed, tokens stuck, `replay --check` OK): the environment rule. Every address the guard's transactions touch is traced on a local fork, and one outside the token, its pool and Uniswap is a `block`; opcodes no simulation can match are a `warn`; replay recomputes both. `red_l1_trap`, `helper_trap` and `basefee_trap` on the fork.
-- A signature published by the MPC after the guard's yield timed out, once the guard had refunded the agent and freed the nonce (a spend outside the budget), and a nonce stuck behind a transaction that can never be mined: a signature that does not come back keeps its nonce, charge and tokens reserved until the owner settles it, and the owner signs a replacement at a used nonce.
+- A signature published by the MPC after the guard's yield timed out, once the guard had refunded the agent and freed the nonce (a spend outside the budget), and a nonce stuck behind a transaction that can never be mined: a signature that does not come back keeps its nonce, charge and tokens reserved until the owner settles it, and the owner signs a replacement at a reserved nonce.
 - `attest --check` compared the model with the package's own claim, and the buy's amount came from unattested wrapper code: the model is pinned, the signed tool call states `amount_wei`, and `attest --check` requires the check's amount to be that one.
 - "The owner can always have NEAR sign a sale, whatever the agent's state" was not true during a signature: the sentence says when, and a test shows the order after a stop.
+- Executable code in a tail shaped like solc's metadata escaped the opcode scan, which cut that tail unread: the whole code is scanned, and such a tail counts as data only when the code before it halts and it holds no JUMPDEST.
+- The model's tool call sets the buy's amount, which only the armed budget bounded: an owner-set per-buy limit (`max_buy_wei` in `bounds`), enforced by `request_check` and `buy`, and by the wrapper before it calls the guard.
+- A verdict from before an emergency stop still bought after `unfreeze` and a new arming within its 120 s: the stop voids every check requested before it, for a buy and for a quoted exit.
+- An agent whose budget was spent or expired could not sell, only the owner could: a sale never needs buying budget, the exit quote and its gas come from the agent's credit.
+- A refund was accepted before any replacement was signed, so a late signature could still be mined after it, and a replacement could void a buy that was signed and charged: a refund needs a replacement signed at that nonce, and only a reserved nonce can be replaced.
+- A callback that ran out of gas would have held the signing slot forever: the owner releases it after 600 s, its transactions reserved as unsettled, and a late callback names its request, so it cannot settle the next job.

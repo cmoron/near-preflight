@@ -11,8 +11,7 @@
 //   simulation can guarantee: at least a warn, the owner decides.
 // TIMESTAMP and NUMBER stay allowed: the simulated blocks follow Base's cadence up to 512 s, and the
 // sales there exercise them.
-import { toHex, type Address, type Hex } from "viem";
-import { withoutMetadata } from "./index";
+import { hexToBytes, toHex, type Address, type Hex } from "viem";
 import { FACTORY, ROUTER, rpc, short, WETH, type Finding, type Liquidity, type Request } from "./verifier";
 
 /** Opcodes whose value the simulation cannot guarantee for a future real block or transaction. GAS is
@@ -35,10 +34,12 @@ const HALTS = new Set([0x00, 0x56, 0xf3, 0xfd, 0xfe, 0xff]);
 
 /** ENV_OPCODES in the code execution can reach: from offset 0 and from each valid JUMPDEST (as the EVM
  *  parses them, PUSH data skipped) until an opcode that halts or jumps away. Data solc appends after the
- *  code (revert strings, constants) is skipped: read as code, "A", "D", "H" would be COINBASE,
- *  PREVRANDAO, BASEFEE. Sorted names. */
+ *  code (revert strings, constants, the CBOR metadata) is skipped while nothing can run it: read as
+ *  code, "A", "D", "H" would be COINBASE, PREVRANDAO, BASEFEE. A tail shaped like metadata is not
+ *  trusted: the whole code is scanned, so it is skipped only when the code before it halts and it holds
+ *  no JUMPDEST. Sorted names. */
 export function envOpcodes(code: Hex): string[] {
-  const b = withoutMetadata(code);
+  const b = hexToBytes(code);
   const seen = new Set<string>();
   let live = true;
   for (let i = 0; i < b.length; i++) {

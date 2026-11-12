@@ -96,8 +96,8 @@ async function moment(name: string, run: () => Promise<void>): Promise<void> {
 
 /** A recorded decision (app/fixtures), anchored on our deployment: verified when there is no key. */
 const FIXTURE = "app/fixtures/decision.json";
-const FIXTURE_GUARD = "guard.goblin-guard-54109.testnet";
-const FIXTURE_CHECK = 5;
+const FIXTURE_GUARD = "guard.goblin-guard-17060.testnet";
+const FIXTURE_CHECK = 15;
 const KEY = process.env.NEAR_AI_API_KEY;
 const usage: Usage = { prompt_tokens: 0, completion_tokens: 0 };
 let tools: Awaited<ReturnType<typeof guardTools>> | null = null;
@@ -107,7 +107,7 @@ let witness: { id: number; signed: string | null } | null = null;
 await moment("setup", async () => {
   // A previous run listed the trap on the shared blocklist: the owner removes the entry (unlist, own
   // process) so that this run shows the check again.
-  for (const token of [TRAP, GUARD_TRAP, FRESH]) {
+  for (const token of [TRAP, GUARD_TRAP, FRESH, USDC]) {
     if (!(await view<Entry | null>("get_entry", { token }))) continue;
     console.log(`[demo] ${token} is still listed by a previous run: the owner removes the entry`);
     const p = Bun.spawn(["bun", "--env-file=.env", "app/human.ts", "unlist", token], { env: spawnEnv, stdout: "inherit", stderr: "inherit" });
@@ -192,7 +192,7 @@ await moment("moment 4", async () => {
   );
   // Deliberately small amount: the agent can afford it, only its key's permission can refuse.
   await mustFail(`direct transfer of 0.01 NEAR to ${ATTACKER}`, "Access key requires full access", () => agent.transfer({ receiverId: ATTACKER, amount: nearToYocto("0.01") }), "protocol");
-  await mustFail(`request_check on USDC for a buy of 1 ETH`, "budget exceeded", () => call(agent, "request_check", { target: USDC, amount_wei: parseEther("1").toString() }));
+  await mustFail(`request_check on USDC for a buy of 1 ETH`, "amount above the owner's per-buy limit", () => call(agent, "request_check", { target: USDC, amount_wei: parseEther("1").toString() }));
   const id = await requestCheck(USDC, WEI);
   const check = await waitVerdict(id);
   console.log(`  [agent] verdict #${id} on a buy of ${formatEther(WEI)} ETH of USDC: ${check?.verdict}; it now tries to spend it on its own terms`);

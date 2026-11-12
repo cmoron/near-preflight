@@ -1,6 +1,6 @@
 'use strict';
 // Guard account to read. Override with ?guard=<account id>.
-const DEFAULT_GUARD = 'guard.goblin-guard-54109.testnet';
+const DEFAULT_GUARD = 'guard.goblin-guard-17060.testnet';
 const RPCS = ['https://test.rpc.fastnear.com', 'https://rpc.testnet.near.org'];
 const LAST_N = 20, REFRESH_MS = 15000, BATCH = 5, PAGE = 50;
 
@@ -110,6 +110,7 @@ async function renderBounds() {
   add('Max budget per arming', near(b.max_budget));
   add('Max arming duration', b.max_duration_s + ' s');
   add('Max armed over 7 days', near(b.max_7d));
+  add('Max per buy', eth(b.max_buy_wei));
   add('EVM address NEAR signs for', mono(e.address, e.address));
   add('Withdrawal address (owner)', mono(e.withdraw_to, e.withdraw_to));
   add('Slippage bound under quote', (e.max_slippage_bps / 100) + ' % (' + e.max_slippage_bps + ' bps)');

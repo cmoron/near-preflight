@@ -9,7 +9,7 @@ import { keccak256, toHex, getAddress, type Hex } from "viem";
 export const MPC_CONTRACT = "v1.signer-prod.testnet";
 /** Guard derivation path, fixed by the contract (DERIVATION_PATH in src/lib.rs). */
 export const GUARD_PATH = "evm-1";
-const RPC = "https://rpc.testnet.near.org";
+const RPC = process.env.NEAR_RPC ?? "https://test.rpc.fastnear.com";
 
 // Master key "secp256k1:<base58 of x||y>" -> 64 bytes
 export function parseNearSecpKey(s: string): Uint8Array {

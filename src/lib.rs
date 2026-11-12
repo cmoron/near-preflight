@@ -38,6 +38,9 @@ const SIGN_GAS: Gas = Gas::from_tgas(15);
 const CALLBACK_GAS: Gas = Gas::from_tgas(10);
 /// At most this much of the `sign` response is read (about 200 bytes expected).
 const MAX_SIGN_RESPONSE: usize = 1024;
+/// The owner may release a signature slot whose callback never ran this long after the request:
+/// longer than the MPC's own timeout (its yield expires after 200 blocks).
+const RELEASE_DELAY_NS: u64 = 600 * 1_000_000_000;
 
 #[near(serializers = [borsh])]
 #[derive(Clone, Copy)]
@@ -64,6 +67,9 @@ pub struct Bounds {
     pub max_duration_s: u64,
     /// Sum of the budgets armed for an agent over a rolling 7 days.
     pub max_7d: U128,
+    /// Largest buy, in wei, an agent may state at `request_check` and buy: the model's tool call states
+    /// the amount, so the armed budget alone would bound it only in total.
+    pub max_buy_wei: U128,
 }
 
 /// A verdict request: the EVM target, the sentinel's verdict and its reasons.
@@ -185,15 +191,15 @@ pub struct Exit {
     pub signed_txs: Vec<Base64VecU8>,
 }
 
-/// An agent's exit, charged like a buy: `per_tx` yoctoNEAR per transaction (gas at the cap, at the
-/// fixed rate) in escrow until the callback, which keeps what was signed and refunds the rest.
+/// An agent's exit, charged to its credit alone (a sale never needs buying budget): `per_tx`
+/// yoctoNEAR per transaction (gas at the cap, at the fixed rate) in escrow until the callback, which
+/// keeps what was signed and reserves the rest.
 #[near(serializers = [borsh])]
 struct Charge {
     agent: AccountId,
     /// The exit quote used, settled once a transaction is signed.
     check: u64,
     per_tx: u128,
-    armed_until_ns: u64,
 }
 
 /// A transaction whose signature did not come back. The MPC may still publish it (its `respond` after
@@ -208,10 +214,14 @@ pub struct Unsettled {
     pub check: Option<u64>,
     /// yoctoNEAR debited from the agent and held in escrow (0 for the owner's exits).
     pub cost: U128,
-    /// Deadline of the debited arming: a refund tops up only that arming.
+    /// Deadline of the debited arming: a refund tops up only that arming (0 for a sale, which debits
+    /// no budget).
     pub armed_until_ns: U64,
     /// An agent exit's swap: the tokens it would sell, back to the agent's holding on a refund.
     pub restore: Option<(String, U128)>,
+    /// True once the owner's replacement at this nonce was signed (`sign_replacement`): only then can
+    /// the charge be refunded, since the replacement is what keeps a late signature from being mined.
+    pub replaced: bool,
 }
 
 /// What the single signature slot is waiting for.
@@ -337,6 +347,11 @@ pub struct Guard {
     /// Transactions whose signature did not come back, by nonce, until the owner settles them. A buy's
     /// entry takes the place of the signed transaction it did not get, within its check's price.
     unsettled: LookupMap<u64, Unsettled>,
+    /// Per agent, the block time of the owner's last stop (`disarm`): a check requested until then never
+    /// buys or sells, even after `unfreeze` and a new arming within its verdict's 120 s.
+    stopped: LookupMap<AccountId, u64>,
+    /// Block time at which the job in `signing` was requested; its callback must name it.
+    signing_since_ns: u64,
 }
 
 /// Strict EVM address: `0x` + 40 hexadecimal digits (42 characters, not one more).
@@ -423,6 +438,9 @@ fn approve_word(s: &str) -> Option<[u8; 32]> {
 fn deadline_of(c: &Check) -> u64 {
     c.requested_ns.0 / 1_000_000_000 + SWAP_DEADLINE_S
 }
+
+/// Refusal of `buy` and `sell_quoted` on a check requested before the owner's last stop of its agent.
+const STOPPED: &str = "check requested before the owner's stop: request a new check";
 
 /// Refusal of `buy` and `sell_quoted` when the transactions differ from the simulated ones.
 const SIMULATED_ONLY: &str = "transaction differs from the one simulated (nonce, gas or fees changed since the verdict): request a new check";
@@ -525,6 +543,8 @@ impl Guard {
             holdings: LookupMap::new(b"h"),
             decisions: LookupMap::new(b"d"),
             unsettled: LookupMap::new(b"u"),
+            stopped: LookupMap::new(b"t"),
+            signing_since_ns: 0,
         }
     }
 
@@ -550,14 +570,21 @@ impl Guard {
             .insert(who, previous.unwrap_or(0) + amount - storage_cost);
     }
 
-    /// Owner only: bounds of every future arming. An already armed budget is not
-    /// reduced: for that, `disarm`.
-    pub fn set_bounds(&mut self, max_budget: U128, max_duration_s: u64, max_7d: U128) {
+    /// Owner only: bounds of every future arming, and the largest buy (`max_buy_wei`, applied to every
+    /// check and buy from now on). An already armed budget is not reduced: for that, `disarm`.
+    pub fn set_bounds(
+        &mut self,
+        max_budget: U128,
+        max_duration_s: u64,
+        max_7d: U128,
+        max_buy_wei: U128,
+    ) {
         self.assert_owner();
         self.bounds = Bounds {
             max_budget,
             max_duration_s,
             max_7d,
+            max_buy_wei,
         };
     }
 
@@ -698,6 +725,7 @@ impl Guard {
         );
         if by == self.owner {
             emit("frozen", &near_sdk::serde_json::json!({ "agent": agent }));
+            self.stopped.insert(agent.clone(), env::block_timestamp());
             self.frozen.insert(agent);
         }
     }
@@ -723,6 +751,10 @@ impl Guard {
             "target is on the shared blocklist"
         );
         require!(amount_wei.0 > 0, "zero amount");
+        require!(
+            amount_wei.0 <= self.bounds.max_buy_wei.0,
+            "amount above the owner's per-buy limit"
+        );
         let cost = self.cost(amount_wei.0, 1);
         let id = self.new_check(&target, None, amount_wei, decision.as_deref());
         self.anchor(decision.as_deref(), id);
@@ -734,8 +766,9 @@ impl Guard {
     }
 
     /// Exit quote for an agent: asks the sentinel what selling `amount` of the token bought by the
-    /// agent's signed check `buy_id` yields (ETH, in wei). Priced like a check. Only a token the guard
-    /// bought for this agent; a listed or changed token may still be quoted: the exit is never blocked.
+    /// agent's signed check `buy_id` yields (ETH, in wei). Priced like a check, from the credit alone: a
+    /// sale never needs buying budget. Only a token the guard bought for this agent; a listed or changed
+    /// token may still be quoted: the exit is never blocked.
     pub fn request_exit(&mut self, buy_id: u64, amount: U128) -> u64 {
         let who = env::predecessor_account_id();
         require!(
@@ -790,7 +823,11 @@ impl Guard {
         decision: Option<&str>,
     ) -> u64 {
         let who = env::predecessor_account_id();
-        self.debit(&who, self.price);
+        if exit_amount.is_some() {
+            self.debit_credit(&who, self.price); // a sale never needs buying budget
+        } else {
+            self.debit(&who, self.price);
+        }
         self.escrow += self.price;
         self.next_id += 1;
         self.checks.insert(
@@ -990,6 +1027,11 @@ impl Guard {
             amount_wei == check.amount_wei,
             "amount is not the one checked"
         );
+        require!(
+            amount_wei.0 <= self.bounds.max_buy_wei.0,
+            "amount above the owner's per-buy limit"
+        );
+        require!(self.requested_since_stop(check), STOPPED);
         let target = check.target.clone();
         require!(
             self.holdings
@@ -1033,11 +1075,12 @@ impl Guard {
             check.buy_decision_sha256 = decision;
         }
         self.signing = Some(Job::Buy(pending));
+        self.signing_since_ns = env::block_timestamp();
         self.sign_all(
             &[tx],
             Self::ext(env::current_account_id())
                 .with_static_gas(CALLBACK_GAS)
-                .on_signed(),
+                .on_signed(self.signing_since_ns),
         )
     }
 
@@ -1082,8 +1125,8 @@ impl Guard {
     /// An agent's exit on the sentinel's exit quote `id` (`request_exit`), within 120 s of it, once:
     /// the floor is the quoted ETH out minus the owner's slippage bound, never the agent's choice. The
     /// guard signs only the approve and swap the sentinel simulated (`tx_hashes`). Two transactions at
-    /// the gas cap are charged to the armed budget and credit, like a buy; never refused because the
-    /// token was listed or its code changed.
+    /// the gas cap are charged to the credit alone (a sale never needs buying budget); never refused
+    /// because the token was listed or its code changed, nor because the budget is spent or expired.
     pub fn sell_quoted(&mut self, id: u64) -> Promise {
         require!(self.signing.is_none(), "a signature is already in progress");
         let who = env::predecessor_account_id();
@@ -1107,6 +1150,7 @@ impl Guard {
             env::block_timestamp() < check.judged_ns.0.saturating_add(VERDICT_TTL_NS),
             "verdict expired"
         );
+        require!(self.requested_since_stop(check), STOPPED);
         let token = check.target.clone();
         self.require_holding(&who, &token, amount.0);
         let exit = self.agent_exit(check, amount, check.quote.0);
@@ -1118,7 +1162,7 @@ impl Guard {
         require!(self.previewed(check), SIMULATED_ONLY);
         let per_tx = self.cost(0, 1);
         let cost = self.cost(0, 2);
-        self.debit(&who, cost);
+        self.debit_credit(&who, cost); // a sale never needs buying budget
         self.escrow += cost;
         // Reserve the tokens until the exit is signed (restored in `on_exit_signed` otherwise).
         self.set_held(&who, &token, self.held(&who, &token) - amount.0);
@@ -1126,7 +1170,6 @@ impl Guard {
             agent: who.clone(),
             check: id,
             per_tx,
-            armed_until_ns: self.budgets.get(&who).map_or(0, |b| b.expires_ns),
         };
         self.start_exit(exit, Some(charge))
     }
@@ -1164,11 +1207,12 @@ impl Guard {
             }),
         );
         self.signing = Some(Job::Exit(exit, charge));
+        self.signing_since_ns = env::block_timestamp();
         self.sign_all(
             &txs,
             Self::ext(env::current_account_id())
                 .with_static_gas(CALLBACK_GAS)
-                .on_exit_signed(),
+                .on_exit_signed(self.signing_since_ns),
         )
     }
 
@@ -1193,27 +1237,43 @@ impl Guard {
         all.then(callback)
     }
 
-    /// Callback of an exit's `sign` calls: keeps the signed transactions up to the first missing
-    /// signature (a swap without its approve is dropped) and stores them as `last_exit`. Every nonce of
-    /// the exit stays used: a missing signature may still be published, so its transaction is reserved
-    /// (`unsettled`), with its share of the charge and, for an agent's swap, the tokens it sells. A
-    /// replacement (a nonce already used, `sign_replacement`) reserves nothing. Never panics after
-    /// taking the job.
+    /// Callback of an exit's `sign` calls, for the job requested at `since_ns`: keeps the signatures
+    /// up to the first missing one (`finish_exit`). Never panics after taking the job.
     #[private]
-    pub fn on_exit_signed(&mut self) -> Vec<String> {
-        let Some(Job::Exit(mut exit, charge)) = self.signing.take() else {
+    pub fn on_exit_signed(&mut self, since_ns: u64) -> Vec<String> {
+        self.require_job(since_ns);
+        let Some(Job::Exit(exit, charge)) = self.signing.take() else {
             env::panic_str("no exit signature in progress")
         };
-        let replacement = exit.nonce < self.evm_nonce;
-        let txs = self.exit_txs(&exit);
-        let mut signed = vec![];
-        for (i, tx) in (0u64..).zip(txs.iter()) {
+        let mut signatures = vec![];
+        for i in 0..self.exit_txs(&exit).len() as u64 {
             let signature = env::promise_result_checked(i, MAX_SIGN_RESPONSE)
                 .ok()
                 .and_then(|bytes| parse_signature(&bytes));
             let Some(signature) = signature else { break };
-            signed.push(tx.build_with_signature(&signature));
+            signatures.push(signature);
         }
+        self.finish_exit(exit, charge.as_ref(), &signatures)
+    }
+
+    /// Settles an exit with its first `signatures` (a swap without its approve is dropped) and stores
+    /// the signed transactions as `last_exit`. Every nonce of the exit stays used: a missing signature
+    /// may still be published, so its transaction is reserved (`unsettled`), with its share of the
+    /// charge and, for an agent's swap, the tokens it sells. A replacement (a nonce already used,
+    /// `sign_replacement`) reserves nothing; once signed, it is recorded on the entry it replaces.
+    fn finish_exit(
+        &mut self,
+        mut exit: Exit,
+        charge: Option<&Charge>,
+        signatures: &[Signature],
+    ) -> Vec<String> {
+        let replacement = exit.nonce < self.evm_nonce;
+        let txs = self.exit_txs(&exit);
+        let signed: Vec<Vec<u8>> = txs
+            .iter()
+            .zip(signatures)
+            .map(|(tx, signature)| tx.build_with_signature(signature))
+            .collect();
         let hexes: Vec<String> = signed.iter().map(|raw| format!("0x{}", hex(raw))).collect();
         emit(
             "exit_signed",
@@ -1222,9 +1282,13 @@ impl Guard {
             }),
         );
         let done = signed.len();
-        if !replacement {
+        if replacement {
+            if let Some(u) = self.unsettled.get_mut(&exit.nonce).filter(|_| done > 0) {
+                u.replaced = true;
+            }
+        } else {
             self.evm_nonce = exit.nonce + txs.len() as u64;
-            let per_tx = charge.as_ref().map_or(0, |c| c.per_tx);
+            let per_tx = charge.map_or(0, |c| c.per_tx);
             self.escrow -= per_tx * done as u128;
             self.fees += per_tx * done as u128;
             for i in done..txs.len() {
@@ -1237,16 +1301,17 @@ impl Guard {
                 self.reserve(
                     exit.nonce + i as u64,
                     Unsettled {
-                        agent: charge.as_ref().map(|c| c.agent.clone()),
-                        check: charge.as_ref().map(|c| c.check),
+                        agent: charge.map(|c| c.agent.clone()),
+                        check: charge.map(|c| c.check),
                         cost: U128(per_tx),
-                        armed_until_ns: U64(charge.as_ref().map_or(0, |c| c.armed_until_ns)),
+                        armed_until_ns: U64(0), // a sale debits no budget
                         restore,
+                        replaced: false,
                     },
                 );
             }
             // The quote served: its transactions are signed or reserved.
-            if let Some(check) = charge.as_ref().and_then(|c| self.checks.get_mut(&c.check)) {
+            if let Some(check) = charge.and_then(|c| self.checks.get_mut(&c.check)) {
                 check.settled = true;
             }
         }
@@ -1255,6 +1320,41 @@ impl Guard {
             self.last_exit = Some(exit);
         }
         hexes
+    }
+
+    /// Panics unless `since_ns` names the job in progress: a callback that arrives after the owner
+    /// released its job (`release_signing`) never settles the next one.
+    fn require_job(&self, since_ns: u64) {
+        require!(
+            self.signing.is_some() && since_ns == self.signing_since_ns,
+            "no signature in progress for this callback"
+        );
+    }
+
+    /// Owner only: frees the signature slot when its callback never ran (out of gas, say), once
+    /// `RELEASE_DELAY_NS` has passed since the request, longer than the MPC's own timeout. What it was
+    /// signing is reserved as unsettled, as when no signature comes back: a late signature may still
+    /// be published, so the owner replaces it before any refund. Event `signing_released`.
+    pub fn release_signing(&mut self) {
+        self.assert_owner();
+        let since = self.signing_since_ns;
+        require!(
+            env::block_timestamp() >= since.saturating_add(RELEASE_DELAY_NS),
+            "signature requested less than 600 s ago"
+        );
+        match self.signing.take() {
+            Some(Job::Buy(p)) => {
+                self.finish_buy(&p, None);
+            }
+            Some(Job::Exit(exit, charge)) => {
+                self.finish_exit(exit, charge.as_ref(), &[]);
+            }
+            None => env::panic_str("no signature in progress"),
+        }
+        emit(
+            "signing_released",
+            &near_sdk::serde_json::json!({ "since_ns": U64(since) }),
+        );
     }
 
     /// Latest signed exit (sale or withdrawal), for the relay.
@@ -1325,15 +1425,21 @@ impl Guard {
     /// its hex. Without a readable signature nothing is stored, yet the MPC may still publish one (a
     /// response after the yield timed out): the buy is reserved at its nonce, never reused, its cost
     /// stays debited and its decision anchored until the owner settles it (`unsettled`). Does not panic
-    /// after taking back the pending buy: a failure here would keep the lock forever.
+    /// after taking back the pending buy: a failure here would keep the lock until `release_signing`.
     #[private]
-    pub fn on_signed(&mut self) -> Option<String> {
+    pub fn on_signed(&mut self, since_ns: u64) -> Option<String> {
+        self.require_job(since_ns);
         let Some(Job::Buy(p)) = self.signing.take() else {
             env::panic_str("no signature in progress")
         };
         let signature = env::promise_result_checked(0, MAX_SIGN_RESPONSE)
             .ok()
             .and_then(|bytes| parse_signature(&bytes));
+        self.finish_buy(&p, signature.as_ref())
+    }
+
+    /// Settles a buy with its signature, or reserves it at its nonce without one.
+    fn finish_buy(&mut self, p: &Pending, signature: Option<&Signature>) -> Option<String> {
         let Some(signature) = signature else {
             let nonce = self.evm_nonce;
             self.evm_nonce += 1;
@@ -1345,6 +1451,7 @@ impl Guard {
                     cost: U128(p.cost),
                     armed_until_ns: U64(p.armed_until_ns),
                     restore: None,
+                    replaced: false,
                 },
             );
             return None;
@@ -1352,7 +1459,7 @@ impl Guard {
         self.escrow -= p.cost;
         let raw = self
             .swap_tx(&p.target, p.value, p.min_out, p.deadline_s)
-            .build_with_signature(&signature);
+            .build_with_signature(signature);
         let tx = format!("0x{}", hex(&raw));
         emit(
             "signed",
@@ -1655,9 +1762,7 @@ impl Guard {
         };
         require!(env::block_timestamp() < budget.expires_ns, "budget expired");
         require!(amount <= budget.remaining, "budget exceeded");
-        let credit = self.credit_of(who).0;
-        require!(amount <= credit, "insufficient credit");
-        self.credits.insert(who.clone(), credit - amount);
+        self.debit_credit(who, amount);
         self.budgets.insert(
             who.clone(),
             Budget {
@@ -1665,6 +1770,20 @@ impl Guard {
                 ..budget
             },
         );
+    }
+
+    /// Debits `amount` from `who`'s credit alone: what an exit costs (a sale never needs buying budget).
+    fn debit_credit(&mut self, who: &AccountId, amount: u128) {
+        let credit = self.credit_of(who).0;
+        require!(amount <= credit, "insufficient credit");
+        self.credits.insert(who.clone(), credit - amount);
+    }
+
+    /// False if `c` was requested before (or in the same block as) the owner's last stop of its agent.
+    fn requested_since_stop(&self, c: &Check) -> bool {
+        self.stopped
+            .get(&c.agent)
+            .is_none_or(|&stop| c.requested_ns.0 > stop)
     }
 
     /// Owner only: allows or revokes `account` as a reporter to the shared blocklist.
@@ -1794,16 +1913,20 @@ impl Guard {
     }
 
     /// Owner only: settles the transaction reserved at `nonce`. `refund` once it can no longer be mined
-    /// (the owner's replacement at that nonce was mined first): the agent gets its charge back (its
-    /// budget too if it is the same arming), an exit's tokens return to its holding, a buy's decision
-    /// digest is freed. Otherwise its late signature was mined: the charge is spent. Event
-    /// `unsettled_cleared`.
+    /// (the owner's replacement at that nonce was mined first; refused until a replacement is signed):
+    /// the agent gets its charge back (its budget too if it is the same arming), an exit's tokens return
+    /// to its holding, a buy's decision digest is freed. Otherwise its late signature was mined: the
+    /// charge is spent. Event `unsettled_cleared`.
     pub fn clear_unsettled(&mut self, nonce: u64, refund: bool) {
         self.assert_owner();
         require!(self.signing.is_none(), "a signature is already in progress");
         let Some(u) = self.unsettled.remove(&nonce) else {
             env::panic_str("no unsettled transaction at this nonce")
         };
+        require!(
+            !refund || u.replaced,
+            "no replacement signed at this nonce: sign_replacement first"
+        );
         self.escrow -= u.cost.0;
         match (&u.agent, refund) {
             (Some(agent), true) => {
@@ -1836,16 +1959,17 @@ impl Guard {
         );
     }
 
-    /// Owner only: has NEAR sign 0 wei to `evm.withdraw_to` at `nonce`, a nonce already used. It fills
-    /// a reserved nonce whose signature never came back, so that later transactions can be mined, and
-    /// once mined it voids whatever else was signed at that nonce: a late MPC signature, or a
-    /// transaction that can never be mined (fees below the base fee: raise them first, `set_evm_gas`).
-    /// The relay broadcasts it like any exit (`last_exit`).
+    /// Owner only: has NEAR sign 0 wei to `evm.withdraw_to` at `nonce`, reserved because its signature
+    /// never came back (`unsettled`). It fills that nonce, so that later transactions can be mined, and
+    /// once mined it voids a late MPC signature (if the base fee is above the guard's fees, raise them
+    /// first, `set_evm_gas`). A transaction that was signed is never replaced: its agent was charged
+    /// for it. The relay broadcasts it like any exit (`last_exit`); once signed, it is recorded on the
+    /// reserved entry, which only then can be refunded.
     pub fn sign_replacement(&mut self, nonce: u64) -> Promise {
         self.assert_owner();
         require!(
-            nonce < self.evm_nonce,
-            "nonce not used yet: nothing to replace"
+            self.unsettled.contains_key(&nonce),
+            "no unsettled transaction at this nonce: nothing to replace"
         );
         let exit = Exit {
             by: self.owner.clone(),
@@ -1927,6 +2051,8 @@ mod tests {
     const WITHDRAW_TO: &str = "0x000000000000000000000000000000000000bEEF";
     /// Gas limit of every signed transaction (`evm()`), and the one the sentinel simulates with.
     const GAS: u64 = 250_000;
+    /// A per-buy bound that never binds, for tests about something else.
+    const NO_BUY_LIMIT: U128 = U128(u128::MAX);
 
     fn id(s: &str) -> AccountId {
         s.parse().unwrap()
@@ -1996,7 +2122,7 @@ mod tests {
     fn credited(credit: u128, max_budget: u128, max_duration_s: u64, max_7d: u128) -> Guard {
         let mut g = guard();
         ctx("owner.test", 0, 0);
-        g.set_bounds(U128(max_budget), max_duration_s, U128(max_7d));
+        g.set_bounds(U128(max_budget), max_duration_s, U128(max_7d), NO_BUY_LIMIT);
         g.register_agent(id("agent.test"));
         ctx("owner.test", credit, 0);
         g.deposit_credit(Some(id("agent.test")));
@@ -2072,9 +2198,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "budget not armed")]
     fn spend_refused_without_an_armed_budget() {
-        let mut g = guard();
-        ctx("agent.test", ONE_NEAR, 0);
-        g.deposit_credit(None);
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 1000 * U); // bounds set, nothing armed
+        ctx("agent.test", 0, 0);
         g.request_check(TARGET.into(), U128(VALUE), None);
     }
 
@@ -2092,16 +2217,50 @@ mod tests {
         let mut g = guard();
         let b = g.bounds();
         assert_eq!(
-            (b.max_budget, b.max_duration_s, b.max_7d),
-            (U128(0), 0, U128(0))
+            (b.max_budget, b.max_duration_s, b.max_7d, b.max_buy_wei),
+            (U128(0), 0, U128(0), U128(0))
         );
         ctx("owner.test", 0, 0);
-        g.set_bounds(U128(50 * U), 60, U128(200 * U));
+        g.set_bounds(U128(50 * U), 60, U128(200 * U), U128(VALUE));
         let b = g.bounds();
         assert_eq!(
-            (b.max_budget, b.max_duration_s, b.max_7d),
-            (U128(50 * U), 60, U128(200 * U))
+            (b.max_budget, b.max_duration_s, b.max_7d, b.max_buy_wei),
+            (U128(50 * U), 60, U128(200 * U), U128(VALUE))
         );
+    }
+
+    // The model's tool call states the buy's amount: the owner caps each buy on chain, not only the
+    // armed budget.
+    fn limited_to(max_buy_wei: u128) -> Guard {
+        let mut g = funded(ONE_NEAR, 100 * U, 1000);
+        ctx("owner.test", 0, 0);
+        g.set_bounds(U128(100 * U), 1000, U128(1000 * U), U128(max_buy_wei));
+        g
+    }
+
+    #[test]
+    fn a_check_at_the_per_buy_limit_is_accepted() {
+        let mut g = limited_to(VALUE);
+        ctx("agent.test", 0, 500);
+        g.request_check(TARGET.into(), U128(VALUE), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount above the owner's per-buy limit")]
+    fn a_check_above_the_per_buy_limit_is_refused() {
+        let mut g = limited_to(VALUE);
+        ctx("agent.test", 0, 500);
+        g.request_check(TARGET.into(), U128(VALUE + 1), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount above the owner's per-buy limit")]
+    fn a_buy_above_a_limit_lowered_after_its_check_is_refused() {
+        let (mut g, check) = judged(Verdict::Allow);
+        ctx("owner.test", 0, 650);
+        g.set_bounds(U128(100 * U), 1000, U128(1000 * U), U128(VALUE - 1));
+        ctx("agent.test", 0, 700);
+        buy(&mut g, check);
     }
 
     #[test]
@@ -2109,7 +2268,7 @@ mod tests {
     fn the_armer_does_not_set_the_bounds() {
         let mut g = guard();
         ctx("armer.test", 0, 0);
-        g.set_bounds(U128(ONE_NEAR), 1000, U128(ONE_NEAR));
+        g.set_bounds(U128(ONE_NEAR), 1000, U128(ONE_NEAR), NO_BUY_LIMIT);
     }
 
     #[test]
@@ -2186,7 +2345,7 @@ mod tests {
     fn arming_refused_for_an_agent_never_credited() {
         let mut g = guard();
         ctx("owner.test", 0, 0);
-        g.set_bounds(U128(50 * U), 60, U128(1000 * U));
+        g.set_bounds(U128(50 * U), 60, U128(1000 * U), NO_BUY_LIMIT);
         g.register_agent(id("agent.test"));
         arm_at(&mut g, 50 * U, 60, 0);
     }
@@ -2298,7 +2457,7 @@ mod tests {
             evm(),
         );
         ctx("owner.test", 0, 0);
-        g.set_bounds(U128(50 * U), 60, U128(100 * U));
+        g.set_bounds(U128(50 * U), 60, U128(100 * U), NO_BUY_LIMIT);
         g.register_agent(id("agent.test"));
         ctx("owner.test", ONE_NEAR, 0);
         g.deposit_credit(Some(id("agent.test")));
@@ -2718,8 +2877,8 @@ mod tests {
         .into_bytes()
     }
 
-    /// The guard's callback receives `result`, the result of `sign`.
-    fn signed(g: &mut Guard, result: PromiseResult) -> Option<String> {
+    /// A callback's context: the guard calls itself with the `sign` results.
+    fn callback_env(results: Vec<PromiseResult>) {
         testing_env!(
             VMContextBuilder::new()
                 .current_account_id(id("guard.test"))
@@ -2729,9 +2888,15 @@ mod tests {
             near_sdk::test_vm_config(),
             near_sdk::RuntimeFeesConfig::test(),
             std::collections::HashMap::default(),
-            vec![result],
+            results,
         );
-        g.on_signed()
+    }
+
+    /// The guard's callback receives `result`, the result of `sign`.
+    fn signed(g: &mut Guard, result: PromiseResult) -> Option<String> {
+        callback_env(vec![result]);
+        let since = g.signing_since_ns;
+        g.on_signed(since)
     }
 
     /// Arguments of the `sign` call created by `buy` (1 yoctoNEAR to the MPC), followed by the callback.
@@ -2844,7 +3009,7 @@ mod tests {
         ctx("owner.test", 0, 750);
         g.disarm(id("agent.test"));
         signed(&mut g, PromiseResult::Failed);
-        ctx("owner.test", 0, 900);
+        replaced(&mut g, 0, 900);
         g.clear_unsettled(0, true);
         assert_eq!(g.budget_left(&id("agent.test")).0, 0);
     }
@@ -3320,7 +3485,7 @@ mod tests {
     fn the_armer_does_not_arm_an_unregistered_account() {
         let mut g = guard();
         ctx("owner.test", 0, 0);
-        g.set_bounds(U128(50 * U), 60, U128(100 * U));
+        g.set_bounds(U128(50 * U), 60, U128(100 * U), NO_BUY_LIMIT);
         ctx("intruder.test", ONE_NEAR, 0); // credit deposited by the account itself
         g.deposit_credit(None);
         ctx("armer.test", 0, 0);
@@ -3526,7 +3691,7 @@ mod tests {
             evm(),
         );
         ctx("owner.test", 0, 0);
-        g.set_bounds(U128(100 * U), 1000, U128(1000 * U));
+        g.set_bounds(U128(100 * U), 1000, U128(1000 * U), NO_BUY_LIMIT);
         g.register_agent(big.clone());
         ctx("owner.test", ONE_NEAR, 0);
         g.deposit_credit(Some(big.clone()));
@@ -3772,18 +3937,9 @@ mod tests {
     }
 
     fn exit_signed(g: &mut Guard, results: Vec<PromiseResult>) -> Vec<String> {
-        testing_env!(
-            VMContextBuilder::new()
-                .current_account_id(id("guard.test"))
-                .predecessor_account_id(id("guard.test"))
-                .block_timestamp(800)
-                .build(),
-            near_sdk::test_vm_config(),
-            near_sdk::RuntimeFeesConfig::test(),
-            std::collections::HashMap::default(),
-            results,
-        );
-        g.on_exit_signed()
+        callback_env(results);
+        let since = g.signing_since_ns;
+        g.on_exit_signed(since)
     }
 
     #[test]
@@ -4256,7 +4412,7 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_exit_is_charged_to_its_budget_and_credit_like_a_buy() {
+    fn an_agent_exit_is_charged_to_its_credit_never_to_its_budget() {
         let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
         let (credit, budget, fees) = (
             g.credit_of(&id("agent.test")).0,
@@ -4265,7 +4421,7 @@ mod tests {
         );
         sell_quoted_at(&mut g, exit, 1100);
         assert_eq!(g.credit_of(&id("agent.test")).0, credit - EXIT_COST);
-        assert_eq!(g.budget_left(&id("agent.test")).0, budget - EXIT_COST);
+        assert_eq!(g.budget_left(&id("agent.test")).0, budget);
         exit_signed(&mut g, vec![ok_sig(SIG_A), ok_sig(SIG_B)]);
         assert_eq!(g.fees().0, fees + EXIT_COST);
         assert!(g.get_check(exit).unwrap().settled);
@@ -4601,7 +4757,7 @@ mod tests {
         assert_eq!(holding_of(&g, "agent.test"), 0);
         exit_signed(&mut g, vec![ok_sig(SIG_A), PromiseResult::Failed]); // the swap is not signed
         assert_eq!(holding_of(&g, "agent.test"), 0); // its signature may still be published
-        ctx("owner.test", 0, 1200);
+        replaced(&mut g, 2, 1200);
         g.clear_unsettled(2, true);
         assert_eq!(holding_of(&g, "agent.test"), MIN_OUT);
     }
@@ -4615,7 +4771,7 @@ mod tests {
         let exit = exit_quote(&mut g, "agent.test", bought, MIN_OUT, 1000);
         sell_quoted_at(&mut g, exit, 1100);
         exit_signed(&mut g, vec![PromiseResult::Failed, PromiseResult::Failed]);
-        ctx("owner.test", 0, 1200);
+        replaced(&mut g, 2, 1200);
         g.set_holding(TARGET.into(), id("agentb.test"), U128(5)); // the token went to another agent
         g.clear_unsettled(2, true);
     }
@@ -5008,6 +5164,14 @@ mod tests {
     /// viem 2.57: 0 wei to `WITHDRAW_TO` at nonce 0, unsigned: the owner's replacement of nonce 0.
     const REPLACE0_HASH: &str = "5e976a8b891cb75214771ef2f4bfe5ffdae48108d6a5963befe2ddac772411d5";
 
+    /// The owner signs a replacement at the reserved `nonce` at `now_ns`, and its signature comes back.
+    fn replaced(g: &mut Guard, nonce: u64, now_ns: u64) {
+        ctx("owner.test", 0, now_ns);
+        let _ = g.sign_replacement(nonce);
+        assert_eq!(exit_signed(g, vec![ok_sig(SIG_A)]).len(), 1);
+        ctx("owner.test", 0, now_ns);
+    }
+
     /// A buy of `judged` whose signature failed: nonce 0 reserved.
     fn failed_buy() -> (Guard, u64) {
         let (mut g, check) = judged(Verdict::Allow);
@@ -5047,7 +5211,7 @@ mod tests {
     fn the_owner_refunds_an_unsettled_buy_once_its_nonce_is_replaced() {
         let (mut g, check) = failed_buy();
         let credit = g.credit_of(&id("agent.test")).0;
-        ctx("owner.test", 0, 900);
+        replaced(&mut g, 0, 900);
         g.clear_unsettled(0, true);
         assert_eq!(g.credit_of(&id("agent.test")).0, credit + COST);
         assert_eq!(g.budget_left(&id("agent.test")).0, 100 * U - PRICE);
@@ -5074,7 +5238,7 @@ mod tests {
     fn a_refund_goes_to_the_debited_arming_only() {
         let (mut g, _) = failed_buy();
         arm_at(&mut g, 30 * U, 1000, 850);
-        ctx("owner.test", 0, 900);
+        replaced(&mut g, 0, 900);
         g.clear_unsettled(0, true);
         assert_eq!(g.budget_left(&id("agent.test")).0, 30 * U); // the re-arming is not topped up
     }
@@ -5092,8 +5256,8 @@ mod tests {
     fn clearing_a_nonce_with_nothing_unsettled_is_refused() {
         let (mut g, _) = failed_buy();
         ctx("owner.test", 0, 900);
-        g.clear_unsettled(0, true);
-        g.clear_unsettled(0, true);
+        g.clear_unsettled(0, false);
+        g.clear_unsettled(0, false);
     }
 
     #[test]
@@ -5115,9 +5279,11 @@ mod tests {
             )
         );
         assert!(g.get_check(exit).unwrap().settled);
-        ctx("owner.test", 0, 1200);
+        let budget = g.budget_left(&id("agent.test")).0;
+        replaced(&mut g, 2, 1200);
         g.clear_unsettled(2, true);
         assert_eq!(g.credit_of(&id("agent.test")).0, credit - EXIT_COST / 2);
+        assert_eq!(g.budget_left(&id("agent.test")).0, budget); // a sale never touched it
         assert_eq!(holding_of(&g, "agent.test"), held);
     }
 
@@ -5149,7 +5315,7 @@ mod tests {
         assert_eq!(exit_signed(&mut g, vec![ok_sig(SIG_A)]).len(), 1);
         assert_eq!(g.evm_nonce, 1); // nothing new reserved
         assert_eq!(g.last_exit().unwrap().nonce, 0);
-        assert!(g.get_unsettled(0).is_some()); // settling stays the owner's call, once it is mined
+        assert!(g.get_unsettled(0).unwrap().replaced); // settling stays the owner's call, once it is mined
     }
 
     #[test]
@@ -5159,12 +5325,12 @@ mod tests {
         let _ = g.sign_replacement(0);
         assert!(exit_signed(&mut g, vec![PromiseResult::Failed]).is_empty());
         assert_eq!(g.evm_nonce, 1);
-        assert!(g.get_unsettled(0).is_some()); // the buy's entry, still the only one
+        assert!(!g.get_unsettled(0).unwrap().replaced); // the buy's entry, still the only one
     }
 
     #[test]
-    #[should_panic(expected = "nonce not used yet")]
-    fn a_replacement_is_for_a_nonce_already_used() {
+    #[should_panic(expected = "no unsettled transaction at this nonce")]
+    fn a_replacement_is_for_a_reserved_nonce_only() {
         let (mut g, _) = failed_buy();
         ctx("owner.test", 0, 900);
         let _ = g.sign_replacement(1);
@@ -5205,6 +5371,7 @@ mod tests {
                         cost: U128(u128::MAX),
                         armed_until_ns: U64(u64::MAX),
                         restore: Some((TARGET.into(), U128(u128::MAX))),
+                        replaced: true,
                     },
                 );
             }
@@ -5240,5 +5407,307 @@ mod tests {
         ctx("owner.test", 0, 900);
         let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN), None);
         assert_eq!(last_event()["data"][0]["nonce"], 1); // approve at 1, swap at 2: mined after the buy
+    }
+
+    // 20. State-machine scenarios: owner functions, concurrent requests, a stop during a check or a signature.
+    fn allow_at(g: &mut Guard, check: u64, now_ns: u64) {
+        ctx("sentinel.test", 0, now_ns);
+        let hashes = previewed(g, check, QUOTE);
+        g.post_verdict(
+            check,
+            Verdict::Allow,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+            code("aa"),
+            true,
+            hashes,
+        );
+    }
+
+    // two checks both fit the budget at request time; only one buy does
+    #[test]
+    #[should_panic(expected = "budget exceeded")]
+    fn two_checks_fit_the_budget_at_request_time_only_one_buy_does() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 1000 * U);
+        arm_at(&mut g, 2 * PRICE + COST + COST / 2, 1000, 0);
+        ctx("agent.test", 0, 500);
+        let a = g.request_check(TARGET.into(), U128(VALUE), None);
+        let b = g.request_check(TARGET.into(), U128(VALUE), None);
+        allow_at(&mut g, a, 600);
+        ctx("agent.test", 0, 700);
+        buy(&mut g, a);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        allow_at(&mut g, b, 801); // previewed at nonce 1
+        ctx("agent.test", 0, 802);
+        buy(&mut g, b);
+    }
+
+    // owner stop while a check waits for its verdict
+    #[test]
+    #[should_panic(expected = "check requested before the owner's stop")]
+    fn a_stop_while_a_check_waits_for_its_verdict_refuses_its_buy() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1);
+        ctx("agent.test", 0, 500);
+        let c = g.request_check(TARGET.into(), U128(VALUE), None);
+        ctx("owner.test", 0, 550);
+        g.disarm(id("agent.test"));
+        allow_at(&mut g, c, 600);
+        ctx("agent.test", 0, 700);
+        buy(&mut g, c);
+    }
+
+    // stop, unfreeze and re-arm within the verdict's 120 s: a verdict on a check requested before the
+    // stop is void, a check requested after it buys
+    fn stopped_and_rearmed() -> (Guard, u64) {
+        let mut g = funded(ONE_NEAR, 100 * U, 1);
+        ctx("agent.test", 0, 500);
+        let c = g.request_check(TARGET.into(), U128(VALUE), None);
+        allow_at(&mut g, c, 600);
+        ctx("owner.test", 0, 610);
+        g.disarm(id("agent.test"));
+        ctx("owner.test", 0, 620);
+        g.unfreeze(id("agent.test"));
+        arm_at(&mut g, 50 * U, 1, 630);
+        (g, c)
+    }
+
+    #[test]
+    #[should_panic(expected = "check requested before the owner's stop")]
+    fn a_verdict_from_before_a_stop_never_buys_after_unfreeze_and_rearm() {
+        let (mut g, c) = stopped_and_rearmed();
+        ctx("agent.test", 0, 700);
+        buy(&mut g, c);
+    }
+
+    #[test]
+    fn a_check_requested_after_the_stop_buys() {
+        let (mut g, _) = stopped_and_rearmed();
+        ctx("agent.test", 0, 640);
+        let c = g.request_check(TARGET.into(), U128(VALUE), None);
+        allow_at(&mut g, c, 650);
+        ctx("agent.test", 0, 700);
+        buy(&mut g, c);
+        assert!(g.signing.is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "check requested before the owner's stop")]
+    fn an_exit_quote_from_before_a_stop_never_sells_after_unfreeze() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        ctx("owner.test", 0, 1050);
+        g.disarm(id("agent.test"));
+        ctx("owner.test", 0, 1060);
+        g.unfreeze(id("agent.test"));
+        sell_quoted_at(&mut g, exit, 1100);
+    }
+
+    // stop while an agent's exit is being signed: the exit completes
+    #[test]
+    fn a_stop_during_an_exit_signature_does_not_recall_it() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        sell_quoted_at(&mut g, exit, 1100);
+        ctx("owner.test", 0, 1150);
+        g.disarm(id("agent.test"));
+        assert_eq!(
+            exit_signed(&mut g, vec![ok_sig(SIG_A), ok_sig(SIG_A)]).len(),
+            2
+        );
+        assert_eq!(holding_of(&g, "agent.test"), 0);
+        assert_eq!(g.evm_nonce, 3);
+    }
+
+    // a buy that was signed is charged and credited: voiding it would leave the agent paying for nothing
+    #[test]
+    #[should_panic(expected = "no unsettled transaction at this nonce")]
+    fn a_signed_buys_nonce_cannot_be_replaced() {
+        let (mut g, check) = judged(Verdict::Allow);
+        buy(&mut g, check);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        ctx("owner.test", 0, 900);
+        let _ = g.sign_replacement(0);
+    }
+
+    // a refund before any replacement is signed would let the late signature be mined after it
+    #[test]
+    #[should_panic(expected = "no replacement signed at this nonce")]
+    fn no_refund_before_a_replacement_is_signed() {
+        let (mut g, _) = failed_buy();
+        ctx("owner.test", 0, 900);
+        g.clear_unsettled(0, true);
+    }
+
+    // no settlement while the replacement is being signed
+    #[test]
+    #[should_panic(expected = "a signature is already in progress")]
+    fn no_clear_while_the_replacement_is_being_signed() {
+        let (mut g, _) = failed_buy();
+        ctx("owner.test", 0, 900);
+        let _ = g.sign_replacement(0);
+        g.clear_unsettled(0, true);
+    }
+
+    // no replacement while a buy is being signed
+    #[test]
+    #[should_panic(expected = "a signature is already in progress")]
+    fn no_replacement_while_a_buy_is_being_signed() {
+        let (mut g, _) = failed_buy();
+        ctx("agent.test", 0, 900);
+        let c = g.request_check(TARGET.into(), U128(VALUE), None);
+        allow_at(&mut g, c, 901);
+        ctx("agent.test", 0, 902);
+        buy(&mut g, c);
+        ctx("owner.test", 0, 903);
+        let _ = g.sign_replacement(0);
+    }
+
+    // a failed replacement, then a second one at the same nonce
+    #[test]
+    fn a_failed_replacement_can_be_retried_and_reserves_nothing() {
+        let (mut g, _) = failed_buy();
+        ctx("owner.test", 0, 900);
+        let _ = g.sign_replacement(0);
+        assert!(exit_signed(&mut g, vec![PromiseResult::Failed]).is_empty());
+        ctx("owner.test", 0, 950);
+        let _ = g.sign_replacement(0);
+        assert_eq!(exit_signed(&mut g, vec![ok_sig(SIG_A)]).len(), 1);
+        assert_eq!(g.evm_nonce, 1);
+        assert!(g.get_unsettled(0).unwrap().replaced && g.get_unsettled(1).is_none());
+    }
+
+    // a sale never needs buying budget: an agent whose budget is spent, expired or removed by the
+    // armer still exits, paying the quote and the gas from its credit
+    #[test]
+    fn an_agent_that_spent_its_budget_still_exits() {
+        let mut g = credited(ONE_NEAR, 100 * U, 1000, 1000 * U);
+        arm_at(&mut g, PRICE + COST, 1000, 0);
+        ctx("agent.test", 0, 500);
+        let c = g.request_check(TARGET.into(), U128(VALUE), None);
+        allow_at(&mut g, c, 600);
+        ctx("agent.test", 0, 700);
+        buy(&mut g, c);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        assert_eq!(g.budget_left(&id("agent.test")).0, 0);
+        let credit = g.credit_of(&id("agent.test")).0;
+        let exit = exit_quote(&mut g, "agent.test", c, MIN_OUT, 1000);
+        sell_quoted_at(&mut g, exit, 1100);
+        assert_eq!(
+            exit_signed(&mut g, vec![ok_sig(SIG_A), ok_sig(SIG_B)]).len(),
+            2
+        );
+        assert_eq!(holding_of(&g, "agent.test"), 0);
+        assert_eq!(g.credit_of(&id("agent.test")).0, credit - PRICE - EXIT_COST);
+        assert_eq!(g.budget_left(&id("agent.test")).0, 0);
+    }
+
+    #[test]
+    fn an_agent_whose_budget_expired_or_was_disarmed_still_exits() {
+        let (mut g, check) = judged(Verdict::Allow);
+        buy(&mut g, check);
+        signed(&mut g, PromiseResult::Successful(mpc_response(R0, S0, 1)));
+        ctx("armer.test", 0, 1000);
+        g.disarm(id("agent.test")); // the armer's stop: no freeze
+        let exit = exit_quote(&mut g, "agent.test", check, MIN_OUT, 2 * SEC);
+        sell_quoted_at(&mut g, exit, 2 * SEC + 100);
+        assert_eq!(
+            exit_signed(&mut g, vec![ok_sig(SIG_A), ok_sig(SIG_B)]).len(),
+            2
+        );
+        assert_eq!(holding_of(&g, "agent.test"), 0);
+    }
+
+    // a failed buy's check keeps its allow; after the refund the agent cannot reuse it
+    #[test]
+    #[should_panic(expected = "transaction differs from the one simulated")]
+    fn a_refunded_unsettled_buy_cannot_be_bought_again() {
+        let (mut g, check) = failed_buy();
+        replaced(&mut g, 0, 900);
+        g.clear_unsettled(0, true);
+        ctx("agent.test", 0, 950);
+        buy(&mut g, check);
+    }
+
+    // 21. A callback that never ran (out of gas, say) would keep the signing slot forever: the owner
+    // releases it once RELEASE_DELAY_NS, longer than the MPC's own timeout, has passed; what it was
+    // signing is reserved as unsettled, as if no signature came back.
+    #[test]
+    fn the_owner_releases_a_buy_whose_callback_never_ran() {
+        let (mut g, check) = judged(Verdict::Allow);
+        buy(&mut g, check); // at 700 ns; its callback never runs
+        ctx("owner.test", 0, 700 + RELEASE_DELAY_NS);
+        g.release_signing();
+        assert!(g.signing.is_none());
+        assert_eq!(g.evm_nonce, 1);
+        let u = g.get_unsettled(0).unwrap();
+        assert_eq!(
+            (u.check, u.cost, u.replaced),
+            (Some(check), U128(COST), false)
+        );
+        let v = last_event();
+        assert_eq!(v["event"], "signing_released");
+        assert_eq!(v["data"][0]["since_ns"], "700");
+        let _ = g.sell(TARGET.into(), U128(SELL_AMOUNT), U128(SELL_MIN), None); // the slot is free
+    }
+
+    #[test]
+    fn a_released_exit_reserves_its_nonces_and_its_tokens() {
+        let (mut g, _, exit) = exit_judged(Verdict::Allow, EXIT_QUOTE);
+        let held = holding_of(&g, "agent.test");
+        sell_quoted_at(&mut g, exit, 1100);
+        ctx("owner.test", 0, 1100 + RELEASE_DELAY_NS);
+        g.release_signing();
+        assert_eq!(g.evm_nonce, 3);
+        assert!(g.get_unsettled(1).is_some());
+        assert_eq!(
+            g.get_unsettled(2).unwrap().restore,
+            Some((TARGET.to_owned(), U128(SELL_AMOUNT)))
+        );
+        assert_eq!(holding_of(&g, "agent.test"), held - SELL_AMOUNT);
+    }
+
+    #[test]
+    #[should_panic(expected = "signature requested less than 600 s ago")]
+    fn no_release_before_the_delay() {
+        let (mut g, check) = judged(Verdict::Allow);
+        buy(&mut g, check);
+        ctx("owner.test", 0, 700 + RELEASE_DELAY_NS - 1);
+        g.release_signing();
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn only_the_owner_releases_the_slot() {
+        let (mut g, check) = judged(Verdict::Allow);
+        buy(&mut g, check);
+        ctx("agent.test", 0, 700 + RELEASE_DELAY_NS);
+        g.release_signing();
+    }
+
+    #[test]
+    #[should_panic(expected = "no signature in progress")]
+    fn no_release_without_a_signature_in_progress() {
+        let mut g = guard();
+        ctx("owner.test", 0, RELEASE_DELAY_NS);
+        g.release_signing();
+    }
+
+    // the released buy's callback, arriving after another buy took the slot, must not settle that one
+    #[test]
+    #[should_panic(expected = "no signature in progress for this callback")]
+    fn a_late_callback_after_a_release_cannot_settle_the_next_job() {
+        let (mut g, check) = judged(Verdict::Allow);
+        buy(&mut g, check);
+        let since = g.signing_since_ns;
+        let now = 700 + RELEASE_DELAY_NS;
+        ctx("owner.test", 0, now);
+        g.release_signing();
+        arm_at(&mut g, 50 * U, 1000, now);
+        ctx("agent.test", 0, now + 1);
+        let next = g.request_check(TARGET.into(), U128(VALUE), None);
+        allow_at(&mut g, next, now + 2);
+        ctx("agent.test", 0, now + 3);
+        buy(&mut g, next);
+        callback_env(vec![PromiseResult::Successful(mpc_response(R0, S0, 1))]);
+        g.on_signed(since);
     }
 }

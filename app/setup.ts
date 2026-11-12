@@ -17,8 +17,9 @@ const id = (name: string) => `${name}.${parent}`;
 // Price of a verdict: covers the storage of a check, its code record and, on a block, its listing
 // (CHECK_STORAGE_BYTES = 1900 in src/lib.rs, at 10^19 yoctoNEAR per byte).
 const PRICE = nearToYocto("0.019");
-// Demo bounds set by the human: 0.5 NEAR per arming (the demo arms 0.4), 1 h at most, 5 NEAR per 7 days.
-const BOUNDS = { max_budget: nearToYocto("0.5").toString(), max_duration_s: 3600, max_7d: nearToYocto("5").toString() };
+// Demo bounds set by the human: 0.5 NEAR per arming (the demo arms 0.4), 1 h at most, 5 NEAR per 7 days,
+// 0.0001 ETH per buy (the demo buys 0.00001).
+const BOUNDS = { max_budget: nearToYocto("0.5").toString(), max_duration_s: 3600, max_7d: nearToYocto("5").toString(), max_buy_wei: "100000000000000" };
 const AGENT_METHODS = ["request_check", "buy", "refund_check", "request_exit", "sell_quoted"];
 // EVM buy fixed by the human: gas 250,000 (a V2 swap uses ~140,000 on the fork), fees at most
 // 0.05 gwei (Base's base fee ~0.005 gwei), tip 0.001 gwei; budget debited at 1 ETH = 1000 NEAR;
@@ -58,7 +59,7 @@ async function scopedKey(name: string, methods: string[], allowance: `${number}`
 }
 
 // About 6.3 NEAR in all with the credit below: one 10 NEAR faucet account is enough, with room to spare.
-const guardKey = await subAccount("guard", "3.7"); // wasm of ~334 KB: ~3.35 NEAR of storage
+const guardKey = await subAccount("guard", "3.7"); // wasm of ~356 KB: ~3.56 NEAR of storage
 // Each role's own account pays the gas of its calls: a few thousandths of NEAR each.
 await subAccount("agent", "0.3");
 await subAccount("agent2", "0.2");
@@ -104,7 +105,7 @@ const owner = (methodName: string, args: Record<string, unknown>) => human.callF
 await owner("set_bounds", BOUNDS);
 await owner("register_agent", { agent: id("agent") });
 await owner("register_agent", { agent: id("agent2") });
-console.log(`bounds: 0.5 NEAR per arming, 3600 s max, 5 NEAR per 7 days; ${id("agent")} and ${id("agent2")} registered`);
+console.log(`bounds: 0.5 NEAR per arming, 3600 s max, 5 NEAR per 7 days, 0.0001 ETH per buy; ${id("agent")} and ${id("agent2")} registered`);
 await human.callFunction({
   contractId: id("guard"),
   methodName: "deposit_credit",

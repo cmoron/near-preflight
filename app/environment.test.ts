@@ -25,6 +25,14 @@ describe("opcodes no simulation can match, in reachable code only (pure)", () =>
     const meta = "a1" + "48".repeat(4); // a CBOR map whose bytes read as BASEFEE
     expect(envOpcodes(`0x00${meta}0005` as Hex)).toEqual([]);
   });
+  // A tail shaped like solc's metadata is skipped only when nothing can run it.
+  test("a metadata-shaped tail holding a JUMPDEST the code jumps to is code", () => {
+    // PUSH1 4, JUMP | tail: a1 (CBOR map), JUMPDEST, BASEFEE, STOP, then its length 0x0004
+    expect(envOpcodes("0x600456 a15b4800 0004".replaceAll(" ", "") as Hex)).toEqual(["BASEFEE"]);
+  });
+  test("a metadata-shaped tail the code falls through into is code", () => {
+    expect(envOpcodes("0x5b a148 0002".replaceAll(" ", "") as Hex)).toEqual(["BASEFEE"]);
+  });
 });
 
 describe("real code (forked from Base mainnet)", () => {

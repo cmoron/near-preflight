@@ -112,7 +112,8 @@ const erc20 = parseAbi(["function balanceOf(address) view returns (uint256)"]);
  *  guard's address. The agent never picks the floor: it asks the sentinel for an exit quote
  *  (request_exit, the sale simulated from the guard's address), then sell_quoted has NEAR sign
  *  approve and swap with the floor set by the guard (quote minus the owner's 3 %), charged to the
- *  armed budget like a buy. Returns the nonce of the first signed transaction and the transactions. */
+ *  prepaid credit alone (a sale never needs buying budget). Returns the nonce of the first signed
+ *  transaction and the transactions. */
 export async function sellAll(buyId: number): Promise<{ nonce: number; signed: Hex[] }> {
   const bought = await view<Check>("get_check", { id: buyId });
   const token = bought.target as Address;

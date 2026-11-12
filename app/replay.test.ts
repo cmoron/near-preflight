@@ -505,3 +505,19 @@ describe("replay --check: probe addresses derived from on-chain data", () => {
     expect(lines.some((l) => l.skipped && l.line.includes("probe addresses not verified"))).toBe(true);
   });
 });
+
+// Tampered environment facts and amount on a clean token, where the verdict does not move.
+describe("replay rejects altered evidence on a clean token", () => {
+  test("one touched address removed (the pool), verdict unchanged: detected", async () => {
+    const proof = await proofOf(tokens.safe as Address);
+    const forged = withEvidence(proof, (e) => (e.touched = e.touched.filter((a: string) => a !== e.liquidity.pair)));
+    const out = failed(await replay(forged, RPC));
+    expect(out.length).toBe(1);
+    expect(out[0]).toContain("addresses touched: evidence");
+  });
+  test("evidence.amount_wei other than the amount simulated: detected", async () => {
+    const proof = await proofOf(tokens.safe as Address);
+    const forged = withEvidence(proof, (e) => (e.amount_wei = (BigInt(e.amount_wei) * 2n).toString()));
+    expect(failed(await replay(forged, RPC)).length).toBeGreaterThan(0);
+  });
+});

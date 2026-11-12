@@ -150,3 +150,24 @@ describe("the package is bound to its guard, agent and time (--check)", () => {
     expect(system).toMatch(BINDING);
   });
 });
+
+// The model name changed in one place only, and the amount changed in the on-chain check only.
+describe("attest rejects a package or a check altered in one field", () => {
+  test("only the package's model field names another model: refused", async () => {
+    const p = pkg();
+    p.model = "other/model";
+    expect(summary(await attest(p, offline))).toStartWith("ATTEST FAILED");
+  });
+  test("only the attestation's model_name names another model: refused", async () => {
+    const p = pkg();
+    p.attestation.model_name = "other/model";
+    expect(summary(await attest(p, offline))).toStartWith("ATTEST FAILED");
+  });
+  test("a check whose amount is 1 wei more than the signed tool call: refused", () => {
+    const sha = digest(RAW);
+    const call = JSON.parse(JSON.parse(RAW).response).choices[0].message.tool_calls?.[0];
+    const args = JSON.parse(call?.function.arguments ?? "{}");
+    const c = { target: args.token, amount_wei: (BigInt(args.amount_wei) + 1n).toString(), decision_sha256: sha, buy_decision_sha256: null } as Check;
+    expect(failed(onChain(pkg(), sha, 7, c, "7")).length).toBe(1);
+  });
+});

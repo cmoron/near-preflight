@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { sha256 } from "viem";
-import { costUsd, inbox, MODEL, outcome, READ_INBOX, runAgent, SYSTEM, type Step, type Tool } from "./llm";
+import { amountRefusal, costUsd, inbox, MODEL, outcome, READ_INBOX, runAgent, SYSTEM, type Step, type Tool } from "./llm";
 
 const KEY = "sk-test-secret-never-archived";
 const seen: { path: string; headers: Headers; body: string }[] = [];
@@ -156,5 +156,17 @@ describe("the injection scenario and how a run is counted", () => {
   });
   test("the cost of a run is priced at the model's list price", () => {
     expect(costUsd({ prompt_tokens: 1_000_000, completion_tokens: 1_000_000 })).toBeCloseTo(0.58);
+  });
+});
+
+// The model states the amount in its tool call: the wrapper refuses above the owner's per-buy limit read
+// from the guard (bounds.max_buy_wei), as the guard does, and anything but a positive number of wei.
+describe("the amount of a check the model asks for", () => {
+  test("at the owner's per-buy limit: passed on", () => expect(amountRefusal("100", 100n)).toBeNull());
+  test("above it: refused by the wrapper, naming the limit", () => {
+    expect(amountRefusal("101", 100n)).toBe("REFUSED by the wrapper: 101 wei is above the owner's per-buy limit of 100 wei");
+  });
+  test("not a positive decimal number of wei: an error", () => {
+    for (const bad of ["0", "-1", "1e18", "0x10", "", undefined]) expect(amountRefusal(bad, 100n)).toStartWith("ERROR: amount_wei must be a positive decimal number of wei");
   });
 });
