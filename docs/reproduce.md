@@ -29,12 +29,12 @@ No NEAR account, no key: `GUARD` only names the contract to read.
 git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun install
 export GUARD=guard.goblin-guard-13713.testnet
 bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
-#   33 OK lines, then: REPLAY OK: verdict warn confirmed, same as on chain
+#   37 OK lines, then: REPLAY OK: verdict warn confirmed, same as on chain
 bun app/attest.ts app/fixtures/decision.json --check 1
 #   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)
 ```
 
-- `replay` resends check #64 (USDC on Base mainnet) to `mainnet.base.org`, traces it on a throwaway anvil
+- `replay` resends check #70 (USDC on Base mainnet) to `mainnet.base.org`, traces it on a throwaway anvil
   fork, rejudges it and compares everything with the guard ([what it checks](replay.md#what-replay-recomputes)).
 - `attest` verifies the model's decision behind check #1; it calls Intel and NVIDIA
   ([what it checks](replay.md#what-attest-verifies)).
@@ -42,17 +42,19 @@ bun app/attest.ts app/fixtures/decision.json --check 1
 Then every trap on a local Base fork, as CI runs it:
 
 ```sh
-echo GUARD=$GUARD > .env && evm/fork.sh    # Base fork at block 55836672 ready on http://127.0.0.1:8545 (about 1 min)
-bun test --timeout 30000                   # in another terminal: 273 pass, 0 fail (about 13 min)
+echo GUARD=$GUARD > .env && evm/fork.sh    # Base fork at block 55836672 ready on http://127.0.0.1:8545 (about 30 s)
+bun test --timeout 30000                   # in another terminal: 285 pass, 0 fail (3 to 5 min)
 ```
 
 `evm/fork.sh` starts anvil on a copy of Base at block 55,836,672 and deploys the demo tokens at fixed
 addresses ([`evm/tokens.json`](../evm/tokens.json)); `guard_frozen` freezes the guard's derived address,
-read from `GUARD`. The sentinel and replay also start throwaway anvil forks of their own.
+read from `GUARD`. The sentinel and replay also start throwaway anvil forks of their own. None keeps
+block states on disk (`--prune-history`), and each removes its directory when it stops.
 
 The fork mines nothing on its own, while a check waits for real blocks (its reference block, then the
-later side's). Each test mines them, 2 s apart with other users' WETH and ETH transfers, then reverts the
-fork; `demo.sh` mines one every 2 s (`bun app/testkit.ts live`).
+later side's). Each test mines them, a second apart (Base mines five a second, but anvil's
+`eth_simulateV1` refuses blocks that share a timestamp) with other users' WETH and ETH transfers, then
+reverts the fork; `demo.sh` mines one a second (`bun app/testkit.ts live`).
 
 ## Full demo
 
@@ -63,9 +65,9 @@ fork; `demo.sh` mines one every 2 s (`bun app/testkit.ts live`).
 3. **Deploy.** `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard
    and creates `agent.`, `agent2.`, `sentinel.` and `armer.`, each with a function-call key limited to the
    guard. The armer, a key apart from the agent's, opens the agent's armed budget.
-4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`273 pass`) and
+4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`285 pass`) and
    `bunx tsc --noEmit` (exit 0).
-5. **Run the demo.** `./demo.sh` exits 0 in about 3 min (180 s here; each check waits for Base blocks), in four moments:
+5. **Run the demo.** `./demo.sh` exits 0 in about 3 min (161 s here; each check waits for Base blocks), in four moments:
    - a poisoned inbox message pushes the agent to a trap: `BLOCK (sale refused N blocks after the buy …)`,
      and the contract refuses the buy (`verdict does not allow the purchase`);
    - a farm token whose simulation is clean: `BLOCK (template 0x9c69..94c8: 5 of 5 earlier pools drained …)`;
@@ -76,7 +78,7 @@ fork; `demo.sh` mines one every 2 s (`bun app/testkit.ts live`).
    commands; each exits 0.
 7. **Optional.** With `NEAR_AI_API_KEY=...` in `.env.llm` ([cloud.near.ai](https://cloud.near.ai)), moment 1
    runs the live model (0.0003 USD here); without it, a recorded decision is verified.
-   `./demo.sh --full` (213 s here) adds an exit, a `warn` the owner approves, a trap aimed at the guard's
+   `./demo.sh --full` (315 s here) adds an exit, a `warn` the owner approves, a trap aimed at the guard's
    address, a second agent, three concurrent model runs, the emergency stop and a withdrawal.
 8. **Real Base.** `./check-mainnet.sh`, below.
 
@@ -84,15 +86,17 @@ The status page reads any guard: `https://cmoron.github.io/near-preflight/?guard
 
 ## Real Base
 
-`./check-mainnet.sh` exits 0 in about 23 s. The armer arms; the sentinel simulates USDC on Base mainnet
-(`mainnet.base.org`, read only, nothing broadcast), traces it on an anvil forked from it and posts the
-verdict; then the proof is replayed with `--check`.
+`./check-mainnet.sh` exits 0 in about 50 s (44 to 51 s, five runs). The armer arms; the sentinel simulates USDC on Base
+mainnet (`mainnet.base.org`, read only, nothing broadcast), traces it on an anvil forked from it, waits
+for the later side's block and posts the verdict; then the proof is replayed with `--check`.
 
-The verdict is `warn`, and its only reason is the unknown reputation: there is no template index for
-mainnet. That run's proof ships as `app/fixtures/usdc-base-mainnet.json`.
+The verdict is `warn`: there is no template index for mainnet. When USDC/WETH traded during the wait,
+the trades are re-executed after the buy, or a second reason says the resale was not verified (4 of 7
+such windows, [sentinel](sentinel.md#others-trades-during-the-wait)). Check #70's pool traded, its trade
+was re-executed; its proof ships as `app/fixtures/usdc-base-mainnet.json`.
 
 To build an index, use a node that serves `eth_getLogs` (`mainnet.base.org` does not):
-`bun app/index.ts <rpc> <from> <to> <out.json> --pace-ms 1000`. The one-day measurement is in
+`bun app/index.ts <rpc> <from> <to> <out.json> --pace-ms 1000`. The measurements are in
 [sentinel](sentinel.md#measured-on-real-base).
 
 ## Troubleshooting

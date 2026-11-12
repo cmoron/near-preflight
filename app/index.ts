@@ -9,7 +9,7 @@
 // a template whose earlier pools were almost all drained shortly after their funding.
 // Usage: bun app/index.ts <rpc> <from block> <to block> <out.json> [--pace-ms N]
 import { hexToBytes, keccak256, parseEther, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
-import { FACTORY, LOG_CHUNK, rpc, short, WETH, type Finding } from "./verifier";
+import { blocksIn, FACTORY, LOG_CHUNK, rpc, short, WETH, type Cadence, type Finding, type Stamp } from "./verifier";
 
 /** At least this many earlier pools of the template: fewer is an anecdote, not a pattern. */
 const MIN_POOLS = 3;
@@ -24,9 +24,9 @@ const FARM_SHARE = 0.8;
  *  Pools are dated by that funding, not by the pair's creation: a pair created empty long before
  *  says nothing about when its token became tradable. */
 const MIN_POOL_WETH = parseEther("0.5");
-/** "Shortly after funding": within 1 day (43,200 blocks of 2 s on Base). An honest project does not
- *  remove 90 % of its liquidity on its first day. */
-const SHORT_BLOCKS = 43_200;
+/** "Shortly after funding": within 1 day, in blocks at the check's cadence (432,000 at 0.2 s). An honest
+ *  project does not remove 90 % of its liquidity on its first day. */
+const SHORT_S = 86_400;
 /** Drained: at least 90 % of the LP minted has been burned (our definition, in basis points). */
 const DRAIN_BPS = 9_000n;
 /** Pairs per eth_getLogs address filter (publicnode allows 10). */
@@ -150,16 +150,18 @@ export async function buildIndex(url: string, from: number, to: number, pace: ()
 
 export const indexSha256 = (i: Index): Hex => sha256(stringToHex(JSON.stringify(i)));
 
-/** An index judges a check only if its window starts at least INDEX_SPAN_BLOCKS before the check's
- *  reference block and ends at that very block: a sentinel can neither pick a window that misses a farm's
- *  earlier pools nor drop its newest ones. The sentinel builds it for each check (buildIndex up to the
- *  block). 2,000 blocks (67 min) is what the fork's setup spans (evm/fork.sh mines 2,000 blocks between
- *  its first pools and its last); the real-Base index of docs/sentinel.md spans 43,201. */
-export const INDEX_SPAN_BLOCKS = 2_000;
-/** Why an index of blocks `from`..`to` may not judge a check at `block`, or null. Pure: replay rechecks it. */
-export function windowProblem(block: number, from: number, to: number): string | null {
-  if (from <= block - INDEX_SPAN_BLOCKS && to === block) return null;
-  return `template index window ${from}..${to} is not bound to block ${block}: it must start at least ${INDEX_SPAN_BLOCKS} blocks before it and end at it`;
+/** An index judges a check only if its window starts at least INDEX_SPAN_S before the check's reference
+ *  block, by their timestamps, and ends at that very block: a sentinel can neither pick a window that
+ *  misses a farm's earlier pools nor drop its newest ones. The sentinel builds it for each check
+ *  (buildIndex up to the block). 2 h: measured on 2026-11-11, one farm opened 29 pools in 2.4 h and
+ *  drained most within 13 to 48 min; building 2 h of Base (36,001 blocks) took 37 requests, 2.1 s, on
+ *  publicnode on 2026-11-12. evm/fork.sh spaces its blocks so that 2 h pass between its first pools and
+ *  its last. */
+export const INDEX_SPAN_S = 7_200;
+/** Why an index of blocks `from`..`to` may not judge a check at block `ref`, or null. Pure: replay rechecks it. */
+export function windowProblem(ref: Stamp, from: Stamp, to: number): string | null {
+  if (BigInt(from.timestamp) <= BigInt(ref.timestamp) - BigInt(INDEX_SPAN_S) && to === Number(BigInt(ref.number))) return null;
+  return `template index window ${BigInt(from.number)}..${to} is not bound to block ${BigInt(ref.number)}: it must start at least ${INDEX_SPAN_S / 3600} h before it and end at it`;
 }
 
 /** Template reputation judges a target only against pools funded before its own (`ownPair`, its V2
@@ -199,10 +201,11 @@ const TOKEN0 = "0x0dfe1681"; // token0()
 const GET_RESERVES = "0x0902f1ac"; // getReserves()
 
 /** The template's pools funded before `before` (beforeBlock; none when null); a drain counts within
- *  SHORT_BLOCKS of the funding. */
-export function reputationOf(index: Index, template: Hex, before: number | null): Reputation {
+ *  SHORT_S of the funding at cadence `c`. */
+export function reputationOf(index: Index, template: Hex, before: number | null, c: Cadence): Reputation {
   const earlier = before === null ? [] : (index.templates[template] ?? []).filter((p) => p.funded !== null && p.funded < before);
-  const delays = earlier.flatMap((p) => (p.drained !== null && p.drained - p.funded! <= SHORT_BLOCKS ? [p.drained - p.funded!] : [])).sort((a, b) => a - b);
+  const short = blocksIn(c, SHORT_S);
+  const delays = earlier.flatMap((p) => (p.drained !== null && p.drained - p.funded! <= short ? [p.drained - p.funded!] : [])).sort((a, b) => a - b);
   const mid = delays.length >> 1;
   const median = delays.length ? (delays.length % 2 ? delays[mid] : (delays[mid - 1] + delays[mid]) / 2) : null;
   return { template, from: index.from, to: index.to, before_block: before, index_sha256: indexSha256(index), pools: earlier.length, drained: delays.length, median_drain_blocks: median };

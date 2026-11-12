@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { encodeFunctionData, parseAbi, parseEther, toHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
-import { envOpcodes, environmentFindings } from "./environment";
+import { envOpcodes, environmentFindings, reachOf } from "./environment";
 import { FACTORY, implementationAt, ROUTER, rpc, WETH } from "./verifier";
 
 const RPC = process.env.EVM_RPC ?? "http://127.0.0.1:8545";
@@ -55,7 +55,7 @@ describe("addresses the guard's transactions touch (pure)", () => {
   const w = { token: "0x00000000000000000000000000000000000000a1" as Address, guard: "0x00000000000000000000000000000000000000a2" as Address };
   const pair = "0x00000000000000000000000000000000000000a3" as Address;
   const liquidity = { pair, supply: "1", supply_before: "1", created: null, candidates: 0, holders: null };
-  const facts = (touched: string[] | null, opcodes: string[] = [], token_calls: string[] | null = []) => ({ opcodes, touched, token_calls, implementation: null, liquidity });
+  const facts = (touched: string[] | null, opcodes: string[] = [], token_calls: string[] | null = [], token_balances: string[] | null = []) => ({ opcodes, touched, token_calls, token_balances, implementation: null, liquidity });
   test("token, pool, router, WETH, guard and precompiles: no finding", () => {
     expect(environmentFindings(facts([w.token, pair, ROUTER.toLowerCase(), WETH.toLowerCase(), w.guard, "0x0000000000000000000000000000000000000001", "0x0000000000000000000000000000000000000100"]), w)).toEqual([]);
   });
@@ -71,12 +71,46 @@ describe("addresses the guard's transactions touch (pure)", () => {
   test("a pool but no trace: warn, never a pass", () => expect(environmentFindings(facts(null), w)[0]?.level).toBe("warn"));
   // Judge pass 8: WETH and the factory are on the list for the router's sake; the token's own code
   // calling either reads state all of Base moves, which a check's window may not see move.
-  test("the token's code calls WETH, or the factory: block, naming them", () => {
-    expect(environmentFindings(facts([w.token, WETH.toLowerCase()], [], [WETH.toLowerCase()]), w)).toEqual([{ level: "block", text: "token calls WETH during a transfer: state all of Base moves" }]);
-    expect(environmentFindings(facts([w.token], [], [WETH.toLowerCase(), FACTORY.toLowerCase()]), w)[0]?.text).toBe("token calls WETH and the V2 factory during a transfer: state all of Base moves");
+  test("the token's code calls or reads WETH, or the factory: block, naming them", () => {
+    expect(environmentFindings(facts([w.token, WETH.toLowerCase()], [], [WETH.toLowerCase()]), w)).toEqual([{ level: "block", text: "token calls or reads WETH during a transfer: state all of Base moves" }]);
+    expect(environmentFindings(facts([w.token], [], [WETH.toLowerCase(), FACTORY.toLowerCase()]), w)[0]?.text).toBe("token calls or reads WETH and the V2 factory during a transfer: state all of Base moves");
+  });
+  // Review of 47bbf28: the later side no longer moves the guard's ETH balance, and no simulation bills
+  // its L1 fee; others' balances move with all of Base. Reading any is a block.
+  test("the token's code reads an ETH balance, the guard's or another's: block, naming it", () => {
+    expect(environmentFindings(facts([w.token], [], [w.guard], [w.guard]), w)).toEqual([{ level: "block", text: "token reads the ETH balance of the guard during a transfer: a value no simulation can match" }]);
+    expect(environmentFindings(facts([w.token], [], [WETH.toLowerCase()], [WETH.toLowerCase()]), w).map((f) => f.text)).toEqual([
+      "token calls or reads WETH during a transfer: state all of Base moves",
+      "token reads the ETH balance of 0x4200..0006 during a transfer: a value no simulation can match",
+    ]);
   });
   test("the token's code calls its pool or its implementation: no finding", () => {
     expect(environmentFindings(facts([w.token, pair], [], [pair]), w)).toEqual([]);
+  });
+});
+
+// Review of 47bbf28: the token's frames were read from callTracer, which shows calls only; a token can
+// read WETH's or the guard's state without a call (BALANCE, EXTCODE*). Two contracts set on the fork: an
+// implementation that reads its caller's balance and WETH's code hash, and a proxy delegating to it.
+describe("what the token's own code reaches, in its context, implementation included", () => {
+  const impl = "0x00000000000000000000000000000000000c0de1" as Address;
+  const proxy = "0x00000000000000000000000000000000000c0de2" as Address;
+  const caller = "0x00000000000000000000000000000000000ca11e" as Address;
+  test("BALANCE of the caller and EXTCODEHASH of WETH, run by the implementation in the proxy's context", async () => {
+    const snapshot = await rpc<Hex>(RPC, "evm_snapshot", []);
+    try {
+      await rpc(RPC, "anvil_setCode", [impl, `0x333150${"73"}${WETH.slice(2)}3f5000`]); // BALANCE(CALLER), EXTCODEHASH(WETH)
+      await rpc(RPC, "anvil_setCode", [proxy, `0x6000600060006000${"73"}${impl.slice(2)}5af45000`]); // DELEGATECALL(impl)
+      await rpc(RPC, "anvil_setBalance", [caller, toHex(parseEther("1"))]);
+      await rpc(RPC, "anvil_impersonateAccount", [caller]);
+      const hash = await rpc<Hex>(RPC, "eth_sendTransaction", [{ from: caller, to: proxy, data: "0x", gas: toHex(100_000) }]);
+      for (let i = 0; i < 50 && !(await rpc<unknown>(RPC, "eth_getTransactionReceipt", [hash])); i++) await Bun.sleep(100);
+      const sorted = (x: [string, boolean][]) => x.map(([a, b]) => `${a}:${b}`).sort();
+      expect(sorted(await reachOf(RPC, hash, proxy))).toEqual(sorted([[impl, false], [caller, true], [WETH.toLowerCase(), false]]));
+      expect(await reachOf(RPC, hash, impl)).toEqual([]); // its code never runs in its own context
+    } finally {
+      await rpc(RPC, "evm_revert", [snapshot]);
+    }
   });
 });
 

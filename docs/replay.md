@@ -21,18 +21,22 @@ The sentinel writes `proofs/<id>.json` for each check ([`toProof`](../app/verifi
 | `request`  | the `eth_simulateV1` requests, byte for byte: three on the reference block, the later side's     |
 | `response` | the node's answers                                                                               |
 
-The evidence holds the block, the request's sha256, the amount, the guard's transaction hashes, the
-call labels and outcomes, the quote, the code facts, the liquidity facts and the reputation.
+The evidence holds the block, the chain's `cadence` there (the 100 blocks before it took `seconds`), the
+request's sha256, the amount, the guard's transaction hashes, the call labels and outcomes, the quote,
+the code facts, the liquidity facts and the reputation.
 
-It also holds the NEAR facts read before the verdict, the opcodes, the addresses touched, the contracts
-the token calls (`token_calls`), the drawn `sales`, the later side (`later`: its real block, the slots
-the buy wrote that Base also wrote before it, the pool's reserves there) and `list_target`. The state
-change the later side applied is in its request's `stateOverrides`. An exit quote's evidence has
-`kind: "exit"` and fewer fields.
+It also holds the NEAR facts read before the verdict, the opcodes, the addresses touched, what the
+token's code calls or reads (`token_calls`) and whose ETH balance (`token_balances`), the drawn `sales`
+(in blocks at that cadence), the later side and `list_target`. The later side (`later`) is its real
+block, the slots the buy wrote that Base also wrote before it (`moved`), the pool's reserves there, the
+trades of the pool re-executed after the buy (`replayed`, their hashes) and why they could not be
+(`unverified`, or null). The state the later side set is in its request's `stateOverrides`. An exit
+quote's evidence has `kind: "exit"` and fewer fields.
 
 Where it lives: the evidence string is on NEAR, in the `verdict_posted` event, and its sha256 in the
 check. The requests and responses are not: the sentinel publishes the proof file. Two ship in
-[`app/fixtures/`](../app/fixtures/) (`usdc-base-mainnet.json` is check #64 of the demo guard).
+[`app/fixtures/`](../app/fixtures/) (`usdc-base-mainnet.json` is check #70 of the demo guard: its pool
+traded during the wait, and replay re-executes that trade).
 
 ## What `replay` recomputes
 
@@ -44,18 +48,21 @@ Without `--check`, from the file and the node only:
 
 - the request's sha256 and shape: it must be what the sentinel builds for that token, and the guard
   side must hold only the guard's own transactions, nothing before or between them;
-- the chain id and the first simulated block's time (the evidence block + 2 s);
+- the chain id, the cadence measured again at the evidence block, and the first simulated block's time
+  at that cadence;
 - every call resent to the node at its block (the evidence block, the later side's block): status, return
   data and logs identical;
 - the probes are fresh addresses (no code, not the router, WETH, the target or `owner()`);
 - the verdict, reasons and `list_target`, rejudged from the results;
-- the addresses the guard's transactions touch and the contracts the token calls, traced again on a local
-  anvil fork, and the buy's state change;
-- the later side: the guard's sales on `later.block` with that state change applied, rebuilt byte for
-  byte from the node's state there, and the slots Base also wrote, as in the evidence;
+- once the requests are confirmed as the sentinel's (no other input reaches it): the addresses the
+  guard's transactions touch and what the token's code calls or reads, traced again on a local anvil
+  fork, and the buy's state change;
+- the later side: the trades of the pool between the two blocks, fetched again from the node's receipts
+  and re-executed after the buy (one left out or added is a `MISMATCH`), then the guard's sales on
+  `later.block` with the buy's footprint set, rebuilt byte for byte from the node's state there;
 - the quote, the hash of the guard's simulated buy, the liquidity facts;
-- the template index window: bound to the check's block (it starts at least 2,000 blocks before it and
-  ends at it), then the whole index rebuilt from the node, same sha256;
+- the template index window: bound to the check's block (it starts at least 2 h before it, by their
+  timestamps, and ends at it), then the whole index rebuilt from the node, same sha256;
 - the target's code hash, template, proxy implementation and environment opcodes.
 
 With `--check`, against the guard on NEAR (`GUARD` names it):
@@ -70,7 +77,7 @@ With `--check`, against the guard on NEAR (`GUARD` names it):
 - the guard side was simulated from the guard's derived Base address;
 - the blocklist entries and the code at the last check, as the evidence cites them, are on the guard.
 
-Example, from a fresh clone ([reproduce](reproduce.md#without-an-account)): check #64 replays with 33 `OK`
+Example, from a fresh clone ([reproduce](reproduce.md#without-an-account)): check #70 replays with 37 `OK`
 lines and `REPLAY OK: verdict warn confirmed, same as on chain`.
 
 ## What replay cannot do
@@ -80,7 +87,8 @@ lines and `REPLAY OK: verdict warn confirmed, same as on chain`.
 - **It needs the proof file.** The requests and responses are off-chain; without the file there is
   nothing to resend. The evidence on NEAR still shows what the sentinel claimed.
 - **It needs the state.** A node that serves the state and logs of the evidence block and of the later
-  side's block, and anvil (Foundry) for the trace. On 2026-11-12 `mainnet.base.org` still served the
+  side's block, and their receipts, and anvil (Foundry) for the trace and the re-execution. On
+  2026-11-12 `mainnet.base.org` still served the
   state of blocks 5,000,000 back (116 days), for `eth_simulateV1` and storage reads alike; a public
   endpoint may prune it at any time, and an archive node never does. A node that no longer serves a
   block answers with an error: replay prints `ERROR resending the requests at block … (the node must

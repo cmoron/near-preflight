@@ -23,9 +23,14 @@ if cast block-number -r $RPC >/dev/null 2>&1; then
   echo "port 8545 already serves a node: stop it first" >&2
   exit 1
 fi
-anvil --fork-url "$FORK_URL" --fork-block-number "$FORK_BLOCK" --port 8545 --silent &
+# anvil writes older block states to disk, 10 GB and more a run, and leaves them behind when stopped. Here
+# they stay in memory (--prune-history: the last 2,000, more than the fork ever holds), the directory it
+# would use is this script's own, removed on exit, and the leftovers of anvils no longer running go first.
+if ! pgrep -x anvil >/dev/null; then rm -rf -- "${HOME:?}"/.foundry/anvil/tmp/anvil-state-*; fi
+STATES=$(mktemp -d)
+anvil --fork-url "$FORK_URL" --fork-block-number "$FORK_BLOCK" --port 8545 --silent --prune-history 2000 --cache-path "$STATES" &
 ANVIL=$!
-trap 'kill $ANVIL 2>/dev/null' EXIT
+trap 'kill $ANVIL 2>/dev/null; wait $ANVIL 2>/dev/null; rm -rf -- "${STATES:?}"' EXIT
 until cast block-number -r $RPC >/dev/null 2>&1; do sleep 0.5; done
 forge build --quiet
 
@@ -61,8 +66,8 @@ FROZEN=$(deploy "Demo Frozen Guard" FROZEN 8 "$GUARD_EVM")
 TAX20=$(deploy "Demo Tax 20" TAX20 9)
 
 # Everything below is deployed after the tokens above, so their addresses do not change.
-# A pair created with dust, whose deep liquidity comes 2000 blocks later: the pair contract is older
-# than the liquidity window of app/verifier.ts (1800 blocks), its liquidity is not.
+# A pair created with dust, whose deep liquidity comes 10 blocks and 2.2 h later: the pair contract is
+# older than the liquidity window of app/verifier.ts (1 h), its liquidity is not.
 cast rpc -r $RPC anvil_setBalance $DEPLOYER 0x56BC75E2D63100000 >/dev/null # 100 ETH again
 LATE=$(forge create --rpc-url $RPC --unlocked --from $DEPLOYER --broadcast --json \
   src/DemoToken.sol:DemoToken --constructor-args "Demo Late Liquidity" LATE 0 0x0000000000000000000000000000000000000000 | jq -r .deployedTo)
@@ -71,7 +76,9 @@ cast send -r $RPC --unlocked --from $DEPLOYER --value 0.001ether $ROUTER \
   'addLiquidityETH(address,uint256,uint256,uint256,address,uint256)' "$LATE" 10ether 0 0 $DEPLOYER 9999999999 >/dev/null
 cast send -r $RPC --unlocked --from $DEPLOYER "$LATE" 'setPair(address)' \
   "$(cast call $FACTORY 'getPair(address,address)(address)' "$LATE" "$WETH" -r $RPC)" >/dev/null
-cast rpc -r $RPC anvil_mine 0x7d0 >/dev/null # 2000 empty blocks: every pool above is now older than the window
+# 10 empty blocks 800 s apart (2.2 h): every pool above is now older than the liquidity window, and the
+# template index window (from the fork's first block) spans more than its 2 h minimum.
+cast rpc -r $RPC anvil_mine 0xa 0x320 >/dev/null
 cast send -r $RPC --unlocked --from $DEPLOYER --value 20ether $ROUTER \
   'addLiquidityETH(address,uint256,uint256,uint256,address,uint256)' "$LATE" 499990ether 0 0 $DEPLOYER 9999999999 >/dev/null
 # A young pool whose LP is burned (sent to 0xdead): nobody can pull it.
@@ -211,6 +218,11 @@ BUSY_TELL=$(side src/BusyTell.sol:BusyTell)
 # Users without a key whose WETH and ETH transfers fill the blocks the tests and demo.sh mine
 # (app/testkit.ts USERS): 1,000 ETH each.
 for i in 1 2 3 4 5; do cast rpc -r $RPC anvil_setBalance "0x0000000000000000000000000000000000b10c0$i" 0x3635C9ADC5DEA00000 >/dev/null; done
+# Last, 100 empty blocks a second apart: the cadence a check measures over the 100 blocks before its
+# reference block (app/verifier.ts cadenceAt) is the fork's, a block a second (app/testkit.ts FORK_S).
+# Every block mined from now on, a test's transaction too, comes a second after the one before.
+cast rpc -r $RPC anvil_mine 0x64 0x1 >/dev/null
+cast rpc -r $RPC anvil_setBlockTimestampInterval 1 >/dev/null
 
 jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked "$BLOCKED" \
   --arg later "$LATER" --arg tax "$TAX" --arg taxlater "$TAX_LATER" --arg hold "$HOLD" --arg sim "$SIM" \

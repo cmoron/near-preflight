@@ -29,7 +29,7 @@ if (import.meta.main) {
   // near.ts installs a global fetch and reads NEAR_RPC at import: loaded here only, not by the tests.
   const { account, call, env, view, viewAt } = await import("./near");
   const { checkExit, checkToken, deriveProbes, toProof } = await import("./verifier");
-  const { buildIndex, INDEX_SPAN_BLOCKS } = await import("./index");
+  const { buildIndex, INDEX_SPAN_S } = await import("./index");
   const { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH } = await import("./derive");
   const { mkdir } = await import("node:fs/promises");
 
@@ -42,7 +42,7 @@ if (import.meta.main) {
   // The index must end at each check's reference block (windowProblem): it is built for each check.
   const from = process.env.INDEX_FROM ? Number(process.env.INDEX_FROM) : null;
   const index = from === null ? null : (block: number) => buildIndex(EVM, from, block);
-  log(from === null ? "no template index (INDEX_FROM unset): reputation unknown, so every buy verdict is at least warn" : `template index from block ${from} to each check's block (at least ${INDEX_SPAN_BLOCKS} blocks)`);
+  log(from === null ? "no template index (INDEX_FROM unset): reputation unknown, so every buy verdict is at least warn" : `template index from block ${from} to each check's block (at least ${INDEX_SPAN_S / 3600} h)`);
 
   /** The guard's blocklist entry on the target, and the code of its last verdict. */
   const nearFacts = async (target: Address): Promise<NearFacts> => {
@@ -80,7 +80,7 @@ if (import.meta.main) {
     log(`#${id} : ${check.agent} wants to buy ${formatEther(BigInt(check.amount_wei))} ETH of ${target}: the guard's own buy and sales simulated, liquidity, template reputation, blocklist...`);
     // Probes derived from on-chain data, not chosen here: replay --check recomputes them.
     const ticket = { guard: env("GUARD"), id, requested_ns: check.requested_ns };
-    const r = await checkToken(EVM, target, GUARD_EVM, (head) => deriveProbes(ticket, head.hash), { requested_ns: check.requested_ns, index, near: nearFacts, amount: BigInt(check.amount_wei), preview });
+    const r = await checkToken(EVM, target, GUARD_EVM, (head, cadence) => deriveProbes(ticket, head.hash, cadence), { requested_ns: check.requested_ns, index, near: nearFacts, amount: BigInt(check.amount_wei), preview });
     const proof = toProof(id, target, r);
     await Bun.write(`proofs/${id}.json`, JSON.stringify(proof, null, 2));
     const code = { code_hash: r.evidence.code_hash, implementation: r.evidence.implementation };

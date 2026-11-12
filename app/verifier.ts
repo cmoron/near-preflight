@@ -21,14 +21,13 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import { environmentFindings, envOpcodes, trace, type Diff } from "./environment";
+import { environmentFindings, envOpcodes, trace } from "./environment";
+import { laterSide } from "./later";
 import { beforeBlock, ownFunding, reputationFindings, reputationOf, templateOf, windowProblem, type Index, type Reputation } from "./index";
 
 export const ROUTER: Address = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"; // Uniswap V2 Router02 (Base)
 export const WETH: Address = "0x4200000000000000000000000000000000000006";
 export const FACTORY: Address = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"; // Uniswap V2 factory (Base), ROUTER.factory()
-/** Base's block time: a simulated block n blocks after the proof's block is n * 2 s after it. */
-export const NEXT_S = 2n;
 // What the guard signs is what the guard side simulates: its buy, approves and swaps are the unsigned
 // transactions the contract builds (preview_check, preview_sale), sent as is from its address (same
 // calldata, value, nonce, gas limit and fees), and nothing else: no read, no probe, no other sender
@@ -38,9 +37,10 @@ export const NEXT_S = 2n;
 // block.basefee = 0 and gasleft() = block limit, where a token recognizes the simulation.
 export const FUND = parseEther("1"); // balance of the fresh probes beyond what they spend, for their gas
 /** eth_simulateV1 refuses blocks more than 256 above the base block: the late sale lands at most in
- *  that one. Every block up to the late sale is in the request, empty but for the guard's transactions,
- *  at 2 s per block: a node would fill a gap with 12 s blocks, and a timestamp that does not match the
- *  block number tells a simulation from the chain. The sales' swap deadline is past that block. */
+ *  that one (51 s at Base's 0.2 s). Every block up to the late sale is in the request, empty but for the
+ *  guard's transactions, at the time a real block would have (timeOf): a node would fill a gap with 12 s
+ *  blocks, and a timestamp that does not match the block number tells a simulation from the chain. The
+ *  sales' swap deadline is past that block. */
 export const LATE_BLOCKS = 256n;
 // Slots of a proxy's implementation address: EIP-1967, then ZeppelinOS (USDC).
 const IMPL_SLOTS = [
@@ -53,15 +53,15 @@ const TAX_BLOCK = 0.5;
  *  rounding alone can make a finding: it then depends on the amount the agent chose, never lists. The
  *  pool's quote, not what the token delivered: a token that delivers almost nothing is still listed. */
 const DUST = 1000n;
-/** Liquidity window, 1 h of 2 s Base blocks. Liquidity is "old" when at least OLD_BPS of today's LP
- *  supply already existed WINDOW_BLOCKS ago (totalSupply read at both blocks: two eth_call, no logs),
- *  whatever the age of the pair contract and the depth of the pool. Otherwise the LP holders are read
- *  from the pair's Transfer logs over the window (from its creation block if the pair is younger,
- *  found by bisecting eth_getCode): at most 4 eth_getLogs of LOG_CHUNK blocks. */
-export const WINDOW_BLOCKS = 1800n;
+/** Liquidity window, 1 h by the blocks' timestamps (18,000 blocks at 0.2 s). Liquidity is "old" when at
+ *  least OLD_BPS of today's LP supply already existed that long ago (totalSupply read at both blocks: two
+ *  eth_call, no logs), whatever the age of the pair contract and the depth of the pool. Otherwise the LP
+ *  holders are read from the pair's Transfer logs over the window (from its creation block if the pair
+ *  is younger, found by bisecting eth_getCode): at most 4 eth_getLogs of LOG_CHUNK blocks at 0.2 s. */
+export const LIQUIDITY_S = 3600;
 const OLD_BPS = 9_000n;
-/** eth_getLogs window: public RPCs refuse wide ranges. */
-export const LOG_CHUNK = 500n;
+/** eth_getLogs window: public RPCs refuse wide ranges (publicnode serves 10,000 blocks). */
+export const LOG_CHUNK = 5_000n;
 /** More LP holder candidates than this: holders not read, which is a warn. */
 const MAX_HOLDERS = 20;
 /** Warn when at least half the LP can be removed now: past that, more than half the depth we would
@@ -118,6 +118,8 @@ export type Report = {
   evidence: {
     chain_id: number;
     block: number;
+    /** The chain's cadence at `block` (cadenceAt): what turns the rules' seconds into blocks. */
+    cadence: Cadence;
     method: "eth_simulateV1";
     request_sha256: Hex;
     /** keccak256 of the target's code at the check's block. */
@@ -146,8 +148,11 @@ export type Report = {
     /** Every address the guard side's transactions touch, taken on a local fork that replays them at
      *  their simulated blocks (app/environment.ts trace), lowercase, sorted; null without a pool. */
     touched: string[] | null;
-    /** The contracts the token's own code calls in those transactions (same trace), sorted; null without a pool. */
+    /** The addresses the token's own code calls, or whose code or ETH balance it reads, in those
+     *  transactions (same trace), sorted; null without a pool. */
     token_calls: string[] | null;
+    /** Those whose ETH balance it reads (BALANCE), itself aside, sorted; null without a pool. */
+    token_balances: string[] | null;
     /** The later side (laterSide): the real block it ran on, the slots the buy wrote that Base also wrote
      *  before it, the pool's reserves at its start; null when the check stopped at the buy. */
     later: Later | null;
@@ -195,20 +200,27 @@ function asProbe(c: Call, label: string, probe: Address, amount = 0n): Call {
   return { label, from: probe, to: c.to, data, ...(c.value ? { value: c.value } : {}) };
 }
 
-/** One JSON-RPC call with a timeout (RPC_TIMEOUT_MS, 20 s by default); throws on an error or no result. */
+/** One JSON-RPC call with a timeout (RPC_TIMEOUT_MS, 20 s by default); throws on an error or no result.
+ *  A public node's rate limit (HTTP 429) is waited out 3 times (2, 4, 6 s), then thrown like any error. */
 export async function rpc<T>(url: string, method: string, params: unknown[]): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    signal: AbortSignal.timeout(Number(process.env.RPC_TIMEOUT_MS ?? 20_000)), // never wait forever
-  });
-  const body = (await res.json()) as { result?: T; error?: { message: string } };
-  if (body.error || body.result === undefined) throw new Error(`${method} : ${body.error?.message ?? res.status}`);
-  return body.result;
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      signal: AbortSignal.timeout(Number(process.env.RPC_TIMEOUT_MS ?? 20_000)), // never wait forever
+    });
+    if (res.status === 429 && attempt <= 3) {
+      await Bun.sleep(2000 * attempt);
+      continue;
+    }
+    const body = (await res.json()) as { result?: T; error?: { message: string } };
+    if (body.error || body.result === undefined) throw new Error(`${method} : ${body.error?.message ?? res.status}`);
+    return body.result;
+  }
 }
 
-/** A simulated block: its number fixes its time (2 s per block after the proof's block) and its prevrandao. */
+/** A simulated block: its number fixes its time (timeOf) and its prevrandao. */
 export type Block = { number: bigint; calls: Call[] };
 /** Real block on top of which we simulate: its base fee and coinbase are reused, its prevrandao seeds
  *  each simulated block's; the node would otherwise set them to zero in the simulated blocks. `l1Seq`:
@@ -216,8 +228,8 @@ export type Block = { number: bigint; calls: Call[] };
 export type Header = { number: Hex; hash: Hex; timestamp: Hex; baseFeePerGas: Hex; mixHash: Hex; miner: Address; l1Seq: bigint };
 /** Base's L1Block predeploy, which the L1 attributes deposit rewrites at the start of every real block. */
 export const L1_BLOCK: Address = "0x4200000000000000000000000000000000000015";
-/** L2 blocks per L1 block on Base (12 s / 2 s): an L1 epoch, over which prevrandao is the L1 origin's. */
-export const EPOCH_BLOCKS = 6n;
+/** Ethereum's slot: an L1 epoch of Base (60 blocks at 0.2 s), over which prevrandao is the L1 origin's. */
+export const L1_BLOCK_S = 12;
 
 /** Block `tag` with its position in its L1 epoch (L1Block.sequenceNumber() there; 0 without L1Block). */
 export async function headAt(url: string, tag: string): Promise<Header> {
@@ -226,27 +238,46 @@ export async function headAt(url: string, tag: string): Promise<Header> {
   return { ...h, l1Seq: seq === "0x" ? 0n : BigInt(seq) };
 }
 
-/** Block `n`'s time at Base's cadence: the proof's block time plus 2 s per block after it. */
-export const timeOf = (head: Header, n: bigint) => BigInt(head.timestamp) + NEXT_S * (n - BigInt(head.number));
-/** Block `n`'s prevrandao as Base sets it: the L1 origin's, one per epoch of EPOCH_BLOCKS blocks. The
- *  proof block's for the rest of its epoch, then keccak256(it, epoch index) per later epoch, so that
+/** The chain's cadence at a block: the `blocks` real blocks before it took `seconds` (their timestamps).
+ *  Measured, never assumed: Base went from 2 s to 0.2 s a block in November 2026, and its timestamps are
+ *  whole seconds, so five blocks share one. Every rule in seconds becomes blocks with it (blocksIn), every
+ *  simulated block gets the time a real one would have (timeOf). In the evidence; replay measures it again. */
+export type Cadence = { blocks: number; seconds: number };
+/** Blocks the cadence is measured over: 20 s on Base, 100 s on the local fork. */
+export const CADENCE_BLOCKS = 100;
+/** The cadence at `head`, from its timestamp and the one CADENCE_BLOCKS blocks before it. */
+export async function cadenceAt(url: string, head: Header): Promise<Cadence> {
+  const n = BigInt(head.number) - BigInt(CADENCE_BLOCKS);
+  if (n < 0n) throw new Error(`block ${BigInt(head.number)} has fewer than ${CADENCE_BLOCKS} blocks before it: no cadence`);
+  const seconds = Number(BigInt(head.timestamp) - BigInt((await stampOf(url, toHex(n))).timestamp));
+  if (seconds <= 0) throw new Error(`the ${CADENCE_BLOCKS} blocks before block ${BigInt(head.number)} share its timestamp: no cadence`);
+  return { blocks: CADENCE_BLOCKS, seconds };
+}
+/** Whole blocks in `s` seconds at cadence `c`. */
+export const blocksIn = (c: Cadence, s: number) => Math.floor((s * c.blocks) / c.seconds);
+/** Block `n`'s time at cadence `c` after `head`, the first block of its second (refBlock and firstAt
+ *  return one): at 100 blocks in 20 s, five blocks share each second, as on Base. */
+export const timeOf = (head: Header, c: Cadence, n: bigint) => BigInt(head.timestamp) + ((n - BigInt(head.number)) * BigInt(c.seconds)) / BigInt(c.blocks);
+/** Block `n`'s prevrandao as Base sets it: the L1 origin's, one per L1 epoch (L1_BLOCK_S at cadence `c`).
+ *  The proof block's for the rest of its epoch, then keccak256(it, epoch index) per later epoch, so that
  *  replay recomputes it. One per block would itself tell a simulation from the chain. */
-export const prevRandaoOf = (head: Header, n: bigint) => {
-  const epoch = (head.l1Seq + n - BigInt(head.number)) / EPOCH_BLOCKS;
+export const prevRandaoOf = (head: Header, c: Cadence, n: bigint) => {
+  const epoch = (head.l1Seq + n - BigInt(head.number)) / BigInt(Math.max(1, blocksIn(c, L1_BLOCK_S)));
   return epoch === 0n ? head.mixHash : keccak256(concat([head.mixHash, toHex(epoch, { size: 32 })]));
 };
 
-/** Full eth_simulateV1 request, as sent and saved in the proof. Every call gets `fees`, the guard's own;
- *  value and nonce are hex when present. traceTransfers reports each ETH transfer as a log: what a
- *  seller receives is read there. `state`: storage slots set before the first block (the later side). */
-export function buildRequest(head: Header, balances: Record<string, bigint>, blocks: Block[], fees: Fees, state: Record<string, Record<string, Hex>> = {}): Request {
+/** Full eth_simulateV1 request, as sent and saved in the proof, its blocks at cadence `c` after `head`.
+ *  Every call gets `fees`, the guard's own; value and nonce are hex when present. traceTransfers reports
+ *  each ETH transfer as a log: what a seller receives is read there. `state`: storage slots set before
+ *  the first block (the later side). Times count from `clock` (the later side's: the reference block). */
+export function buildRequest(head: Header, c: Cadence, balances: Record<string, bigint>, blocks: Block[], fees: Fees, state: Record<string, Record<string, Hex>> = {}, clock: Header = head): Request {
   const env = { baseFeePerGas: toHex(BigInt(head.baseFeePerGas)), feeRecipient: head.miner };
   const f = { gas: toHex(fees.gas), maxFeePerGas: toHex(fees.maxFeePerGas), maxPriorityFeePerGas: toHex(fees.maxPriorityFeePerGas) };
   const accounts = [...new Set([...Object.keys(balances), ...Object.keys(state)])];
   const overrides = Object.fromEntries(accounts.map((a) => [a, { ...(a in balances ? { balance: toHex(balances[a]) } : {}), ...(state[a] ? { stateDiff: state[a] } : {}) }]));
   const request = {
     blockStateCalls: blocks.map((b, i) => ({
-      blockOverrides: { number: toHex(b.number), time: toHex(timeOf(head, b.number)), prevRandao: prevRandaoOf(head, b.number), ...env },
+      blockOverrides: { number: toHex(b.number), time: toHex(timeOf(clock, c, b.number)), prevRandao: prevRandaoOf(head, c, b.number), ...env },
       ...(i === 0 ? { stateOverrides: overrides } : {}),
       calls: b.calls.map(({ label: _, value, nonce, gas, ...c }) => ({
         ...c,
@@ -294,8 +325,8 @@ export const FROZEN = ["guard", "probe", "synthetic"] as const;
 export const labelsOf = (s: Sides) => SIDES.flatMap((k) => s[k].flatMap((b) => b.calls.map((c) => c.label)));
 
 /** Simulates the frozen sides on top of `head`, each in its own request; `owner` is owner() once known. */
-async function simulate(url: string, head: Header, sides: Sides, fees: Fees, guard: Address, owner: Address | null) {
-  const request = await Promise.all(FROZEN.map(async (k) => buildRequest(head, await balances(url, head, sides[k], fees, guard, owner), sides[k], fees)));
+async function simulate(url: string, head: Header, c: Cadence, sides: Sides, fees: Fees, guard: Address, owner: Address | null) {
+  const request = await Promise.all(FROZEN.map(async (k) => buildRequest(head, c, await balances(url, head, sides[k], fees, guard, owner), sides[k], fees)));
   const out = await Promise.all(request.map((q) => rpc<{ calls: Result[] }[]>(url, q.method, q.params)));
   return { request, response: out.map((blocks) => blocks.flatMap((b) => b.calls)) };
 }
@@ -311,19 +342,31 @@ export type Amounts = { guard: bigint; probe: bigint };
  *  the exact amount then swapExactTokensForETH back to its address; a share, then the rest). */
 export type GuardTxs = { buy: Hex; sales?: [Hex[], Hex[]] };
 /** The two sales of a check, derived like the probes from the ticket and the block hash (deriveProbes),
- *  so a token cannot expect them: the first swap `first` blocks after the buy (5 to 150: no real exit
- *  lands in the next block), of `bps` / 10,000 of the tokens bought (13 % to 87 %, never a whole
- *  percent); the rest swapped `late` blocks after the buy (200 to 255, 400 to 510 s). */
+ *  so a token cannot expect them: the first swap `first` blocks after the buy, of `bps` / 10,000 of the
+ *  tokens bought (13 % to 87 %, never a whole percent); the rest swapped `late` blocks after the buy.
+ *  Drawn in seconds (FIRST_S, LATE_S), in blocks at the check's cadence (saleRanges). */
 export type Sale = { first: number; bps: number; late: number };
 /** Seconds of real Base between the reference block and the block the later side runs on (the first
- *  block that late), drawn per check (deriveProbes): 16 to 24 s, about 100 blocks on Base, which has
- *  mined a block every 0.2 s since 2026, and 8 to 12 on the fork the tests mine at 2 s. Measured on Base
- *  mainnet on 2026-11-12: WETH's supply moved in 160 of 600 blocks (2 min), the V2 factory got 16
+ *  block that late), drawn per check (deriveProbes): 16 to 24 s, 80 to 120 blocks on Base. Measured on
+ *  Base mainnet on 2026-11-12: WETH's supply moved in 160 of 600 blocks (2 min), the V2 factory got 16
  *  pairs in an hour. */
 export const LATER_S = [16, 24] as const;
-export const SALE_BLOCKS = [5, 150] as const;
-/** The buy is in the 1st block after the proof's: the late swap is at most LATE_BLOCKS - 1 after it. */
-export const LATE_SALE_BLOCKS = [200, Number(LATE_BLOCKS) - 1] as const;
+/** The first sale, 2 to 25 s after the buy (10 to 125 blocks at 0.2 s): never in the next block, where no
+ *  real exit lands, and before or after the later side's block alike. */
+export const FIRST_S = [2, 25] as const;
+/** The late sale, 30 to 51 s after the buy (150 to 255 blocks at 0.2 s): after the later side's block, at
+ *  most 24 s after the reference block, so the later side always sells it again; and up to the last of
+ *  the 256 blocks eth_simulateV1 allows above a real block (51 s at 0.2 s). Nothing later is simulated:
+ *  a second request further ahead needs a real base block that far ahead, which does not exist yet. */
+export const LATE_S = [30, 51] as const;
+/** The blocks after the buy each sale may land in at cadence `c`: FIRST_S and LATE_S in blocks, the
+ *  first at least 2 (its approve after the buy's block), the late one at most LATE_BLOCKS - 1 (the buy is
+ *  in the 1st block after the proof's). A cadence faster than 0.2 s caps the late sale there; the first
+ *  then stays 2 blocks before it (deriveProbes). */
+export const saleRanges = (c: Cadence) => ({
+  first: [Math.max(2, blocksIn(c, FIRST_S[0])), blocksIn(c, FIRST_S[1])] as const,
+  late: [Math.min(blocksIn(c, LATE_S[0]), Number(LATE_BLOCKS) - 1), Math.min(blocksIn(c, LATE_S[1]), Number(LATE_BLOCKS) - 1)] as const,
+});
 /** The sale amounts after buying `amount` tokens: `bps` / 10,000 of them, then the rest. */
 export const saleAmounts = (amount: bigint, bps: number): [bigint, bigint] => {
   const first = (amount * BigInt(bps)) / 10_000n;
@@ -340,8 +383,9 @@ export const REF_MARGIN_S = 4n;
 /** How often a wait reads the node, and how long it waits for a block before the check fails. */
 const POLL_MS = 500;
 const WAIT_MS = 120_000;
-type Stamp = { number: Hex; timestamp: Hex };
-const stampOf = (url: string, tag: string) => rpc<Stamp>(url, "eth_getBlockByNumber", [tag, false]);
+/** A block's number and timestamp. */
+export type Stamp = { number: Hex; timestamp: Hex };
+export const stampOf = (url: string, tag: string) => rpc<Stamp>(url, "eth_getBlockByNumber", [tag, false]);
 /** Waits until the node's latest block satisfies `done`. */
 async function until(url: string, done: (h: Stamp) => boolean, what: string): Promise<Stamp> {
   for (const end = Date.now() + WAIT_MS; ; await Bun.sleep(POLL_MS)) {
@@ -351,15 +395,19 @@ async function until(url: string, done: (h: Stamp) => boolean, what: string): Pr
   }
 }
 
-/** The first block whose timestamp is at least `at` (seconds), once mined. The search starts at the
- *  block before that time at 2 s per block, then bisects: Base mines faster, a fork's history keeps
- *  other cadences. */
+/** The first block whose timestamp is at least `at` (seconds), once mined: the first block of its second. */
 export async function firstAt(url: string, at: bigint): Promise<Header> {
-  const head = await until(url, (h) => BigInt(h.timestamp) >= at, `a block at ${at} s`);
+  const head = BigInt((await until(url, (h) => BigInt(h.timestamp) >= at, `a block at ${at} s`)).number);
+  return headAt(url, toHex(await firstSince(url, at, head, head - 1n)));
+}
+
+/** The first block at or below `hi` (whose timestamp is at least `at`) with a timestamp at least `at`.
+ *  The search starts at `guess`, steps back from it doubling the step while it is late enough, then
+ *  bisects: no cadence assumed, a good guess saves requests. */
+export async function firstSince(url: string, at: bigint, hi: bigint, guess: bigint): Promise<bigint> {
   const late = async (n: bigint) => BigInt((await stampOf(url, toHex(n))).timestamp) >= at;
   // invariant: block `hi` is at or after `at`, block `lo` before it (or lo = -1)
-  let hi = BigInt(head.number);
-  let lo = hi - (BigInt(head.timestamp) - at) / NEXT_S - 1n;
+  let lo = guess < hi ? guess : hi - 1n;
   for (let step = 1n; lo >= 0n && (await late(lo)); step *= 2n) [hi, lo] = [lo, lo - step];
   if (lo < 0n) lo = -1n;
   if (lo + 1n < hi && (await late(lo + 1n))) hi = lo + 1n;
@@ -368,54 +416,40 @@ export async function firstAt(url: string, at: bigint): Promise<Header> {
     if (await late(mid)) hi = mid;
     else lo = mid;
   }
-  return headAt(url, toHex(hi));
+  return hi;
 }
 
 /** The check's reference block, which the sentinel does not choose: the first block whose timestamp is
  *  at least REF_MARGIN_S after the NEAR request (`requested_ns`, nanoseconds). replay --check recomputes it. */
 export const refBlock = (url: string, requestedNs: string) => firstAt(url, (BigInt(requestedNs) + 999_999_999n) / 1_000_000_000n + REF_MARGIN_S);
 
+/** The later side's block, which the sentinel does not choose either: the first block `later` seconds
+ *  after the reference block `head`, but never past the block before the late sale's approve, so the
+ *  later side always sells again (a cadence that moved during the wait, or a gap in a fork's clock, could
+ *  put it past). Once mined; replay --check recomputes it. */
+export async function laterBlock(url: string, head: Header, later: number, sale: Sale): Promise<Header> {
+  const at = BigInt(head.timestamp) + BigInt(later);
+  const cap = BigInt(head.number) + BigInt(sale.late) - 1n;
+  const h = await until(url, (h) => BigInt(h.timestamp) >= at || BigInt(h.number) >= cap, `a block at ${at} s or block ${cap}`);
+  const n = BigInt(h.timestamp) >= at ? await firstSince(url, at, BigInt(h.number), BigInt(h.number) - 1n) : cap;
+  return headAt(url, toHex(n < cap ? n : cap));
+}
+
 /** Label prefix of the later side: the guard's approves and swaps again, on a real block after the reference. */
 export const LATER = "later: ";
-/** The later side's facts (evidence.later): the real block, the slots the buy wrote that Base also wrote
- *  before it (address:slot), the pool's reserves (token0, token1) at its start. */
-export type Later = { block: number; moved: string[]; reserves: [string, string] };
-const GET_RESERVES = "0x0902f1ac";
+/** The later side's facts (evidence.later, app/later.ts): the real block, the slots the buy wrote that
+ *  Base also wrote before it (address:slot), the pool's reserves (token0, token1) at its start, the real
+ *  trades of the pool re-executed after the buy (their hashes), and why they could not be (null when
+ *  they were, or when nothing moved). */
+export type Later = { block: number; moved: string[]; reserves: [string, string]; replayed: Hex[]; unverified: string | null };
 
 /** The later side's blocks: the guard side's (`guardSide`, on reference block `block`) after real block
  *  `real`, every one listed (a node fills a gap with 12 s blocks), its approves and swaps relabelled,
  *  at the same block numbers. A sale whose approve is not after `real` is left out whole: its swap's
- *  block stays, empty (on Base, about 100 blocks a check, often the first sale). */
+ *  block stays, empty (on Base, 80 to 120 blocks a check, often the first sale). */
 export function laterBlocks(guardSide: Block[], block: bigint, sale: Sale, real: bigint): Block[] {
-  const dropped = block + BigInt(sale.first) <= real ? block + BigInt(sale.first) + 1n : real;
-  return guardSide.filter((b) => b.number > real).map((b) => ({ ...b, calls: b.number <= dropped ? [] : b.calls.map((c) => ({ ...c, label: `${LATER}${c.label}` })) }));
-}
-
-/** The later side's request: the guard side's approves and swaps (`blocks`, laterBlocks) on real block
- *  `r`, which Base mined after the reference block `ref`, with what the guard's buy wrote there (`diff`,
- *  from the trace) applied. A storage slot Base did not write since takes the buy's value; one Base also
- *  wrote keeps Base's value and is reported in `moved`; an ETH balance adds the buy's change to Base's
- *  (WETH's is its total supply). The guard gets what its own calls spend, as on the other sides. Each
- *  simulated block keeps the guard side's time, so the two sides differ only in state, unless Base's
- *  clock ran ahead of 2 s a block (then the blocks follow `r`'s time). `reserves`: the pool's at the
- *  start, for the sales' quotes. Shared with app/replay.ts. */
-export async function laterSide(url: string, r: Header, ref: Header, blocks: Block[], diff: Diff, fees: Fees, guard: Address, pair: Address): Promise<{ request: Request } & Omit<Later, "block">> {
-  const state: Record<string, Record<string, Hex>> = {};
-  const moved: string[] = [];
-  for (const [a, slots] of Object.entries(diff.storage)) {
-    for (const [s, [pre, post]] of Object.entries(slots)) {
-      if (BigInt(await rpc<Hex>(url, "eth_getStorageAt", [a, s, r.number])) === BigInt(pre)) (state[a] ??= {})[s] = post;
-      else moved.push(`${a}:${s}`);
-    }
-  }
-  const funds: Record<string, bigint> = {};
-  for (const [a, [pre, post]] of Object.entries(diff.balance)) funds[a] = BigInt(await rpc<Hex>(url, "eth_getBalance", [a, r.number])) + BigInt(post) - BigInt(pre);
-  Object.assign(funds, await balances(url, r, blocks, fees, guard, null));
-  const aligned = timeOf(ref, BigInt(r.number));
-  const request = buildRequest(aligned >= BigInt(r.timestamp) ? { ...r, timestamp: toHex(aligned) } : r, funds, blocks, fees, state);
-  const [{ stateOverrides }] = (request.params[0] as { blockStateCalls: { stateOverrides: unknown }[] }).blockStateCalls;
-  const out = await rpc<Hex>(url, "eth_call", [{ to: pair, data: GET_RESERVES }, r.number, stateOverrides]);
-  return { request, moved, reserves: [BigInt(`0x${out.slice(2, 66)}`).toString(), BigInt(`0x${out.slice(66, 130)}`).toString()] };
+  const out = [sale.first, sale.late].filter((n) => block + BigInt(n) <= real).map((n) => block + BigInt(n) + 1n); // the swaps whose approve is not after `real`
+  return guardSide.filter((b) => b.number > real).map((b) => ({ ...b, calls: out.includes(b.number) ? [] : b.calls.map((c) => ({ ...c, label: `${LATER}${c.label}` })) }));
 }
 
 /** The four requests to simulate. Guard side: the guard's own transactions as is and nothing else,
@@ -493,17 +527,18 @@ export type Ticket = { guard: string; id: number; requested_ns: string };
  *  ticket and of the hash of the reference block. That hash does not exist before the block, so a token
  *  owner watching NEAR cannot whitelist the probes, nor expect either sale's block, the first one's
  *  amount or the later side's block, in advance; replay --check recomputes them. */
-export function deriveProbes(t: Ticket, blockHash: Hex): Probe {
+export function deriveProbes(t: Ticket, blockHash: Hex, c: Cadence): Probe {
   const digest = (role: string) => sha256(stringToHex(`goblin-near probe|${t.guard}|${t.id}|${t.requested_ns}|${blockHash.toLowerCase()}|${role}`));
+  const { first, late } = saleRanges(c);
   const x = BigInt(digest("sale"));
-  const span = BigInt(SALE_BLOCKS[1] - SALE_BLOCKS[0] + 1);
+  const span = BigInt(first[1] - first[0] + 1);
   // 13.01 % to 86.99 %: a whole percent (74 choices) plus 1 to 99 basis points.
   const bps = 1301n + ((x / span) % 74n) * 100n + ((x / span / 74n) % 99n);
-  const late = BigInt(digest("late")) % BigInt(LATE_SALE_BLOCKS[1] - LATE_SALE_BLOCKS[0] + 1);
+  const lateBlock = late[0] + Number(BigInt(digest("late")) % BigInt(late[1] - late[0] + 1));
   return {
     buyer: `0x${digest("buyer").slice(-40)}` as Address,
     stranger: `0x${digest("stranger").slice(-40)}` as Address,
-    sale: { first: SALE_BLOCKS[0] + Number(x % span), bps: Number(bps), late: LATE_SALE_BLOCKS[0] + Number(late) },
+    sale: { first: Math.min(first[0] + Number(x % span), lateBlock - 2), bps: Number(bps), late: lateBlock },
     later: LATER_S[0] + Number(BigInt(digest("later")) % BigInt(LATER_S[1] - LATER_S[0] + 1)),
   };
 }
@@ -511,8 +546,8 @@ export function deriveProbes(t: Ticket, blockHash: Hex): Probe {
 /** An LP holder at the block: `burned` (0x0, 0xdead), `eoa` (no code, or an EIP-7702 delegation:
  *  still a key that can sign), `contract` (unlock terms not read: counted as removable). */
 export type Holder = { address: Address; balance: string; kind: "burned" | "eoa" | "contract" };
-/** The target's Uniswap V2 WETH pair at the block, null without one. `supply_before`: its LP supply
- *  WINDOW_BLOCKS earlier ("0" if the pair did not exist). `created`: the pair's creation block when
+/** The target's Uniswap V2 WETH pair at the block, null without one. `supply_before`: its LP supply at
+ *  the first block of the window, LIQUIDITY_S before the check's ("0" if the pair did not exist). `created`: the pair's creation block when
  *  it is younger than the window, else null. `holders`: LP holders at the block, from the window's
  *  Transfer recipients plus 0x0 and 0xdead; null when not read (old liquidity) or when there are
  *  more than MAX_HOLDERS `candidates`. Deterministic for a block: replay recomputes it. */
@@ -533,14 +568,16 @@ async function read(url: string, to: Address, fn: string, args: unknown[], block
 const codeAt = (url: string, a: Address, block: bigint) => rpc<Hex>(url, "eth_getCode", [a, toHex(block)]);
 const isOld = (supply: bigint, before: bigint) => before * 10_000n >= supply * OLD_BPS;
 
-/** Who can remove the liquidity of `token`'s V2 WETH pair at `block`, from public-RPC reads only:
- *  eth_call, eth_getCode, and eth_getLogs over the window only, never below the pair's creation. */
-export async function liquidityFacts(url: string, token: Address, block: bigint): Promise<Liquidity> {
+/** Who can remove the liquidity of `token`'s V2 WETH pair at `head`, from public-RPC reads only:
+ *  eth_call, eth_getCode, and eth_getLogs over the window (from the first block LIQUIDITY_S before it,
+ *  found from cadence `c`'s guess) only, never below the pair's creation. */
+export async function liquidityFacts(url: string, token: Address, head: Stamp, c: Cadence): Promise<Liquidity> {
+  const block = BigInt(head.number);
   const found = (await read(url, FACTORY, "getPair", [token, WETH], block)) as Address;
   if (BigInt(found) === 0n) return null;
   const pair = found.toLowerCase() as Address;
   const supply = (await read(url, pair, "totalSupply", [], block)) as bigint;
-  const from = block - WINDOW_BLOCKS;
+  const from = await firstSince(url, BigInt(head.timestamp) - BigInt(LIQUIDITY_S), block, block - BigInt(blocksIn(c, LIQUIDITY_S)));
   const pairOld = from >= 0n && (await codeAt(url, pair, from)) !== "0x";
   const before = pairOld ? ((await read(url, pair, "totalSupply", [], from)) as bigint) : 0n;
   const base = { pair, supply: supply.toString(), supply_before: before.toString() };
@@ -579,14 +616,14 @@ export async function liquidityFacts(url: string, token: Address, block: bigint)
 /** Short address for reasons (ASCII: the guard counts reasons in bytes). */
 export const short = (a: string) => `${a.slice(0, 6)}..${a.slice(-4)}`;
 
-/** The liquidity rule (WINDOW_BLOCKS, REMOVABLE_WARN): old liquidity passes on its age; otherwise
+/** The liquidity rule (LIQUIDITY_S, REMOVABLE_WARN): old liquidity passes on its age; otherwise
  *  holders must be read and add up to the supply, or it is a warn. Pure: replay rejudges it. */
 export function liquidityFindings(l: Liquidity, block: number): Finding[] {
   if (!l || BigInt(l.supply) === 0n) return []; // no pool or an empty one: the simulated buy says so
   const supply = BigInt(l.supply);
   if (isOld(supply, BigInt(l.supply_before))) return [];
   const pct = (x: bigint) => Math.round((Number(x) / Number(supply)) * 100);
-  const age = l.created !== null ? `pool ${block - l.created} blocks old` : `${pct(supply - BigInt(l.supply_before))} % of the LP minted in the last ${WINDOW_BLOCKS} blocks`;
+  const age = l.created !== null ? `pool ${block - l.created} blocks old` : `${pct(supply - BigInt(l.supply_before))} % of the LP minted in the last hour`;
   if (!l.holders) return [{ level: "warn", text: `${age}: LP spread over ${l.candidates} addresses, holders not read` }];
   const sum = (hs: Holder[]) => hs.reduce((n, h) => n + BigInt(h.balance), 0n);
   if (sum(l.holders) !== supply) return [{ level: "warn", text: `${age}: LP holders not all accounted for (${pct(sum(l.holders))} % of the supply)` }];
@@ -647,57 +684,59 @@ export function nearFindings(n: NearFacts, codeHash: Hex, implementation: Addres
  *  two sales; the trace gives what the buy wrote, and the later side runs the sales again on Base's later
  *  state with it applied. Throws when the index window is not bound to the block: no verdict rather than
  *  an unknown reputation. */
-export async function checkToken(url: string, token: Address, guard: Address, probes: (head: Header) => Probe, ctx: Context): Promise<Report> {
+export async function checkToken(url: string, token: Address, guard: Address, probes: (head: Header, c: Cadence) => Probe, ctx: Context): Promise<Report> {
   const head = await refBlock(url, ctx.requested_ns);
-  const { sale, later, ...probe } = probes(head);
+  const cadence = await cadenceAt(url, head);
+  const { sale, later, ...probe } = probes(head, cadence);
   const who = { guard, ...probe };
   const block = BigInt(head.number);
   const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
   const code = await rpc<Hex>(url, "eth_getCode", [token, toHex(block)]);
   const implementation = await implementationAt(url, token, block);
   const opcodes = await opcodesOf(url, code, implementation, block);
-  const liquidity = await liquidityFacts(url, token, block);
+  const liquidity = await liquidityFacts(url, token, head, cadence);
   const template = templateOf(code);
   const own = liquidity?.pair ?? null;
   // An index whose window is not bound to this block judges nothing: the check fails (the sentinel then
   // posts a block), it never falls back to an unknown reputation.
   const index = ctx.index ? await ctx.index(Number(block)) : null;
-  const window = index?.chain_id === chainId ? windowProblem(Number(block), index.from, index.to) : null;
+  const window = index?.chain_id === chainId ? windowProblem(head, await stampOf(url, toHex(index.from)), index.to) : null;
   if (window) throw new Error(window);
-  const reputation = index?.chain_id === chainId ? reputationOf(index, template, beforeBlock(index, own, await ownFunding(url, index, own))) : null;
+  const reputation = index?.chain_id === chainId ? reputationOf(index, template, beforeBlock(index, own, await ownFunding(url, index, own)), cadence) : null;
   const near = await ctx.near(token);
   const amount = ctx.amount;
-  const proof = { chain_id: chainId, block, code_hash: keccak256(code), implementation, liquidity, template, reputation, near, amount_wei: amount.toString(), opcodes, sales: sale };
+  const proof = { chain_id: chainId, block, cadence, code_hash: keccak256(code), implementation, liquidity, template, reputation, near, amount_wei: amount.toString(), opcodes, sales: sale };
 
   // 1st simulation: the buys alone, the guard's with no minimum (quote 0), for the amounts bought; the
   // quote and owner() apart. Without a pool the check stops at the buy with a warn, and nothing is traced.
   const [buy0] = await ctx.preview.check(0n);
   const first1 = plan(token, who, block, amount, { buy: buy0 });
-  const first = await simulate(url, head, first1, sameFees([buy0]), guard, null);
+  const first = await simulate(url, head, cadence, first1, sameFees([buy0]), guard, null);
   const st = buyStages(byLabel(labelsOf(first1), first.response.flat()), { token, ...who });
   if (st.stop || !liquidity) {
     const t = liquidity ? await trace(url, first.request[0], Number(block), token) : null;
-    return report({ ...proof, touched: t?.touched ?? null, token_calls: t?.calls ?? null, later: null }, first, labelsOf(first1), [keccak256(buy0)], { token, ...who });
+    return report({ ...proof, touched: t?.touched ?? null, token_calls: t?.calls ?? null, token_balances: t?.balances ?? null, later: null }, first, labelsOf(first1), [keccak256(buy0)], { token, ...who });
   }
 
   // 2nd simulation: the guard's buy as it would be signed on this quote (minimum = quote - slippage),
   // then its two sales as it would sign them; their twins and the synthetic calls apart.
   const [buy] = await ctx.preview.check(st.amounts.guard);
-  const deadline = timeOf(head, block + LATE_BLOCKS) + 10_000n;
+  const deadline = timeOf(head, cadence, block + LATE_BLOCKS) + 10_000n;
   const [share, rest] = saleAmounts(st.amounts.guard, sale.bps);
   const sales: [Hex[], Hex[]] = [await ctx.preview.sale(share, deadline), await ctx.preview.sale(rest, deadline)];
   const fees = sameFees([buy, ...sales.flat()]);
   const sides = plan(token, who, block, amount, { buy, sales }, { amounts: st.amounts, owner: st.owner, sale });
-  const sim = await simulate(url, head, sides, fees, guard, st.owner);
+  const sim = await simulate(url, head, cadence, sides, fees, guard, st.owner);
   // The guard side replayed on a local fork: the addresses it touches, the token's calls, the buy's
   // state change; then the sales again on the first real block `later` seconds on, with that change applied.
   const t = await trace(url, sim.request[0], Number(block), token);
-  const real = await firstAt(url, BigInt(head.timestamp) + BigInt(later));
+  const real = await laterBlock(url, head, later, sale);
   sides.later = laterBlocks(sides.guard, block, sale, BigInt(real.number));
-  const l = await laterSide(url, real, head, sides.later, t.diff, fees, guard, liquidity.pair);
+  const l = await laterSide(url, real, head, cadence, sides.later, t.diff, fees, guard, token, liquidity.pair);
   const out = await rpc<{ calls: Result[] }[]>(url, l.request.method, l.request.params);
   const both = { request: [...sim.request, l.request], response: [...sim.response, out.flatMap((b) => b.calls)] };
-  const facts = { ...proof, touched: t.touched, token_calls: t.calls, later: { block: Number(real.number), moved: l.moved, reserves: l.reserves } };
+  const { request: _, ...found } = l;
+  const facts = { ...proof, touched: t.touched, token_calls: t.calls, token_balances: t.balances, later: { block: Number(real.number), ...found } };
   return report(facts, both, labelsOf(sides), [keccak256(buy)], { token, ...who });
 }
 
@@ -809,36 +848,45 @@ function sideFindings(r: Record<string, Result>, p: string, w: Parties, pair: Ad
 /** The later side against the guard side, sale by sale at the same blocks: a sale of the guard's that
  *  goes through on the reference block's frozen copy but is refused on Base's later state, or pays more
  *  than 1 % less there against the pool's quote (the pool may have moved), is keyed on state Base moves
- *  and a lone simulation keeps still. The first difference only (a refused first sale changes the late
- *  one). Never listed: Base's state, not the token's behaviour alone. A slot the buy wrote that Base also
- *  wrote before the later block is a warn: the later sales ran on Base's value there, not on the buy's. */
+ *  and a lone simulation keeps still: a block. The first difference only (a refused first sale changes
+ *  the late one). Never listed: Base's state, not the token's behaviour alone.
+ *  When others wrote what the buy wrote and their transactions could not be re-executed after it
+ *  (`unverified`, app/later.ts), the later sales ran on Base's values for those slots and the buy's for
+ *  the rest, a state no chain had: the resale is not verified, a warn naming why, and a sale refused there
+ *  only says so. It blocks nothing: anyone who sends the token to the guard's public address during a
+ *  check would otherwise block an honest token (the guard then holds the dust, not what it bought). So
+ *  too a warn when no sale ran again. */
 function laterFindings(r: Record<string, Result>, w: Parties, sales: Sale, later: Later | null, pair: Address | null): Finding[] {
   if (!later || !pair) return [];
-  const out: Finding[] = [];
-  if (later.moved.length) {
-    const owners = [...new Set(later.moved.map((m) => short(m.split(":")[0])))].join(", ");
-    out.push({ level: "warn", text: `${later.moved.length} slot(s) the buy wrote moved on Base before block ${later.block} (${owners}): the later sales ran on Base's values` });
-  }
   const at = `on Base's state of block ${later.block}`;
+  if (!SALES.some((s) => r[`${LATER}${GUARD}sale${s}`])) return [{ level: "warn", text: `resale not verified ${at}: no sale after it` }];
   const bought = tokensIn(r[`${GUARD}buy`], w.token, w.guard);
   const steps = [GUARD, `${LATER}${GUARD}`].map((p) => SALES.map((s) => [r[`${p}approve router${s}`], r[`${p}sale${s}`]]));
   const start: [bigint, bigint] = [BigInt(later.reserves[0]), BigInt(later.reserves[1])];
-  for (const [i, s] of SALES.entries()) {
-    const [frozen, real] = steps.map((side) => side[i]);
-    if (!frozen[1] || !real[1] || !ok(frozen[1])) continue;
-    const when = `${i ? sales.late : sales.first} blocks after the buy`;
-    if (!ok(real[1])) return [...out, { level: "block", text: `sale refused ${when} ${at} (${revertReason(real[1])})` }];
-    const x = saleAmounts(bought, sales.bps)[i];
-    const quoteFrozen = saleQuote([r[`${GUARD}buy`], ...steps[0].slice(0, i).flat()], pair, w.token, x);
-    const quoteReal = quoteAt(lastSync(steps[1].slice(0, i).flat(), pair) ?? start, w.token, x);
-    const [paid, paidReal] = [frozen, real].map((x) => moves(x, ETH_LOGS, w.guard, "to"));
-    // paidReal / quoteReal below 99 % of paid / quoteFrozen
-    if (paidReal * quoteFrozen * 100n < paid * quoteReal * 99n) {
-      const pct = quoteFrozen && quoteReal && paid ? Math.round(100 - (100 * Number(paidReal) * Number(quoteFrozen)) / (Number(paid) * Number(quoteReal))) : 100;
-      return [...out, { level: "block", text: `sale ${when} pays ${pct} % less ${at}` }];
+  /** The first sale that fails there (`refused`: its revert reason) or pays more than 1 % less, or null. */
+  const differs = (): { when: string; refused: string | null; pct: number } | null => {
+    for (const i of [0, 1] as const) {
+      const [frozen, real] = steps.map((side) => side[i]);
+      if (!frozen[1] || !real[1] || !ok(frozen[1])) continue;
+      const when = `${i ? sales.late : sales.first} blocks after the buy`;
+      if (!ok(real[1])) return { when, refused: revertReason(real[1]), pct: 100 };
+      const x = saleAmounts(bought, sales.bps)[i];
+      const quoteFrozen = saleQuote([r[`${GUARD}buy`], ...steps[0].slice(0, i).flat()], pair, w.token, x);
+      const quoteReal = quoteAt(lastSync(steps[1].slice(0, i).flat(), pair) ?? start, w.token, x);
+      const [paid, paidReal] = [frozen, real].map((x) => moves(x, ETH_LOGS, w.guard, "to"));
+      // paidReal / quoteReal below 99 % of paid / quoteFrozen
+      if (paidReal * quoteFrozen * 100n < paid * quoteReal * 99n) {
+        const pct = quoteFrozen && quoteReal && paid ? Math.round(100 - (100 * Number(paidReal) * Number(quoteFrozen)) / (Number(paid) * Number(quoteReal))) : 100;
+        return { when, refused: null, pct };
+      }
     }
-  }
-  return out;
+    return null;
+  };
+  const d = differs();
+  const sale = d && (d.refused !== null ? `refused ${d.when}` : `${d.when} pays ${d.pct} % less`);
+  if (later.unverified !== null) return [{ level: "warn", text: `resale not verified ${at}: ${later.unverified}${d ? `; there, merged with the buy's values, the sale ${sale}` : ""}` }];
+  if (!d) return [];
+  return [{ level: "block", text: d.refused !== null ? `sale ${sale} ${at} (${d.refused})` : `sale ${sale} ${at}` }];
 }
 
 /** Pure judgment: depends only on the call labels and their results, hence replayable
@@ -880,7 +928,7 @@ export function quoteOf(labels: string[], results: Result[], w: Parties): bigint
 export const byLabel = (labels: string[], results: Result[]) => Object.fromEntries(labels.map((l, i) => [l, results[i]]));
 
 /** Facts beside the simulation that the verdict rests on, all in the evidence. */
-export type Facts = Pick<Report["evidence"], "block" | "code_hash" | "implementation" | "liquidity" | "reputation" | "near" | "opcodes" | "touched" | "token_calls" | "sales" | "later">;
+export type Facts = Pick<Report["evidence"], "block" | "cadence" | "code_hash" | "implementation" | "liquidity" | "reputation" | "near" | "opcodes" | "touched" | "token_calls" | "token_balances" | "sales" | "later">;
 
 function report(
   proof: Omit<Facts, "block"> & { chain_id: number; block: bigint; template: Hex; amount_wei: string },
@@ -894,6 +942,7 @@ function report(
   const evidence = {
     chain_id: proof.chain_id,
     block: Number(proof.block),
+    cadence: proof.cadence,
     method: "eth_simulateV1" as const,
     request_sha256: sha256(stringToHex(JSON.stringify(sim.request))),
     amount_wei: proof.amount_wei,
@@ -909,6 +958,7 @@ function report(
     opcodes: proof.opcodes,
     touched: proof.touched,
     token_calls: proof.token_calls,
+    token_balances: proof.token_balances,
     sales: proof.sales,
     later: proof.later,
     list_target,
@@ -930,7 +980,7 @@ export function exitPlan(guard: Address, block: bigint, txs: Hex[]): Block[] {
 export type ExitReport = {
   verdict: Verdict;
   reasons: string;
-  evidence: { kind: "exit"; chain_id: number; block: number; method: "eth_simulateV1"; request_sha256: Hex; amount: string; calls: string[]; quote: string; tx_hashes: Hex[] };
+  evidence: { kind: "exit"; chain_id: number; block: number; cadence: Cadence; method: "eth_simulateV1"; request_sha256: Hex; amount: string; calls: string[]; quote: string; tx_hashes: Hex[] };
   /** One request: the guard's approve and swap, nothing else. */
   request: Request[];
   response: Result[][];
@@ -952,13 +1002,14 @@ export function judgeExit(labels: string[], results: Result[], w: { token: Addre
  *  twice: with no floor for the quote, then exactly as signed on that quote. allow with the ETH received
  *  as quote, or block without one. */
 export async function checkExit(url: string, token: Address, guard: Address, amount: bigint, preview: (quote: bigint) => Promise<Hex[]>): Promise<ExitReport> {
-  const head = await headAt(url, "latest");
+  const head = await firstAt(url, BigInt((await stampOf(url, "latest")).timestamp)); // the first block of the latest second
+  const cadence = await cadenceAt(url, head);
   const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
   const pair = (await read(url, FACTORY, "getPair", [token, WETH], BigInt(head.number))) as Address;
   const run = async (txs: Hex[]) => {
     const fees = sameFees(txs);
     const blocks = exitPlan(guard, BigInt(head.number), txs);
-    const request = buildRequest(head, await balances(url, head, blocks, fees, guard, null), blocks, fees);
+    const request = buildRequest(head, cadence, await balances(url, head, blocks, fees, guard, null), blocks, fees);
     const results = (await rpc<{ calls: Result[] }[]>(url, request.method, request.params)).flatMap((b) => b.calls);
     const labels = blocks.flatMap((b) => b.calls.map((c) => c.label));
     return { request, results, labels, txs, ...judgeExit(labels, results, { token, seller: guard, pair }) };
@@ -969,6 +1020,7 @@ export async function checkExit(url: string, token: Address, guard: Address, amo
     kind: "exit" as const,
     chain_id: chainId,
     block: Number(BigInt(head.number)),
+    cadence,
     method: "eth_simulateV1" as const,
     request_sha256: sha256(stringToHex(JSON.stringify([r.request]))),
     amount: amount.toString(),

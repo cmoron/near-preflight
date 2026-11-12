@@ -17,8 +17,7 @@ deploys on a local copy of Base. Each `bun test -t` needs that fork running ([re
 | Attack                                                                          | Answer (exact reason)                                                                                             | Reproduce                                |
 | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | Every sale refused after the buy, a honeypot (`sell_blocked`)                   | 🔴 listed: `sale refused N blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)`                           | `bun test -t "sale closed from the buy"` |
-| Sales refused from 5 min after the buy (`sell_blocked_later`)                   | 🔴 listed: `sale refused N blocks after the buy`, on the late sale (200 to 255 blocks after the buy)              | `bun test -t "sale closed 5 minutes"`    |
-| A 90 % tax on the sale, or on the late sale only (`sell_tax`, `sell_tax_later`) | 🔴 listed: `90 % tax on the sale N blocks after the buy`                                                          | `bun test -t "90 % tax"`                 |
+| A 90 % tax on the sale (`sell_tax`)                                             | 🔴 listed: `90 % tax on the sale N blocks after the buy`                                                          | `bun test -t "90 % tax on the sale"`     |
 | A token that sells for itself into its pool (`pair_pull_tax`)                   | 🔴 listed: `the pool paid out more WETH than the seller received N blocks after the buy`                          | `bun test -t "swaps 90 % of each sale"`  |
 | A buy that delivers almost nothing                                              | 🔴 listed: `simulated buy received no tokens` or `100 % tax on the buy`, when the pool quotes 1,000 units or more | `bun test -t "delivers 500 units"`       |
 
@@ -46,9 +45,10 @@ A trap can try to sell only when it detects a simulation, or only at the moment 
 | Sells only at zero gas price or base fee (a simulator's defaults) (`sim_detector`)                                         | 🔴 listed: `sale refused N blocks after the buy`                                                                  | `bun test -t "only in simulation"`                    |
 | Sells only after a call only a simulator sends (a top-level `balanceOf`) (`judge_trap`, `untouched_buyer`, `stranger_key`) | 🔴 listed                                                                                                         | `bun test -t "JudgeTrap"`                             |
 | Sells only after an approve of 2^256 - 1, or a buy of exactly 0.01 ETH (`approve_max_only`, `buy_001_only`)                | 🔴 listed: the check runs the exact bytes the guard signs                                                         | `bun test -t "Trap2"`                                 |
-| Sells only in the block right after the buy (`next_block_key`)                                                             | 🔴 listed: the first sale lands 5 to 150 blocks after the buy                                                     | `bun test -t "NextBlockKey"`                          |
+| Sells only in the block right after the buy (`next_block_key`)                                                             | 🔴 listed: the first sale lands 2 to 25 s after the buy (10 to 125 blocks on Base)                                | `bun test -t "NextBlockKey"`                          |
 | Sells only half or all of the balance (`amount_trap`)                                                                      | 🔴 listed: the first sale sells 13 % to 87 %                                                                      | `bun test -t "AmountTrap"`                            |
-| Sells only at the check's late block                                                                                       | 🔴 the late sale is drawn 200 to 255 blocks after the buy; `replay --check` refuses a schedule the sentinel chose | `bun test -t "sales derive"`, `-t "late sale chosen"` |
+| Sells only at the check's late block                                                                                       | 🔴 the late sale is drawn 30 to 51 s after the buy; `replay --check` refuses a schedule the sentinel chose        | `bun test -t "drawn in seconds"`, `-t "late sale chosen"` |
+| Tells a simulated block by its timestamp against its number                                                                | 🔴 not a tell: simulated blocks get the times real ones would have at the cadence measured, five a second on Base | `bun test -t "five share each second"`                |
 
 Every draw comes from the check and the hash of its reference block, the first Base block 4 s after the
 request on NEAR, which does not exist when the agent asks ([how](sentinel.md#sales-drawn-per-check)).
@@ -61,14 +61,17 @@ record of Ethereum), the fee vaults, WETH's supply, the base fee, the Uniswap fa
 | Attack                                                                                                    | Answer (exact reason)                                                                                         | Reproduce                                  |
 | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
 | Sells only while L1Block is unchanged since the buy (the red team's) (`red_l1_trap`, `helper_trap`)       | 🔴 not listed: `reads 0x4200..0015, 0x8bde..9881 during a transfer: state no simulation reproduces`           | `bun test -t "RedL1Trap"`                  |
-| Sells only while nobody else moves WETH's supply (`weth_key`), checked at the approve (`approve_key`)     | 🔴 not listed: `sale refused N blocks after the buy on Base's state of block B (…)` and `token calls WETH …` | `bun test -t "keyed on state Base moves"` |
-| The same, unless a pair was created between the approve and the swap, as the busy side did (`busy_tell`) | 🔴 not listed: the same, and `token calls WETH and the V2 factory during a transfer: state all of Base moves` | `bun test -t "BusyTell"`                   |
+| Sells only while nobody else moves WETH's supply (`weth_key`), checked at the approve (`approve_key`)     | 🔴 not listed: `sale refused N blocks after the buy on Base's state of block B (…)` and `token calls or reads WETH …` | `bun test -t "keyed on state Base moves"` |
+| The same, unless a pair was created between the approve and the swap, as the busy side did (`busy_tell`) | 🔴 not listed: the same, and `token calls or reads WETH and the V2 factory during a transfer: state all of Base moves` | `bun test -t "BusyTell"`                   |
+| Reads WETH's or the guard's state without a call (BALANCE, EXTCODE*), in its own code or its implementation's | 🔴 not listed: `token calls or reads WETH …`, `token reads the ETH balance of the guard during a transfer …`  | `bun test -t "reads an ETH balance"`, `-t "implementation in the proxy"` |
+| Any of these, its pool traded by others during the check                                                 | 🔴 still blocked: others' trades are re-executed after the buy, or the resale is not verified                  | `bun test -t "its pool traded too"`        |
 
 The first row is the [environment rule](sentinel.md#environment-rule). The others meet two answers:
 
 - the [later side](sentinel.md#the-four-requests) runs the guard's sales again on the first real block
   16 to 24 s after the reference block, with the buy's state change applied: whatever Base did in
-  between, before the approve too, with no recipe to recognise;
+  between, before the approve too, with no recipe to recognise; others' trades of the pool are
+  [re-executed](sentinel.md#others-trades-during-the-wait) after the buy;
 - the token's own code may not call WETH or the factory, whose state all of Base moves: the factory
   got 16 V2 pairs in an hour measured on Base, too few for the window a check can wait.
 
@@ -107,7 +110,9 @@ post verdicts. What a lie gets:
 | ------------------------------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | Asks to list an honest token                            | `replay --check`: `on-chain list_target true != evidence.list_target false`             | `bun test -t "list_target true"`                           |
 | Chooses the block, the probes, the sales or the later side's block | `replay --check` refuses them: the block must be the request's reference block, the rest derive from its hash | `bun test -t "reference block\|chosen by the sentinel\|the sentinel chose"` |
-| Judges a farm on an index window that misses its pools  | `replay` reports a `MISMATCH`: the window must start 2,000 blocks before the check's block and end at it | `bun test -t "index window"`                               |
+| Judges a farm on an index window that misses its pools  | `replay` reports a `MISMATCH`: the window must start 2 h before the check's block and end at it | `bun test -t "index window"`                               |
+| Leaves out a trade of the pool it should re-execute     | `replay` reports a `MISMATCH`: it fetches the trades again from the node                 | `bun test -t "leaves out a trade"`                         |
+| States another cadence                                  | `replay` reports a `MISMATCH`: it measures the cadence again at the block               | `bun test -t "cadence other than"`                         |
 | Forges a simulation result or a fact                    | `replay` resends the requests and recomputes every fact                                 | `bun test app/replay.test.ts`                              |
 | Posts `allow` on a trap                                 | **not stopped**: bought if the agent buys within 120 s; replay shows the lie afterwards, from the proof file | see below                                                  |
 
@@ -118,12 +123,13 @@ The owner replaces a compromised key with `set_sentinel`; verdicts it already po
 | Token                                       | Answer                                                                                       | Reproduce                                  |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------ |
 | USDC on the fork                            | 🟢 `allow`; the guard builds the swap, NEAR signs it, the relay broadcasts it to the fork    | `bun test -t "USDC, healthy"`, `./demo.sh` |
-| An honest 30-block cooldown (`cooldown_60`) | 🟢 `allow`; 🔴 not listed when the first sale is drawn within 30 blocks (about 1 check in 6) | `bun test -t "Cooldown60"`                 |
-| USDC on Base mainnet                        | 🟠 `warn`: no template index covers mainnet; its busy pool trading during the check adds one | `./check-mainnet.sh`                       |
+| USDC on the fork, its pool traded by others while the check waits | 🟢 `allow`: their trades re-executed after the buy, the resale verified      | `bun test -t "their trades re-executed"`   |
+| An honest 30-block cooldown (`cooldown_60`) | 🟢 `allow`; 🔴 not listed when the first sale is drawn within 30 blocks (about 1 check in 6 on Base, every check on the fork) | `bun test -t "Cooldown60"`                 |
+| USDC on Base mainnet                        | 🟠 `warn`: no template index covers mainnet; its pool's trades during the check re-executed (check #70), or, when that cannot be built, a second reason: resale not verified | `./check-mainnet.sh`                       |
 
 A refused sale lists the token only if the late sale is refused too: a refusal that clears with time
 blocks that check alone, or any agent could repeat checks until one lists an honest token. The price:
-a trap that sells only in the late sale's window (200 to 255 blocks after the buy) is blocked at every
+a trap that sells only in the late sale's window (30 to 51 s after the buy) is blocked at every
 check, since the first sale always comes earlier, but never reaches the shared blocklist.
 
 ## What it does not stop
@@ -132,25 +138,25 @@ check, since the first sale always comes earlier, but never reaches the shared b
   simulation, a block or draw it chose, or an index window not bound to the check, only afterwards, and
   only from the proof file (the sentinel may withhold it) and a node that still serves both blocks' state.
 - **A lying exit quote.** It gives the agent a lower floor (minimum output); replay catches it afterwards.
-- **What a token does later.** An owner action after the buy (pause, tax, blacklist; any admin, not only
-  `owner()`); behaviour that changes after the late sale (400 to 510 s after the buy).
-- **Sizes and delays the check did not draw.** A sale refused only below some share, or only after 510 s,
+- **What a token does after 51 s.** `eth_simulateV1` reaches 256 blocks past a real block, 51 s at Base's
+  five blocks a second: the late sale lands there at the latest. A sale closed or taxed from 5 min after
+  the buy gets `allow` (`sell_blocked_later`, `sell_tax_later`: `bun test -t "5 minutes"`); so does an
+  owner action after the buy (pause, tax, blacklist; any admin, not only `owner()`).
+- **Sizes and delays the check did not draw.** A sale refused only below some share, or only after 51 s,
   passes. An agent's exit sells its holding when it chooses.
 - **State that does not move within the later side's window.** A token keyed on its own pool or storage
-  passes when nobody touched them during those 16 to 24 s, and fails once someone does; so does one
-  keyed on the guard's own ETH balance (each side gives it what its transactions spend). When Base wrote
-  a slot the buy wrote (the pool traded), the later sales run on Base's value: a `warn` at best. The
-  later side is not traced: an address its sales touch only there goes unseen.
-- **Base's 0.2 s blocks.** The simulated blocks advance 2 s each, as Base did until 2026; Base now mines
-  one every 0.2 s. A token comparing `block.timestamp` with `block.number` since its buy tells the check
-  from a real sale, and every span counted in blocks lasts a tenth of what these pages state
-  ([sentinel](sentinel.md#sales-drawn-per-check)).
+  passes when nobody touched them during those 16 to 24 s, and fails once someone does. Others' trades of
+  the pool are re-executed after the buy, without the transactions before them in their block; when that
+  cannot be built (on Base's USDC/WETH pool, in 4 of 7 windows with a trade; in the one inspected, an
+  arbitrage contract whose balance other transactions of the block also moved), the resale is not
+  verified, a `warn` at best. The later side is not traced: an
+  address its sales touch only there goes unseen.
 - **Front-running.** The signing request and the signed transaction are public on NEAR before anyone
   broadcasts them: a token owner can react before the swap's 300 s deadline.
 - **Template evasion.** A template is the code with `PUSH32` operands and metadata masked: changing any
   other constant makes a new one. Fewer than 3 earlier pools give no finding.
 - **A pool funded before the index window.** It is not judged by reputation (its reasons say so); a
-  lying sentinel can still drop a farm's pools funded more than 2,000 blocks (67 min) before the check.
+  lying sentinel can still drop a farm's pools funded more than 2 h before the check.
 - **The model's decision.** Its digest is optional: a compromised agent can omit it or attach another.
 - **Operations.** One signature at a time for all agents; a fixed NEAR/ETH rate, no oracle; only Uniswap
   V2 WETH pools; an exit that reverts on Base keeps the agent's holding debited until the owner restores it.
@@ -187,7 +193,7 @@ Each now has a test.
 | The recorded decision package re-anchored on a guard that never called the model                  | the signed request names the guard, the agent and a fresh NEAR block; `attest --check` verifies all three |
 | A compromised sentinel key could not be revoked                                                   | `set_sentinel`, owner only, logged                                                                        |
 | A sale only after a top-level `balanceOf`, which only the simulation sent (fifth run's JudgeTrap) | the guard side holds the guard's own transactions alone; every other call runs in a request of its own    |
-| Simulated blocks told apart from real ones (timestamps, one prevrandao for all)                   | 2 s per block, every block up to the late sale listed, a prevrandao per L1 epoch                          |
+| Simulated blocks told apart from real ones (timestamps, one prevrandao for all)                   | every block up to the late sale listed, a prevrandao per L1 epoch; since batch 9, the cadence measured     |
 | A sale tax hidden by a token that sells for itself into the pool during the sale                  | the tax is the ETH the seller receives; a pool paying out more is a `block`                               |
 | One signed decision anchored on two checks                                                        | the guard refuses a digest already anchored; `attest --check` verifies `decision_of`                      |
 | A pair created empty before the index window escaped reputation                                   | an older pool must have held 0.5 ETH before the window, otherwise it is dated by its funding inside it    |
@@ -206,10 +212,15 @@ Each now has a test.
 | `withdraw_fees` took the prices that paid for storage, then a `refund_credit` failed              | a withdrawal leaves storage, every credit and the escrow covered                                          |
 | A sentinel posted an honest proof with `list_target` true and `replay --check` said OK            | `list_target` is in the evidence and stored with the verdict; replay compares both                        |
 | A token delivering almost nothing escaped the blocklist                                           | dust is judged on the pool's quote for the agent's amount                                                 |
-| A token could sell only at the check's late block, always 255 blocks after the buy                | the late sale is drawn per check, 200 to 255 blocks; `replay --check` refuses a chosen one                |
+| A token could sell only at the check's late block, always 255 blocks after the buy                | the late sale is drawn per check (now 30 to 51 s); `replay --check` refuses a chosen one                  |
 | Judge pass 7's WethKey: one unrelated `WETH.deposit()` froze every sale                           | first a busy side (a fixed recipe of others' activity), replaced in pass 8, below                         |
-| A sentinel could judge a farm copy on an index window that missed its earlier pools               | the window must start 2,000 blocks before the check; since pass 8 it ends at the check's block            |
+| A sentinel could judge a farm copy on an index window that missed its earlier pools               | the window must start 2 h before the check (2,000 blocks until batch 9); since pass 8 it ends at the check's block |
 | An honest 30-block cooldown was listed whenever the first sale was drawn within it                | a refused sale lists only when the late sale is refused too                                               |
 | Judge pass 8's ApproveKey and BusyTell: the busy side's recipe, keyed around or recognised        | the later side, on a real block mined 16 to 24 s on; the token's code may not call WETH or the factory     |
 | The sentinel could pick any block from 60 s before the request to 60 s after its verdict, and so the draws | the reference block is the first block 4 s after the request; `replay --check` recomputes it              |
 | An index window could end 300 blocks before the check and drop a farm's newest pools              | the window ends at the check's block                                                                      |
+| Base mines five blocks a second, the check counted 2 s a block: every span a tenth of what it said, simulated blocks spaced as no real block | every rule in seconds, turned into blocks with the cadence measured at the reference block; replay measures it again |
+| An honest token was capped at `warn` whenever someone traded its pool during the check             | others' trades re-executed after the buy, block by block, checked against Base; replay fetches them again   |
+| Replay traced a proof's request on a local fork before checking it was the sentinel's              | the trace runs only once the requests are rebuilt and match                                               |
+| A token reading WETH's or the guard's state without a call (BALANCE, EXTCODE*) escaped the rule    | a tracer records what the token's own code calls or reads; an ETH balance read is a `block`               |
+| A resale on a merge of Base's and the buy's values read as a verified one                          | its reason says `resale not verified`; a refusal there blocks nothing, a `warn` at best                   |

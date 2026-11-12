@@ -40,7 +40,9 @@ const LABELS = {
   next_block_key: 'trap: sells only in the next block',
   amount_trap: 'trap: sells only half or all',
   weth_key: "trap: sells only while nobody else uses WETH",
-  cooldown_60: 'honest: 30-block cooldown after a buy',
+  approve_key: "trap: approves only while nobody else uses WETH",
+  busy_tell: 'trap: sells only while WETH is still, or after a new pair',
+  cooldown_60: 'honest: 30-block cooldown after a buy (6 s on Base)',
 };
 
 const GUARD = new URLSearchParams(location.search).get('guard') || DEFAULT_GUARD;

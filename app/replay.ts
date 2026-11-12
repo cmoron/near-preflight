@@ -8,16 +8,18 @@
 // It needs a node that still serves the state of both blocks. docs/replay.md lists each line.
 // Usage: bun app/replay.ts <proof.json> [rpc] [--check]   (exit code 0 only if every line holds)
 import { decodeFunctionData, encodeFunctionData, keccak256, parseAbi, parseTransaction, serializeTransaction, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
-import { ENV_OPCODES, trace, type Diff, type Trace } from "./environment";
-import { beforeBlock, buildIndex, INDEX_SPAN_BLOCKS, indexSha256, ownFunding, reputationOf, templateOf, windowProblem, type Reputation } from "./index";
+import { ENV_OPCODES, trace, type Trace } from "./environment";
+import { laterSide, MAX_REPLAYED } from "./later";
+import { beforeBlock, buildIndex, INDEX_SPAN_S, indexSha256, ownFunding, reputationOf, templateOf, windowProblem, type Reputation } from "./index";
 import {
   balances,
   buildRequest,
   buyStages,
   byLabel,
+  CADENCE_BLOCKS,
+  cadenceAt,
   deriveProbes,
   exitPlan,
-  firstAt,
   FACTORY,
   FROZEN,
   GUARD,
@@ -26,11 +28,9 @@ import {
   judge,
   judgeExit,
   labelsOf,
-  LATE_SALE_BLOCKS,
+  laterBlock,
   laterBlocks,
-  laterSide,
   liquidityFacts,
-  NEXT_S,
   ok as succeeded,
   opcodesOf,
   plan,
@@ -39,10 +39,13 @@ import {
   ROUTER,
   rpc,
   saleAmounts,
-  SALE_BLOCKS,
+  saleRanges,
   SALES,
+  stampOf,
+  timeOf,
   WETH,
   type Block,
+  type Cadence,
   type Fees,
   type GuardTxs,
   type Header,
@@ -53,12 +56,14 @@ import {
   type Request,
   type Result,
   type Sale,
+  type Sides,
 } from "./verifier";
 
 export type Proof = ProofFile;
 type Evidence = {
   chain_id: number;
   block: number;
+  cadence: Cadence;
   method: string;
   request_sha256: string;
   amount_wei: string;
@@ -74,11 +79,12 @@ type Evidence = {
   opcodes: string[];
   touched: string[] | null;
   token_calls: string[] | null;
+  token_balances: string[] | null;
   sales: Sale;
   later: Later | null;
   list_target: boolean;
 };
-type ExitEvidence = { kind: "exit"; chain_id: number; block: number; method: string; request_sha256: string; amount: string; calls: string[]; quote: string; tx_hashes: string[] };
+type ExitEvidence = { kind: "exit"; chain_id: number; block: number; cadence: Cadence; method: string; request_sha256: string; amount: string; calls: string[]; quote: string; tx_hashes: string[] };
 /** `skipped`: check not verifiable on this node, reported as such (neither passed nor failed). */
 export type Line = { ok: boolean; line: string; skipped?: boolean };
 /** Request read by get_check on the NEAR guard. */
@@ -108,14 +114,13 @@ const blocksOf = (q: Request) => (q.params[0] as { blockStateCalls: BlockStateCa
 /** What replay compares of a call's result: status, return data and logs (emitter, topics, data). */
 const outcome = (r: Result) => JSON.stringify([r.status, r.returnData, (r.logs ?? []).map((l) => [l.address.toLowerCase(), l.topics, l.data])]);
 
-const EVIDENCE_KEYS = "amount_wei,block,calls,chain_id,code_hash,implementation,later,liquidity,list_target,method,near,opcodes,quote,reputation,request_sha256,sales,template,token_calls,touched,tx_hashes";
-const EXIT_KEYS = "amount,block,calls,chain_id,kind,method,quote,request_sha256,tx_hashes";
+const EVIDENCE_KEYS = "amount_wei,block,cadence,calls,chain_id,code_hash,implementation,later,liquidity,list_target,method,near,opcodes,quote,reputation,request_sha256,sales,template,token_balances,token_calls,touched,tx_hashes";
+const EXIT_KEYS = "amount,block,cadence,calls,chain_id,kind,method,quote,request_sha256,tx_hashes";
 const REPUTATION_KEYS = "before_block,drained,from,index_sha256,median_drain_blocks,pools,template,to";
 
 const msg = (e: unknown) => (e instanceof Error ? e.message.split("\n")[0] : String(e));
 const isObj = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
 const iso = (s: number) => new Date(s * 1000).toISOString().replace(".000", "");
-const blockOf = (url: string, tag: string) => rpc<Header>(url, "eth_getBlockByNumber", [tag, false]);
 
 /** `n` keccak256 hashes (0x + 64 hex digits). */
 const hashes = (x: unknown, n: number) => Array.isArray(x) && x.length === n && x.every((h) => typeof h === "string" && /^0x[0-9a-f]{64}$/.test(h));
@@ -131,7 +136,7 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
   }
   if (isObj(e) && e.kind === "exit") {
     if (Object.keys(e).sort().join() !== EXIT_KEYS) return `exit evidence keys are not exactly ${EXIT_KEYS}`;
-    const typed = Number.isSafeInteger(e.chain_id) && Number.isSafeInteger(e.block) && e.method === "eth_simulateV1" && typeof e.request_sha256 === "string" &&
+    const typed = Number.isSafeInteger(e.chain_id) && Number.isSafeInteger(e.block) && isCadence(e.cadence) && e.method === "eth_simulateV1" && typeof e.request_sha256 === "string" &&
       typeof e.amount === "string" && /^\d+$/.test(e.amount) && Array.isArray(e.calls) && typeof e.quote === "string" && /^\d+$/.test(e.quote) && hashes(e.tx_hashes, 2);
     return typed ? (e as unknown as ExitEvidence) : "exit evidence fields have unexpected types";
   }
@@ -140,6 +145,7 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
     Number.isSafeInteger(e.chain_id) &&
     Number.isSafeInteger(e.block) &&
     (e.block as number) >= 0 &&
+    isCadence(e.cadence) &&
     e.method === "eth_simulateV1" &&
     typeof e.request_sha256 === "string" &&
     typeof e.amount_wei === "string" &&
@@ -165,17 +171,23 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
     e.opcodes.every((o) => Object.values(ENV_OPCODES).includes(o as string)) &&
     (e.touched === null || addresses(e.touched)) &&
     (e.token_calls === null || addresses(e.token_calls)) &&
-    isSale(e.sales) &&
+    (e.token_balances === null || addresses(e.token_balances)) &&
+    isSale(e.sales, e.cadence as Cadence) &&
     (e.later === null || isLater(e.later, e.block as number)) &&
     typeof e.list_target === "boolean";
   return typed ? (e as unknown as Evidence) : "evidence fields have unexpected types";
 }
 
 const addresses = (x: unknown) => Array.isArray(x) && x.every((a) => typeof a === "string" && /^0x[0-9a-f]{40}$/.test(a));
-/** The later side's facts: a block after the reference block, slots as address:slot, two reserves. */
+/** The later side's facts: a block after the reference block, slots as address:slot, two reserves, at
+ *  most MAX_REPLAYED trades re-executed, why they could not be or null. */
 const isLater = (x: unknown, block: number): x is Later =>
   isObj(x) &&
-  Object.keys(x).sort().join() === "block,moved,reserves" &&
+  Object.keys(x).sort().join() === "block,moved,replayed,reserves,unverified" &&
+  Array.isArray(x.replayed) &&
+  x.replayed.length <= MAX_REPLAYED &&
+  hashes(x.replayed, x.replayed.length) &&
+  (x.unverified === null || (typeof x.unverified === "string" && x.unverified.length <= 200)) &&
   Number.isSafeInteger(x.block) &&
   (x.block as number) > block &&
   Array.isArray(x.moved) &&
@@ -183,14 +195,16 @@ const isLater = (x: unknown, block: number): x is Later =>
   Array.isArray(x.reserves) &&
   x.reserves.length === 2 &&
   x.reserves.every((r) => typeof r === "string" && /^\d+$/.test(r));
-/** Sales deriveProbes can give: the first 5 to 150 blocks after the buy, 13 % to 87 %, never a whole
- *  percent; the rest 200 to 255 blocks after the buy. */
+/** A cadence cadenceAt can give: CADENCE_BLOCKS blocks in a positive number of seconds. */
+const isCadence = (x: unknown): x is Cadence => isObj(x) && Object.keys(x).sort().join() === "blocks,seconds" && x.blocks === CADENCE_BLOCKS && Number.isSafeInteger(x.seconds) && (x.seconds as number) > 0;
+/** Sales deriveProbes can give at cadence `c` (saleRanges): the first 2 to 25 s after the buy, at
+ *  least 2 blocks before the late one, 13 % to 87 %, never a whole percent; the rest 30 to 51 s after it. */
 const within = (x: unknown, [lo, hi]: readonly [number, number]) => Number.isSafeInteger(x) && (x as number) >= lo && (x as number) <= hi;
-const isSale = (x: unknown): x is Sale =>
+const isSale = (x: unknown, c: Cadence): x is Sale =>
   isObj(x) &&
   Object.keys(x).sort().join() === "bps,first,late" &&
-  within(x.first, SALE_BLOCKS) &&
-  within(x.late, LATE_SALE_BLOCKS) &&
+  within(x.late, saleRanges(c).late) &&
+  within(x.first, [saleRanges(c).first[0], Math.min(saleRanges(c).first[1], (x.late as number) - 2)]) &&
   Number.isSafeInteger(x.bps) &&
   (x.bps as number) > 1300 &&
   (x.bps as number) < 8700 &&
@@ -221,8 +235,8 @@ const SELECTOR = { buy: "0xb6f9de95", approve: "0x095ea7b3", sale: "0x791ac947" 
  *  block, the other blocks empty, every call from the same address and carrying its nonce. Where the
  *  sales fall is rebuild's to check (evidence.sales), their content (amounts, recipient, path)
  *  guardShape's, the buy's hash the evidence's. */
-function guardOnly(bs: BlockStateCall[]): string | null {
-  const [lo, hi] = LATE_SALE_BLOCKS.map((n) => n + 1); // the buy's block, then the late swap n blocks after it
+function guardOnly(bs: BlockStateCall[], c: Cadence): string | null {
+  const [lo, hi] = saleRanges(c).late.map((n) => n + 1); // the buy's block, then the late swap n blocks after it
   if (bs.length !== 1 && !within(bs.length, [lo, hi])) return `${bs.length} blocks, not 1 or ${lo} to ${hi}`;
   const want = bs.length === 1 ? [SELECTOR.buy] : [SELECTOR.buy, SELECTOR.approve, SELECTOR.sale, SELECTOR.approve, SELECTOR.sale];
   const filled = [...bs.entries()].filter(([, b]) => b.calls.length);
@@ -239,7 +253,9 @@ function guardOnly(bs: BlockStateCall[]): string | null {
   return null;
 }
 
-type Rebuilt = { labels: string[]; buyer: Address; guard: Address; stranger: Address | null; owner: Address | null; buy: Hex; later: Omit<Later, "block"> | null };
+/** What rebuild confirms: the labels of every call, the parties, the guard's buy, and what the later side
+ *  is rebuilt from (the guard side's layout, its fees, the reference block). */
+type Rebuilt = { labels: string[]; buyer: Address; guard: Address; stranger: Address | null; owner: Address | null; buy: Hex; sides: Sides; fees: Fees; head: Header };
 const NOBODY: Address = "0x0000000000000000000000000000000000000000";
 type RequestCall = { from: Address; to: Address; data: Hex; value?: Hex; nonce?: Hex; gas: Hex; maxFeePerGas: Hex; maxPriorityFeePerGas: Hex };
 const shape = parseAbi([
@@ -302,15 +318,15 @@ function saleShape(sale: Hex[], token: Address, guard: Address, x: bigint): stri
   return null;
 }
 
-/** Rebuilds the requests checkToken would have produced for proof.target (same calls, same addresses,
- *  router, WETH, blocks at Base's cadence) and derives the labels from them: those of the file do not
- *  count. Only the buyer, the guard's address, the stranger and the guard's own transactions come from
- *  the requests (at the positions plan() gives them; the guard's must have the shape the guard builds,
- *  and their hashes are checked against the evidence and, with --check, the guard); amounts and owner
- *  come from the fresh responses; base fee, prevrandao, coinbase and real balances come from the node,
- *  at the proof's block. The later side is rebuilt on evidence.later's block from `diff`, what the buy
- *  wrote in the trace replay ran again, and the node's state there. No fallback: a missing probe is a defect. */
-async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][], diff: Diff | null): Promise<Rebuilt | { error: string }> {
+/** Rebuilds the three frozen requests checkToken would have produced for proof.target (same calls, same
+ *  addresses, router, WETH, blocks at evidence.cadence) and derives the labels from them, the later
+ *  side's too: those of the file do not count. Only the buyer, the guard's address, the stranger and the
+ *  guard's own transactions come from the requests (at the positions plan() gives them; the guard's must
+ *  have the shape the guard builds, and their hashes are checked against the evidence and, with --check,
+ *  the guard); amounts and owner come from the fresh responses; base fee, prevrandao, coinbase and real
+ *  balances come from the node, at the proof's block. The later side's request is retrace's. No
+ *  fallback: a missing probe is a defect. */
+async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][]): Promise<Rebuilt | { error: string }> {
   try {
     const [g, pr, sy] = p.request.map(blocksOf);
     const token = p.target as Address;
@@ -353,21 +369,52 @@ async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][], di
     const bad = guardShape(txs, token, guard, amount, txs.sales ? saleAmounts(st.amounts.guard, e.sales.bps) : null);
     if (bad) return { error: bad };
     const owner = full ? st.owner : null;
-    const want = await Promise.all(FROZEN.map(async (k) => buildRequest(head, await balances(url, head, sides[k], fees, guard, owner), sides[k], fees)));
+    const want = await Promise.all(FROZEN.map(async (k) => buildRequest(head, e.cadence, await balances(url, head, sides[k], fees, guard, owner), sides[k], fees)));
     if (JSON.stringify(want) !== JSON.stringify(p.request.slice(0, 3))) return { error: "requests are not the ones checkToken builds for this target" };
-    let rebuilt: Omit<Later, "block"> | null = null;
-    if (e.later) {
-      if (!diff) return { error: "the later side is not rebuilt without the trace of the buy" };
-      const l = await laterSide(url, await headAt(url, toHex(e.later.block)), head, sides.later, diff, fees, guard, e.liquidity!.pair);
-      if (JSON.stringify(l.request) !== JSON.stringify(p.request[3])) return { error: `the later side is not the guard's sales on block ${e.later.block} with what the buy wrote applied` };
-      rebuilt = { moved: l.moved, reserves: l.reserves };
-    }
     const labels = labelsOf(sides);
     if (labels.length !== fresh.flat().length) return { error: `expected ${labels.length} calls, node returned ${fresh.flat().length}` };
-    return { labels, buyer, guard, stranger, owner: st.owner, buy: txs.buy, later: rebuilt };
+    return { labels, buyer, guard, stranger, owner: st.owner, buy: txs.buy, sides, fees, head };
   } catch (err) {
     return { error: `request cannot be parsed (${msg(err)})` };
   }
+}
+
+/** The guard side traced again (its request confirmed by rebuild first: no other input reaches the local
+ *  fork), compared with evidence.touched, token_calls and token_balances; then the later side rebuilt on
+ *  evidence.later's block from what the buy wrote there and the node's state, compared with the file's. */
+async function retrace(url: string, p: Proof, e: Evidence, r: Rebuilt): Promise<Line[]> {
+  const out: Line[] = [];
+  const add = (ok: boolean, text: string) => out.push({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
+  let traced: Trace | null = null;
+  try {
+    traced = e.liquidity ? await trace(url, p.request[0], e.block, p.target as Address) : null;
+  } catch (err) {
+    return [{ ok: false, line: `ERROR    tracing the guard's transactions on a local fork: ${msg(err)}` }];
+  }
+  const [t, calls, read] = [traced?.touched ?? null, traced?.calls ?? null, traced?.balances ?? null].map((x) => JSON.stringify(x));
+  add(t === JSON.stringify(e.touched), t === JSON.stringify(e.touched) ? `addresses the guard's transactions touch, traced again on a local fork at block ${e.block}: ${traced ? traced.touched.length : "none, no pool"}, identical to evidence.touched` : `addresses touched: evidence ${JSON.stringify(e.touched)}, traced ${t}`);
+  add(calls === JSON.stringify(e.token_calls), calls === JSON.stringify(e.token_calls) ? `what the token's code calls or reads in them: ${traced?.calls.join(", ") || "nothing"}, identical to evidence.token_calls` : `token calls: evidence ${JSON.stringify(e.token_calls)}, traced ${calls}`);
+  add(read === JSON.stringify(e.token_balances), read === JSON.stringify(e.token_balances) ? `ETH balances the token's code reads: ${traced?.balances.join(", ") || "none"}, identical to evidence.token_balances` : `token balances read: evidence ${JSON.stringify(e.token_balances)}, traced ${read}`);
+  if (!e.later || !traced) return out;
+  try {
+    const l = await laterSide(url, await headAt(url, toHex(e.later.block)), r.head, e.cadence, r.sides.later, traced.diff, r.fees, r.guard, p.target as Address, e.liquidity!.pair);
+    const sameRequest = JSON.stringify(l.request) === JSON.stringify(p.request[3]);
+    add(sameRequest, sameRequest ? `later side's request rebuilt on block ${e.later.block}: the guard's sales with the buy's footprint applied` : `request shape: the later side is not the guard's sales on block ${e.later.block} with the buy's footprint applied`);
+    // every trade of the pool the node shows between the two blocks, in order: none left out, none added
+    const replayed = JSON.stringify(l.replayed) === JSON.stringify(e.later.replayed);
+    add(
+      replayed,
+      replayed
+        ? `trades of the pool re-executed after the buy: ${l.replayed.length}, the ones the node shows between blocks ${e.block} and ${e.later.block}, as in evidence.later.replayed`
+        : `evidence.later.replayed ${JSON.stringify(e.later.replayed)} is not what the node gives: ${JSON.stringify(l.replayed)} (trades of the pool between blocks ${e.block} and ${e.later.block}, re-executed after the buy)`,
+    );
+    const { request: _, replayed: _r, ...facts } = l;
+    const same = JSON.stringify(facts) === JSON.stringify((({ block: _b, replayed: _x, ...f }) => f)(e.later));
+    add(same, same ? `later side's facts rebuilt: ${e.later.moved.length} slot(s) the buy wrote that Base also wrote, ${e.later.unverified === null ? "the resale verified" : "the resale not verified"}, the pool's reserves as in evidence.later` : `later side on block ${e.later.block}: evidence ${JSON.stringify(e.later)}, rebuilt ${JSON.stringify(facts)}`);
+  } catch (err) {
+    out.push({ ok: false, line: `ERROR    rebuilding the later side on block ${e.later.block}: ${msg(err)}` });
+  }
+  return out;
 }
 
 /** The probes must be fresh addresses: not the router, WETH, target or owner(), without code
@@ -438,8 +485,8 @@ export async function replay(
     return out;
   }
 
-  // (b) same chain; time of the first simulated block = time of the proof's block + 2 s (every block's
-  // time, number and prevrandao are checked with the rebuilt requests)
+  // (b) same chain; the cadence measured again at the block; time of the first simulated block (every
+  // block's time, number and prevrandao are checked with the rebuilt requests)
   try {
     const id = Number(await rpc<Hex>(url, "eth_chainId", []));
     add(id === e.chain_id, id === e.chain_id ? `chain id ${id} matches evidence` : `node chain id ${id} != evidence chain id ${e.chain_id}`);
@@ -448,24 +495,21 @@ export async function replay(
   }
   let blockHash: Hex | null = null;
   try {
-    const header = await blockOf(url, toHex(e.block));
-    const blockTs = Number(BigInt(header.timestamp));
+    const header = await headAt(url, toHex(e.block));
     blockHash = header.hash;
+    const c = await cadenceAt(url, header);
+    const sameCadence = c.seconds === e.cadence.seconds;
+    add(sameCadence, sameCadence ? `cadence at block ${e.block}: its ${c.blocks} blocks before it took ${c.seconds} s, as in evidence.cadence` : `cadence at block ${e.block}: ${c.blocks} blocks in ${c.seconds} s, evidence says ${e.cadence.seconds} s`);
     const first = BigInt(blocksOf(proof.request[0])[0].blockOverrides.time);
-    const want = BigInt(blockTs) + NEXT_S;
-    add(
-      first === want,
-      first === want
-        ? `first simulated block time = block ${e.block} time + ${NEXT_S} s (${iso(Number(want))})`
-        : `first simulated block time ${first} is not block ${e.block} time ${blockTs} + ${NEXT_S} s`,
-    );
+    const want = timeOf(header, e.cadence, BigInt(e.block) + 1n);
+    add(first === want, first === want ? `first simulated block time = block ${e.block + 1}'s at that cadence (${iso(Number(want))})` : `first simulated block time ${first} is not block ${e.block + 1}'s at that cadence, ${want}`);
   } catch (err) {
-    fail(`reading block ${e.block} or the first simulated block time`, err);
+    fail(`reading block ${e.block}, its cadence or the first simulated block time`, err);
   }
 
   // (b2) the guard side holds the guard's own transactions only: no read, no probe, no other call
   // before or between them (judge pass 5: a top-level balanceOf there let a honeypot sell)
-  const only = guardOnly(blocksOf(proof.request[0]));
+  const only = guardOnly(blocksOf(proof.request[0]), e.cadence);
   add(!only, only ? `guard-side request: ${only}` : "guard-side request holds only the guard's own transactions (buy; approve, swap; approve, swap), nothing before or between them");
 
   // (c) same requests, same blocks; same statuses, return data and logs. Both blocks' state must still
@@ -481,17 +525,6 @@ export async function replay(
     fresh = sent.map((x) => (x as PromiseFulfilledResult<Result[]>).value);
     add(true, `${fresh.length} requests resent to ${url} at ${blocks} (${fresh.flat().length} calls)`);
   }
-  // (c2) the guard's transactions traced again on a local fork of this node at the block: the addresses
-  // they touch, the contracts the token calls, and what the buy wrote (the later side applies it)
-  let traced: Trace | null = null;
-  try {
-    traced = e.liquidity ? await trace(url, proof.request[0], e.block, proof.target as Address) : null;
-    const [t, calls] = [traced?.touched ?? null, traced?.calls ?? null].map((x) => JSON.stringify(x));
-    add(t === JSON.stringify(e.touched), t === JSON.stringify(e.touched) ? `addresses the guard's transactions touch, traced again on a local fork at block ${e.block}: ${traced ? traced.touched.length : "none, no pool"}, identical to evidence.touched` : `addresses touched: evidence ${JSON.stringify(e.touched)}, traced ${t}`);
-    add(calls === JSON.stringify(e.token_calls), calls === JSON.stringify(e.token_calls) ? `contracts the token's code calls in them: ${traced?.calls.join(", ") || "none"}, identical to evidence.token_calls` : `token calls: evidence ${JSON.stringify(e.token_calls)}, traced ${calls}`);
-  } catch (err) {
-    fail("tracing the guard's transactions on a local fork", err);
-  }
   if (fresh) {
     const diffs: string[] = [];
     const [now, old] = [fresh.flat(), proof.response.flat()];
@@ -505,10 +538,14 @@ export async function replay(
     add(!diffs.length, diffs.length ? `call results differ: ${diffs.join(" ; ")}` : `status, return data and logs of all ${now.length} calls identical`);
 
     // (d) rebuilt requests, fresh probes, labels, then rejudging from the fresh responses
-    const r = await rebuild(url, proof, e, fresh, traced?.diff ?? null);
+    const r = await rebuild(url, proof, e, fresh);
     if ("error" in r) add(false, `request shape: ${r.error}`);
     else {
       rebuilt = r;
+      // (d2) only now, the guard-side request being the one checkToken builds, its transactions traced
+      // again on a local fork of this node at the block: the addresses they touch, what the token's code
+      // reaches, and what the buy wrote; then the later side rebuilt on its block with that applied
+      out.push(...(await retrace(url, proof, e, r)));
       try {
         const problems = await probeProblems(url, e, proof.target as Address, r);
         add(!problems.length, problems.length ? `probe addresses: ${problems.join(" ; ")}` : "probe addresses are fresh (no code, not router/WETH/target/owner(), distinct)");
@@ -518,15 +555,6 @@ export async function replay(
       const want = now.map((res, i) => `${r.labels[i]}: ${succeeded(res) ? "ok" : "revert"}`);
       const same = JSON.stringify(want) === JSON.stringify(e.calls);
       add(same, same ? "call labels rebuilt from the requests match evidence.calls" : "call labels in evidence.calls differ from those rebuilt from the requests");
-      if (e.later && r.later) {
-        const l = JSON.stringify(r.later) === JSON.stringify({ moved: e.later.moved, reserves: e.later.reserves });
-        add(
-          l,
-          l
-            ? `later side rebuilt on block ${e.later.block}: the buy's state applied, ${e.later.moved.length} slot(s) Base also wrote, the pool's reserves as in evidence.later`
-            : `later side on block ${e.later.block}: evidence ${JSON.stringify(e.later)}, rebuilt ${JSON.stringify(r.later)}`,
-        );
-      }
       const parties = { token: proof.target as Address, guard: r.guard, buyer: r.buyer, stranger: r.stranger ?? NOBODY };
       const j = judge(r.labels, now, { ...e, code_hash: e.code_hash as Hex, implementation: e.implementation as Address | null }, parties);
       const ok = j.verdict === proof.verdict && j.reasons === proof.reasons;
@@ -539,10 +567,11 @@ export async function replay(
       add(h === e.tx_hashes[0], h === e.tx_hashes[0] ? `the guard's buy simulated (calldata, value, nonce, gas, fees) hashes to evidence.tx_hashes ${h.slice(0, 10)}...` : `the guard's buy simulated hashes to ${h}, evidence says ${e.tx_hashes[0]}`);
     }
   }
+  if (!rebuilt) out.push({ ok: true, skipped: true, line: "SKIPPED  the guard's transactions not traced, the later side not rebuilt: the requests are not confirmed as the ones checkToken builds" });
 
   // (e2) LP facts recomputed from the node at the block (the rejudging above used the file's)
   try {
-    const l = JSON.stringify(await liquidityFacts(url, proof.target as Address, BigInt(e.block)));
+    const l = JSON.stringify(await liquidityFacts(url, proof.target as Address, await stampOf(url, toHex(e.block)), e.cadence));
     const same = l === JSON.stringify(e.liquidity);
     add(same, same ? "liquidity facts (pair, LP supply, holders) recomputed identically" : `liquidity facts differ: evidence ${JSON.stringify(e.liquidity)} vs node ${l}`);
   } catch (err) {
@@ -554,17 +583,17 @@ export async function replay(
   if (!e.reputation) add(true, "no template index used: reputation unknown, which the verdict counts as a warn");
   else {
     const r = e.reputation;
-    const window = windowProblem(e.block, r.from, r.to);
-    add(!window, window ?? `template index window ${r.from}..${r.to} bound to block ${e.block}: it starts at least ${INDEX_SPAN_BLOCKS} blocks before it and ends at it`);
     try {
+      const window = windowProblem(await stampOf(url, toHex(e.block)), await stampOf(url, toHex(r.from)), r.to);
+      add(!window, window ?? `template index window ${r.from}..${r.to} bound to block ${e.block}: it starts at least ${INDEX_SPAN_S / 3600} h before it and ends at it`);
       const index = await buildIndex(url, r.from, r.to);
       const sha = indexSha256(index);
       add(sha === r.index_sha256, sha === r.index_sha256 ? `template index of blocks ${r.from}..${r.to} rebuilt from the node: same sha256 ${sha.slice(0, 10)}...` : `template index of blocks ${r.from}..${r.to} rebuilt with sha256 ${sha}, evidence says ${r.index_sha256}`);
       const own = e.liquidity?.pair ?? null;
-      const want = JSON.stringify(reputationOf(index, e.template as Hex, beforeBlock(index, own, await ownFunding(url, index, own))));
+      const want = JSON.stringify(reputationOf(index, e.template as Hex, beforeBlock(index, own, await ownFunding(url, index, own)), e.cadence));
       add(want === JSON.stringify(r), want === JSON.stringify(r) ? `template reputation recomputed identically (${r.drained} of ${r.pools} earlier pools drained)` : `template reputation differs: evidence ${JSON.stringify(r)} vs rebuilt ${want}`);
     } catch (err) {
-      fail("rebuilding the template index", err);
+      fail("checking the template index window or rebuilding the index", err);
     }
   }
 
@@ -694,9 +723,11 @@ async function replayExit(proof: Proof, e: ExitEvidence, url: string, opts: Opts
     // the approve and swap the guard would sign (positions of exitPlan), from the request; shape checked, hashes against the evidence
     const txs = [calls[0], calls[1]].map((c) => unsignedOf(c, e.chain_id));
     const fees: Fees = { gas: BigInt(calls[0].gas), maxFeePerGas: BigInt(calls[0].maxFeePerGas), maxPriorityFeePerGas: BigInt(calls[0].maxPriorityFeePerGas) };
+    const c = await cadenceAt(url, head);
+    add(c.seconds === e.cadence.seconds, c.seconds === e.cadence.seconds ? `cadence at block ${e.block}: ${c.blocks} blocks in ${c.seconds} s, as in evidence.cadence` : `cadence at block ${e.block}: ${c.blocks} blocks in ${c.seconds} s, evidence says ${e.cadence.seconds} s`);
     const blocks = exitPlan(seller ?? NOBODY, BigInt(e.block), txs);
     const funds = await balances(url, head, blocks, fees, seller ?? NOBODY, null);
-    const same = JSON.stringify([buildRequest(head, funds, blocks, fees)]) === JSON.stringify(proof.request);
+    const same = JSON.stringify([buildRequest(head, e.cadence, funds, blocks, fees)]) === JSON.stringify(proof.request);
     add(same, same ? `request is the exit sale checkExit builds for ${e.amount} tokens from ${seller}, alone in its block` : "request is not the exit sale checkExit builds for this target and amount");
     const sold = BigInt(e.amount);
     const shapeBad = saleShape(txs, token, seller ?? NOBODY, sold);
@@ -739,23 +770,22 @@ async function replayExit(proof: Proof, e: ExitEvidence, url: string, opts: Opts
  *  sentinel chose who was simulated, when and how much it sold, or which real block it judged on. */
 async function derivation(url: string, id: number, r: Rebuilt, e: Evidence, c: NonNullable<OnChain>, blockHash: Hex | null, g: GuardInfo): Promise<Line[]> {
   if (!blockHash) return [{ ok: false, line: "ERROR    probe derivation: EVM block hash unknown" }];
-  const want = deriveProbes({ guard: g.account, id, requested_ns: c.requested_ns }, blockHash);
+  const want = deriveProbes({ guard: g.account, id, requested_ns: c.requested_ns }, blockHash, e.cadence);
   const sale = e.sales;
   const probesOk = same(r.buyer, want.buyer) && (r.stranger === null || same(r.stranger, want.stranger));
   const saleOk = sale.first === want.sale.first && sale.bps === want.sale.bps && sale.late === want.sale.late;
-  const ref = await blockOf(url, toHex(e.block));
-  const real = e.later ? Number(BigInt((await firstAt(url, BigInt(ref.timestamp) + BigInt(want.later))).number)) : null;
+  const real = e.later ? Number(BigInt((await laterBlock(url, await headAt(url, toHex(e.block)), want.later, want.sale)).number)) : null;
   const laterOk = !e.later || e.later.block === real;
   const line = (ok: boolean, text: string): Line => ({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
   return [
     line(
       saleOk,
       saleOk
-        ? `sales derived like the probes: ${sale.bps / 100} % of the tokens bought ${sale.first} blocks after the buy, the rest ${sale.late} blocks after it`
+        ? `sales derived like the probes: ${sale.bps / 100} % of the tokens bought ${sale.first} blocks after the buy, the rest ${sale.late} blocks after it, at ${e.cadence.blocks} blocks in ${e.cadence.seconds} s`
         : `sales not derived from on-chain data: ${JSON.stringify(sale)} (derived ${JSON.stringify(want.sale)})`,
     ),
     ...(e.later
-      ? [line(laterOk, laterOk ? `later side on block ${e.later.block}, the first block ${want.later} s after the reference block, as derived` : `later side's block not derived from on-chain data: block ${e.later.block}, not ${real} (the first block ${want.later} s after the reference block)`)]
+      ? [line(laterOk, laterOk ? `later side on block ${e.later.block}, the first block ${want.later} s after the reference block (at most the one before the late sale's approve), as derived` : `later side's block not derived from on-chain data: block ${e.later.block}, not ${real} (the first block ${want.later} s after the reference block, at most the one before the late sale's approve)`)]
       : []),
     line(
       probesOk,

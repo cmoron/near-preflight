@@ -59,15 +59,15 @@ Do not trust it blindly: anyone can [replay](docs/replay.md) a verdict, and the 
 
 No NEAR account, no key. You need `bun` 1.4, Foundry 1.8 and `jq`; a **fork** below is a local copy of Base run by Foundry's anvil.
 
-First, the [status page](https://cmoron.github.io/near-preflight/) lists every check of the demo guard and its verdict.
+First, the [status page](https://cmoron.github.io/near-preflight/journal.html) lists every check of the demo guard and its verdict.
 
-<a href="https://cmoron.github.io/near-preflight/"><img src="docs/assets/status-page.png" alt="The top of the status page: the verdicts so far, and the four steps of the latest purchase NEAR signed, each step a lit lamp." width="600"></a>
+<a href="https://cmoron.github.io/near-preflight/journal.html"><img src="docs/assets/status-page.png" alt="The top of the status page: the verdicts so far, and the four steps of the latest purchase NEAR signed, each step a lit lamp." width="600"></a>
 
 ```sh
 git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun install
 export GUARD=guard.goblin-guard-13713.testnet   # the demo guard on NEAR testnet, read only
 
-# Check #64 (USDC on Base mainnet): resent, traced on a local fork, re-judged, compared with NEAR
+# Check #70 (USDC on Base mainnet, its pool traded during the check): resent, re-executed, re-judged, compared with NEAR
 bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
 #   REPLAY OK: verdict warn confirmed, same as on chain
 
@@ -75,12 +75,12 @@ bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org -
 bun app/attest.ts app/fixtures/decision.json --check 1
 #   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)
 
-# Every trap below, on a local Base fork, as CI runs it (about 1 min, then 13 min)
+# Every trap below, on a local Base fork, as CI runs it (about 30 s, then 5 min)
 echo GUARD=$GUARD > .env && evm/fork.sh   # then, in another terminal:
-bun test --timeout 30000                  #   273 pass, 0 fail
+bun test --timeout 30000                  #   285 pass, 0 fail
 ```
 
-USDC gets `warn` on mainnet because no template index covers mainnet (an unknown reputation is never a pass), and in check #64 also because its pool traded while the check waited for Base.
+USDC gets `warn` on mainnet because no template index covers mainnet (an unknown reputation is never a pass).
 
 ## What it stops
 
@@ -100,7 +100,7 @@ USDC gets `warn` on mainnet because no template index covers mainnet (an unknown
 ## What it does not stop
 
 - **A lying sentinel.** Its `allow` on a trap can be bought within 120 s; replay shows the lie afterwards, if the sentinel published the proof file.
-- **What a token does later.** A pause, tax or blacklist after the buy; a change after the check's last simulated sale.
+- **What a token does later.** A pause, tax or blacklist after the buy; a change more than 51 s after it, past the check's last simulated sale.
 - **Front-running.** The signing request is public on NEAR before the swap reaches Base.
 - **Template evasion.** Changing the code makes a new template; fewer than 3 earlier pools give no finding.
 
@@ -117,7 +117,7 @@ Every limit, with its reason: [threat model](docs/threat-model.md#what-it-does-n
 1. Install Rust with `cargo-near` 0.23, `near` CLI 0.31, `bun` 1.4, Foundry 1.8 and `jq`. `cargo test` gives `249 passed`; then `bun install`.
 2. Get a testnet account holding about 7 NEAR. The faucet gives 10; if it answers `429`, see [troubleshooting](docs/reproduce.md#troubleshooting).
 3. `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard and creates the agent, sentinel and armer accounts, each with a key limited to the guard.
-4. `evm/fork.sh` in another terminal, then `bun test --timeout 30000`: `273 pass`.
+4. `evm/fork.sh` in another terminal, then `bun test --timeout 30000`: `285 pass`.
 5. `./demo.sh` exits 0 in about 3 min (each check waits about 25 s for Base blocks): a poisoned message pushes the agent to a trap (blocked), a farm copy (blocked), USDC (allowed, signed by NEAR, broadcast to the fork), then the agent's bypasses (refused).
 6. It prints this run's `replay --check` and `attest --check` commands; each exits 0.
 7. Optional: `NEAR_AI_API_KEY` in `.env.llm` runs the live model; `./demo.sh --full` adds an exit, an approved `warn`, a second agent and the emergency stop.

@@ -155,6 +155,7 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 | [`src/lib.rs`](../src/lib.rs)                                    | the guard contract and its unit tests ([contract](contract.md))                       |
 | [`app/verifier.ts`](../app/verifier.ts)                          | the check: the four requests, judging, listing, exit quotes ([sentinel](sentinel.md)) |
 | [`app/environment.ts`](../app/environment.ts)                    | the environment rule: addresses touched, opcodes                                      |
+| [`app/later.ts`](../app/later.ts)                                | the later side: others' trades of the pool re-executed after the buy                  |
 | [`app/index.ts`](../app/index.ts)                                | template index and reputation; CLI to build an index                                  |
 | [`app/sentinel.ts`](../app/sentinel.ts)                          | the sentinel's loop: read checks, judge, post                                         |
 | [`app/replay.ts`](../app/replay.ts)                              | replay of a proof ([replay](replay.md))                                               |
@@ -169,7 +170,7 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 | [`app/setup.ts`](../app/setup.ts)                                | deployment and role keys                                                              |
 | [`app/derive.ts`](../app/derive.ts)                              | the guard's Base address, derived as Chain Signatures does                            |
 | [`app/near.ts`](../app/near.ts)                                  | NEAR access shared by every role                                                      |
-| [`app/testkit.ts`](../app/testkit.ts)                            | the guard's previews rebuilt in TypeScript for the fork tests                         |
+| [`app/testkit.ts`](../app/testkit.ts)                            | the guard's previews rebuilt in TypeScript, the fork's blocks and trades for the tests |
 | [`evm/fork.sh`](../evm/fork.sh), [`evm/src/`](../evm/src/)       | the local Base fork and its trap tokens                                               |
 | [`docs/index.html`](index.html), [`docs/app.js`](app.js)         | the status page                                                                       |
 | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)        | CI                                                                                    |

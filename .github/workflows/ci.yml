@@ -21,7 +21,7 @@ jobs:
       - run: cargo test
   app:
     runs-on: ubuntu-latest
-    timeout-minutes: 45 # the fork tests mine the Base blocks each check waits for: about 13 min locally
+    timeout-minutes: 20 # the fork tests mine the blocks each check waits for: about 30 s of setup, then 5 min locally
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
