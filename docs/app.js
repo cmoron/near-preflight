@@ -43,12 +43,16 @@ const LABELS = {
   approve_key: "trap: approves only while nobody else uses WETH",
   busy_tell: 'trap: sells only while WETH is still, or after a new pair',
   cooldown_60: 'honest: 30-block cooldown after a buy (6 s on Base)',
+  impl_mark: "trap: the next buy marks you in its implementation's storage",
+  guard_later: "trap: closes the guard's sales 8 min after its buy",
 };
 
 const GUARD = new URLSearchParams(location.search).get('guard') || DEFAULT_GUARD;
 const names = new Map(); // lowercase address -> label
 const finals = new Map(); // check id -> a check that can no longer change (null: refunded)
-let rpcIdx = 0;
+let rpcIdx = 0, rpcCalls = 0;
+// docs/snapshot.json (docs/snapshot.js): drawn at once, labelled, until the first full live read. `offline`: view() answers from it.
+let snap = null, offline = false, liveOnce = false;
 const $ = (id) => document.getElementById(id);
 
 async function rpc(params) {
@@ -79,6 +83,8 @@ async function rpc(params) {
 
 // view call: args to base64 JSON, result bytes to JSON (null when the contract returns None)
 async function view(method, args = {}) {
+  if (offline) return Snapshot.view(snap, method, args);
+  rpcCalls++;
   const res = await rpc({
     request_type: 'call_function', finality: 'final', account_id: GUARD, method_name: method,
     args_base64: btoa(JSON.stringify(args)),
@@ -234,7 +240,7 @@ async function renderChecks() {
   const checks = await mapBatches(ids, async (id) => {
     if (finals.has(id)) return { id, check: finals.get(id) };
     const k = await view('get_check', { id });
-    if (!k || (k.verdict && Date.now() / 1000 - secs(k.judged_ns) > FINAL_S)) finals.set(id, k); // kept even if this refresh fails later
+    if (!offline && (!k || (k.verdict && Date.now() / 1000 - secs(k.judged_ns) > FINAL_S))) finals.set(id, k); // kept even if this refresh fails later
     return { id, check: k };
   });
   const open = new Set([...document.querySelectorAll('#checks details[open]')].map((d) => d.dataset.id));
@@ -284,7 +290,7 @@ async function renderBounds() {
     ['Budget rate', e.yocto_per_wei + ' yoctoNEAR per wei signed'],
     ['Signer (MPC contract)', acct(e.mpc)],
   ]);
-  $('bounds').dataset.read = 'yes';
+  if (!offline) $('bounds').dataset.read = 'yes'; // a snapshot's bounds are read live once
 }
 
 async function refresh() {
@@ -297,19 +303,46 @@ async function refresh() {
     if (judged) favicon(judged.check.verdict, signedOf(judged.check)); // none yet: the static mark stays
     await renderState(checks);
     if (!$('bounds').dataset.read) await renderBounds(); // owner settings, read once per page load
-    $('updated').textContent = 'Last updated ' + new Date().toLocaleTimeString() + ', refreshed every ' + REFRESH_MS / 1000 + ' s.' + (names.size ? '' : ' Token names unavailable: addresses shown as is.');
+    $('updated').textContent = (offline ? 'Snapshot of ' + Snapshot.utc(snap) + ', refreshing from NEAR…'
+      : 'Live, read from NEAR testnet just now (' + new Date().toLocaleTimeString() + ', refreshed every ' + REFRESH_MS / 1000 + ' s).')
+      + (names.size ? '' : ' Token names unavailable: addresses shown as is.');
     $('error').hidden = true;
+    if (!offline && !liveOnce) console.info('RPC calls to first live read:', rpcCalls);
+    liveOnce ||= !offline;
+    return true;
   } catch (e) {
+    if (offline) { console.warn('snapshot not drawn:', e); return false; }
     console.error(e);
     $('error').hidden = false;
-    $('error').textContent = 'RPC error: ' + e.message + ' (showing the last good data, retrying).';
+    if (snap && !liveOnce) $('updated').textContent = ''; // the error line says it
+    $('error').textContent = liveOnce || !snap ? 'RPC error: ' + e.message + ' (showing the last good data, retrying).'
+      : 'NEAR RPC is rate-limiting this browser: showing the snapshot of ' + Snapshot.utc(snap) + ' (retrying in the background).';
+    return false;
   }
+}
+
+async function loadSnapshot() {
+  try {
+    const r = await fetch('snapshot.json');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    snap = Snapshot.usable(await r.json(), GUARD);
+  } catch (e) { console.warn('no snapshot, reading NEAR directly:', e); }
 }
 
 if (typeof document !== 'undefined') {
   $('guard').textContent = GUARD;
-  loadNames().catch((e) => console.error('token names:', e)).finally(() => {
-    refresh();
-    setInterval(refresh, REFRESH_MS);
+  loadNames().catch((e) => console.error('token names:', e)).finally(async () => {
+    await loadSnapshot();
+    if (snap) {
+      offline = true;
+      await refresh();
+      offline = false;
+      for (const [id, k] of Snapshot.finals(snap)) finals.set(id, k); // only what was final when it was taken
+    }
+    // Every 30 s; after a failure, backed off (60 s, 120 s, 240 s) so a rate limit is not hammered.
+    for (let fails = 0; ; ) {
+      fails = (await refresh()) ? 0 : fails + 1;
+      await new Promise((r) => setTimeout(r, Math.min(REFRESH_MS * 2 ** Math.max(0, fails - 1), 240000)));
+    }
   });
 }

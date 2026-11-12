@@ -1,0 +1,2581 @@
+{
+ "guard": "guard.goblin-guard-13713.testnet",
+ "taken_at": "2026-11-12T18:23:18.558Z",
+ "block_height": 277399464,
+ "last_check_id": 102,
+ "checks": {
+  "1": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794478843170952187",
+   "verdict": "block",
+   "judged_ns": "1794478847394538040",
+   "reasons": "sale refused 80 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 240 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "d214697447164670d3143ca8ca86730fefcda56c00931eae6a065c72a0406784",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": "fe5a24dc81bec2a0a1b77844f1e9469c757ede7a2c496ed79de85f9ee3dbf2ac",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "2e0711aad3c25606b42a0b5ee0d6eb4af2548bcdc13c938b233a77d86cb63c7c"
+   ],
+   "list_target": true
+  },
+  "2": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794478871155578637",
+   "verdict": "block",
+   "judged_ns": "1794478875846522491",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding ; pool 116 blocks old: 100 % of the LP removable now (EOA 0xfa43..0006 holds 100 %)",
+   "evidence_sha256": "bdccc6dd7b8c537bb73eb4a4372c4d9b1455146fae2882c4a806183951eedb0f",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "567c85d9d30a1ff4602a32cfb7b1a2b0856435023b4e21fad80a9350a08df2ba"
+   ],
+   "list_target": false
+  },
+  "3": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794478879143027236",
+   "verdict": "allow",
+   "judged_ns": "1794478883725364169",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55838870)",
+   "evidence_sha256": "be7429a86ad7d45378da191ae1cc6f608850f1f7f65702743c3c9b7f2c1d2ced",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBYCDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9ZRLAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgOyte3srep2LzT+qioynZx51YiF8MWgOKitfsnZwRZKmgRoyhB6Es5M0RXbcGB0uJnCHSeHglQqW2I8X7l9290nk=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "78f0ed62a4f1effe35d3d71d0484dca6fafea80f22da0b6b90f4fdb8d5b6103e"
+   ],
+   "list_target": false
+  },
+  "4": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794478898945186871",
+   "verdict": "allow",
+   "judged_ns": "1794478902518878087",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55838870)",
+   "evidence_sha256": "eb4f3fdd0eff8ff9bf800f5c6ab737e04638fa8cf8148e7f8a31a034d191d6da",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBQGDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9ZReAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICg5FUgESPi0dwApD1zB2pDsafg+gGJNeAaHAJnLE8J6uCgeYlEzCcSyc/W6DxGIjt+lAmsNymWq/I2TIGh6rcDQrw=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "392821e66b0612baa63a4b32c5c5d469dba2e9c8d582808c91c3122a5da8f742"
+   ],
+   "list_target": false
+  },
+  "5": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794478947183849728",
+   "verdict": "warn",
+   "judged_ns": "1794478956739136807",
+   "reasons": "template reputation not checked: no index for this chain",
+   "evidence_sha256": "6ae6b24c2a4b395384505829848aa96721ae603c8e2fa0f43105bf3e6bf1331e",
+   "amount_wei": "10000000000000",
+   "quote": "20391",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "a6155d25343151e69ca52892b76571f24555ab08f89f999d046864834bcaff4b"
+   ],
+   "list_target": false
+  },
+  "6": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794478991071340182",
+   "verdict": "block",
+   "judged_ns": "1794478995931694968",
+   "reasons": "sale refused 60 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 230 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "39c13197a5e3f30156782daeb1205177da0ea5a100aaaab8544e6fef1426d0e6",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": "c3da4b10b637d868535194ce0368f5506068ad704d16aba1994c5c00b3567a29",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "9fc36d75c82cdc9056ad08f6caee9511f15f4f6ebfd325c05e229a0e6ccc38ba"
+   ],
+   "list_target": true
+  },
+  "7": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794479028066212960",
+   "verdict": "block",
+   "judged_ns": "1794479032324842577",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding ; pool 120 blocks old: 100 % of the LP removable now (EOA 0xfa43..0006 holds 100 %)",
+   "evidence_sha256": "99d3dce4f89c82ca725feac5732f69e9fe2fa60ec4e2f8129661a2c1a7aa12f6",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "aa54cbb16ffbecd964ce9219722174e102202d6fd98fd552e51d7ab4406ed6c5"
+   ],
+   "list_target": false
+  },
+  "8": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794479034703822093",
+   "verdict": "allow",
+   "judged_ns": "1794479039035206166",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55838874)",
+   "evidence_sha256": "6da5ba08bb12d2ee33c287e59b72d76a9aa36945935e22d5c57b3e6424090039",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBQKDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9ZTmAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgqImpWmeNGwrv7rXyjWwKhiuZPbi/2i+aJNL4iEhq6uOgCnGc4mLDyfkNpWXtLvM1go2yVho27EwLUz0BGz4YvTU=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "462f18ccf5e31d8a3730613540fcaa0c4a64a8cf73e3f271ff18163ab9f001cc"
+   ],
+   "list_target": false
+  },
+  "9": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794479054188036680",
+   "verdict": "allow",
+   "judged_ns": "1794479058306893903",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55838874)",
+   "evidence_sha256": "ab422624a5a74ca3e8050af37ffdbfad28c2d7997a628b9d1b3f296aa20879fe",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBQODD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9ZT6AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwAGgidQpxc81cLhPNbWPLXgfEwX0YfCQf8Ffh1/n05tzdIigZO4AQYX0ql+C2ZIAzUkBVIyc1TbagDpyGj4bwMkAI5g=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "c65e8dcb0b607dc71d796210011b8a3d80f0706b9d3ea78deaa5832434b3a9cb"
+   ],
+   "list_target": false
+  },
+  "10": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794479074218934216",
+   "verdict": "allow",
+   "judged_ns": "1794479077322681717",
+   "reasons": "exit sale from the guard's address simulated: quote = the ETH it receives",
+   "evidence_sha256": "60a9a9c6210994e34b19a09cc2f760355cf5fa7b66b12a619c707fb04975434a",
+   "amount_wei": "0",
+   "quote": "38564649183637",
+   "settled": true,
+   "approved": false,
+   "signed_tx": null,
+   "code": null,
+   "exit_amount": "79284",
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "0f68faa9bf0444926acd36467a2bfef22b00d33f1f09e44c8f12aadc17bae3a6",
+    "369ded922dd20d8ba6cd793ed0c905b642e90ce938e4ea7f8245d95ea7559034"
+   ],
+   "list_target": false
+  },
+  "11": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x3dA52ABf017C90FAf659e3bFE39838b220Ca69cA",
+   "requested_ns": "1794479085659667102",
+   "verdict": "warn",
+   "judged_ns": "1794479089894839917",
+   "reasons": "20 % tax on the sale 141 blocks after the buy ; 20 % tax on the sale 213 blocks after the buy",
+   "evidence_sha256": "d6c3b0645b31fe7243269b9e89a277bd40d2789a7d48cfcf752fd6ed35c828a5",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x70a386fdc0b764ec58d246be0aee8a8c4e4933f82782cec547093f58fbe79d10",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "9da5b47aa8fc3ab9347b3b939ab7d16f660a9cee797f6e0128bc1b0847807fa0"
+   ],
+   "list_target": false
+  },
+  "12": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x3dA52ABf017C90FAf659e3bFE39838b220Ca69cA",
+   "requested_ns": "1794479105185948924",
+   "verdict": "warn",
+   "judged_ns": "1794479108705593910",
+   "reasons": "20 % tax on the sale 113 blocks after the buy ; 20 % tax on the sale 206 blocks after the buy",
+   "evidence_sha256": "8e997d4149ac4e5f717247e79c4314a4f3fbddd85c03aa114a8018aaf38b0282",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": true,
+   "approved": true,
+   "signed_tx": "AvkBV4IhBQaDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1ryXovzucYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9ZUtAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAD2lKr8BfJD69lnjv+OYOLIgymnKwICgvGSNLLd5MnsXx3xqBD35BsDfOWJQ8NDe2QFvELVUxqqgYWxAsx+Zs/rv65D2O1O6gtrjvONeGDqixAyK6zbf2cg=",
+   "code": {
+    "code_hash": "0x70a386fdc0b764ec58d246be0aee8a8c4e4933f82782cec547093f58fbe79d10",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "157ff7743ff3789822742ae01cfc7650f8dea9a4cda00acf5e9d61ad6b5c8e19"
+   ],
+   "list_target": false
+  },
+  "13": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x960840B3AD7882b551bf510DE8C883b154116333",
+   "requested_ns": "1794479125624758224",
+   "verdict": "block",
+   "judged_ns": "1794479129340686073",
+   "reasons": "guard address only, not listed: sale refused 56 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; guard address only, not listed: sale refused 209 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "428cce2b9b4e1e0d6118b090c61d63ecac1aac205cdf7c4c318cd90881fe653f",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x3cf02b00ee35f8847418fa2aa06e7ab8d2c7ed54cc1eeeeb6c37c8931b6eeb05",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "8ff3c5f8e0189bedb6e7fb4d7c07dfead959e34563d73b3501572d9f6a6250a5"
+   ],
+   "list_target": false
+  },
+  "14": {
+   "agent": "agent2.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794479132333362102",
+   "verdict": "block",
+   "judged_ns": "1794479135903045003",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding ; pool 128 blocks old: 100 % of the LP removable now (EOA 0xfa43..0006 holds 100 %)",
+   "evidence_sha256": "dc9c3e4962dcd0761b0b68ac149237ab6e3c8fb67f524f53e331db8d6c6a337d",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "0ebb46d1d652c5da7210900fdf0296983f422eae3e922141219f44f30c9a2684"
+   ],
+   "list_target": false
+  },
+  "15": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794479143794781456",
+   "verdict": "allow",
+   "judged_ns": "1794479146943332143",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55838874)",
+   "evidence_sha256": "fc211a31185f3e01366b39ef498a579d5d587075272665957bc617ef23a78c13",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBQeDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9ZVTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwAGgFONl6lf0Dqtw4XZJ8l13CQ09eNWz9OYIFK3PMy2lf/ugZLQkKLcZvjFvQLeWXzUN+CprUNY0nHaqCXBUXY25ttw=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": "dbcb616102858600c883737cfb460d5cac3e6dd49bdf469b361b8a4735a70812",
+   "buy_decision_sha256": "7f2cc82259f076da4f27729f9238d72d0e1acbf3f33f36046110bf43343bc7dc",
+   "tx_hashes": [
+    "12d0c01495dd29c2fd875ade5609bc1afdfae0ec0703c3cab7a62ce43d21aae5"
+   ],
+   "list_target": false
+  },
+  "16": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794487390866711601",
+   "verdict": "block",
+   "judged_ns": "1794487417969248688",
+   "reasons": "sale refused 83 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 223 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "5681a9ab25c07e64d0fa14d877cd388003cd8223d9fdbdd9bd91ec3538f75421",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": "d6de9d8bcf3e60c62029ea3b396deb1e05d6e0f8d83ae9105e54d5e870394c9a",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "09093e3b1ca6c441e103bdf4f9b84d86afce0d20e47b48c8f578c989cb2358ad"
+   ],
+   "list_target": true
+  },
+  "17": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794487430987811867",
+   "verdict": "block",
+   "judged_ns": "1794487461014767855",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding ; pool 178 blocks old: 100 % of the LP removable now (EOA 0xfa43..0006 holds 100 %)",
+   "evidence_sha256": "52c47cc4cce234ad56bdc0533298a001047a16b80b9affcea914a2614496b733",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "79f78fed0edd1de6d8716448de9dcd81564feda3c741833e1b4ebae1f0f39114"
+   ],
+   "list_target": false
+  },
+  "18": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794487464014383368",
+   "verdict": "allow",
+   "judged_ns": "1794487493419880215",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55838949)",
+   "evidence_sha256": "466efc3515b841559bc032ffc0399f339895900f6ccc29dcf63d087c53cf5aed",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBQmDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9bXUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwAGgjnE0tps+i09WQTafKYoMU38OpHC9/6/UQH2NgwPogTageqABXwkAI1PzmkcLcZEKUCg16E4ZzVVrcNTuXXQgu1I=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "b181820f0b96863dd0e0421c6345c84c5fd1ca52d0e770866dabb2be03f1adef"
+   ],
+   "list_target": false
+  },
+  "19": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794487510021400649",
+   "verdict": "allow",
+   "judged_ns": "1794487542121523747",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55838975)",
+   "evidence_sha256": "ef5b37b64209e1cd4f1acdbcae7a45a2b1d9ab2b00c3f7d76125361a55105b33",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBQqDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9bYCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgUQKUZotvtfT60PibSPiW5ENS44JjHuqW9uVjSQgmF2ugU9hx4zthPAEvzzaI3MhIBxknp8p7y/iIeC2QTg3VNgo=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "515d26b9fbd625797920f766445283f8bdff67e1d8dac055b016c9f16f905b27"
+   ],
+   "list_target": false
+  },
+  "20": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794487597135026442",
+   "verdict": "block",
+   "judged_ns": "1794487621977401080",
+   "reasons": "sale refused 137 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 240 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "63d64a51dbf561048b3c0692ffa46be6460f88292c85d3656d307b7cd233141c",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": "43099ed936fe37863c5def37cda38de614f69cba2904514bd565a936e3f9ffe4",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "dfbac069b32cf2a1d10d2fa55d3d1bf78fa6055f681250e6effd5126e1fdcbdf"
+   ],
+   "list_target": true
+  },
+  "21": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794487599497465993",
+   "verdict": "block",
+   "judged_ns": "1794487628053060420",
+   "reasons": "listed on NEAR by sentinel.goblin-guard-13713.testnet ; sale refused 49 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 236 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "a151d2bbb7ad010c1c75556d76ddb2f6a2f43a3949ab94c96310d7ba77c485c1",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": "ffc78b506df970fddc71a6eae4a29a475962f37bddc6d2d07276725dec2a0e44",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "55cf7437a88311be7a441009f8427b009336135ea22be61e24ba223580a2c319"
+   ],
+   "list_target": true
+  },
+  "22": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794487625012890000",
+   "verdict": "allow",
+   "judged_ns": "1794487649899767288",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55839017)",
+   "evidence_sha256": "84d1193aa46065cafa762d34671fba9316b2881d3c0fb765e6b9ef77ef1d496b",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": "a28ffb64a79c4268590ad28e854b4621a10bce225a7632dadf168e5c713696f7",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "d92c140b8aeab466696f8b2587f03490c5d56edd0562f9caa0f62a8ad4c69a5b"
+   ],
+   "list_target": false
+  },
+  "23": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794487664428916610",
+   "verdict": "block",
+   "judged_ns": "1794487692932086439",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding ; pool 282 blocks old: 100 % of the LP removable now (EOA 0xfa43..0006 holds 100 %)",
+   "evidence_sha256": "3606c2a6f47b11cd60da4361516e76026d932bdf315cd570e9fabc6e0e8b1841",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "4b59ada8d577467ba70f426eb3fae1d0c9495b17147ad713bc8f4f11c73c19f3"
+   ],
+   "list_target": false
+  },
+  "24": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794487695948342222",
+   "verdict": "allow",
+   "judged_ns": "1794487723254195412",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55839052)",
+   "evidence_sha256": "e7d2a90376ab1c56ee4ace524cc5d550867c52e9b672a3e6c4149dc91ec2f528",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBQuDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9ba7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwAGgYmA7wOvDNTDJqUC7dMiy78BkOODieOi5b6B4JDcFsmugGvxYuPKSDAwA/rgb0JRe3q3B7IGQFnDhcD5zlvGFRbI=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "3cd4a1ec4fb4f1d17124ca77c836df4403935bd3974db02e10c96d473b0d86e2"
+   ],
+   "list_target": false
+  },
+  "25": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794487738399800403",
+   "verdict": "allow",
+   "judged_ns": "1794487762094559081",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55839074)",
+   "evidence_sha256": "d01ad14bfd4c1e1b6072bfec18cb2b6d58837838c68e9e6eeca38af4bc8ba659",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBQyDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9bbmAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgywJAu9Tew/IClKHluKw+JM74mE0LfDJ/4PpnyoCtSbWgPfIYA6BXJ2L3p7fZZnNhSu0fSdmTQqmsHfu+wTQr61s=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "e0e336cb9c3a185a362daa565b5952ecd5ab634253e457f8f8dd9d0285ad0cbb"
+   ],
+   "list_target": false
+  },
+  "26": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794487777834690796",
+   "verdict": "allow",
+   "judged_ns": "1794487781474063077",
+   "reasons": "exit sale from the guard's address simulated: quote = the ETH it receives",
+   "evidence_sha256": "e8e6555a087f43446da4074a1e49270fa87efefebadcbf484fc90f27e2d79f7b",
+   "amount_wei": "0",
+   "quote": "39759275668601",
+   "settled": true,
+   "approved": false,
+   "signed_tx": null,
+   "code": null,
+   "exit_amount": "81740",
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "d07f1c481c99c0b47cbe915cd7b9771d6bdbf2b7f511f61cc049044b2404623d",
+    "242be21bff3cd7b5c3589de6c7eccf168131d0dbdfaffbb8caab8ffbef5c8d61"
+   ],
+   "list_target": false
+  },
+  "27": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x3dA52ABf017C90FAf659e3bFE39838b220Ca69cA",
+   "requested_ns": "1794487791134944952",
+   "verdict": "warn",
+   "judged_ns": "1794487815307815770",
+   "reasons": "20 % tax on the sale 110 blocks after the buy ; 20 % tax on the sale 251 blocks after the buy",
+   "evidence_sha256": "5af389b750a316140aa4c3685c735b11193facad898a857d98f9584d0ee8f5df",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x70a386fdc0b764ec58d246be0aee8a8c4e4933f82782cec547093f58fbe79d10",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "7f100067e481c87aac5f152fb7d872e08fac45a80350415e399ca4a8d23602fd"
+   ],
+   "list_target": false
+  },
+  "28": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x3dA52ABf017C90FAf659e3bFE39838b220Ca69cA",
+   "requested_ns": "1794487830582345091",
+   "verdict": "warn",
+   "judged_ns": "1794487857855724845",
+   "reasons": "20 % tax on the sale 61 blocks after the buy ; 20 % tax on the sale 213 blocks after the buy",
+   "evidence_sha256": "f58dea00aced449e9405fb00e333b90675e9164e04b82a69724a172c4145c933",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": true,
+   "approved": true,
+   "signed_tx": "AvkBV4IhBQ+DD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1ryXovzucYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9bdCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAD2lKr8BfJD69lnjv+OYOLIgymnKwICghXR8EEI8TfjO5hGegR528xU9t0vbEW10Xu32AlGfkaqgcKqM8rVkcqR98YCh1xxuKQi5nOZqzVAhhGO37s7Co+E=",
+   "code": {
+    "code_hash": "0x70a386fdc0b764ec58d246be0aee8a8c4e4933f82782cec547093f58fbe79d10",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "be6d938c60023a5ec25a7e3eec811aa86f1f38efb263cd3f593f49b80acec3f9"
+   ],
+   "list_target": false
+  },
+  "29": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x960840B3AD7882b551bf510DE8C883b154116333",
+   "requested_ns": "1794487874521089251",
+   "verdict": "block",
+   "judged_ns": "1794487896240250928",
+   "reasons": "guard address only, not listed: sale refused 140 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; guard address only, not listed: sale refused 219 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "c9465f03435272409be232b65c17f8697d22f19ac0a1f82fbe5e7d87df791b67",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x3cf02b00ee35f8847418fa2aa06e7ab8d2c7ed54cc1eeeeb6c37c8931b6eeb05",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "ef7a27ece90d055c1b59ef8e32bb9ccc79e1caa67a24728c8b205afcbd0eb520"
+   ],
+   "list_target": false
+  },
+  "30": {
+   "agent": "agent2.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794487899960498686",
+   "verdict": "block",
+   "judged_ns": "1794487929025877637",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding ; pool 405 blocks old: 100 % of the LP removable now (EOA 0xfa43..0006 holds 100 %)",
+   "evidence_sha256": "4ab26b7caea4a71d6361c6d463d4632dc8e993f6ccd82bcce994c3c51aff13c7",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "1d4a2357aac412fdf626fc16ab9ec5c0a940710232218feea4fedf33806becb8"
+   ],
+   "list_target": false
+  },
+  "31": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794487933203005643",
+   "verdict": "allow",
+   "judged_ns": "1794487963416274330",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55839176)",
+   "evidence_sha256": "854ce30b8b3868be08dcbf27bfffac2c44f0e8d487d239f4b33096186f55daa9",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBRCDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9bepAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgdSTA9XxHzE46wlFRQdaH+GnqJf/4Fgc+/2goDIbkht6gNJzp1vNT0hydMGQyNUPer+ht/vefVPqZi+rEmkvcrsg=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": "cae10826fca9dd41ba7e810cf299fd683ec0a0de81f17841e19fc983447e907c",
+   "buy_decision_sha256": "525d7c9a328df9d5fff6ace485d8abc476c58a834ad16b9879ca47a4c3d9d3b6",
+   "tx_hashes": [
+    "5d277bf3ea634c36e562b9b61a750e4c1cdff0d490fe8365d2ebfa2dac6f024a"
+   ],
+   "list_target": false
+  },
+  "32": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794488034992492314",
+   "verdict": "warn",
+   "judged_ns": "1794488050712262511",
+   "reasons": "template reputation not checked: no index for this chain",
+   "evidence_sha256": "16955949348c379bbf1c83621c320d07ca57afbccbb6378ddc93b12886fd3512",
+   "amount_wei": "10000000000000",
+   "quote": "20152",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "9f1d48ff88906cfcf21e07c4da870a29e5e6e72a74f107b4b531884720f6c516"
+   ],
+   "list_target": false
+  },
+  "33": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794491633488724017",
+   "verdict": "block",
+   "judged_ns": "1794491662079759460",
+   "reasons": "sale refused 89 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 203 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "9d4d022f6834299d6b34bd2d0a8d0ccdf638e8c85f592fb2f9b113c82c909a1f",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "cfbff4381ca4db93c9af26ce77f59661cbb67b064dd8b0c77c9e4c1be914fb91"
+   ],
+   "list_target": true
+  },
+  "34": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794491666996260215",
+   "verdict": "block",
+   "judged_ns": "1794491690274597633",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding ; pool 162 blocks old: 100 % of the LP removable now (EOA 0xfa43..0006 holds 100 %)",
+   "evidence_sha256": "4e23e33b2c2cfa84e1479c750c1545ebdbde82c2c9a9ed55fee9b3e3942c6432",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "07bde52f83b5c924d015728f53e9da3a87b971da802810aa1c83b683e2efc6ec"
+   ],
+   "list_target": false
+  },
+  "35": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794491692261162967",
+   "verdict": "allow",
+   "judged_ns": "1794491720674645693",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55838928)",
+   "evidence_sha256": "6bd612a8a5d431c25c05834c474c4145cb735bdd4beb6b18a09de2d633b88c8d",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBRKDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9cZYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgZzWuyFfug3TfyAMg9z8QCejRu4UjV6qSP2WtEkUiqu2gfUD3hpab7Kf82huSB87FxJn/3zkW6dbAlLwIgOmUsYE=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "cf56fed051c8cf1731f47bcc067dd394165fc8837ed2e5e87372a7580358e6a5"
+   ],
+   "list_target": false
+  },
+  "36": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794491736896047488",
+   "verdict": "allow",
+   "judged_ns": "1794491763496855873",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55838953)",
+   "evidence_sha256": "0f00af2edd90859c22d25384aeb0d54a91008d5a8886098fd8b9a78391a8aca6",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBRODD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9caEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgG3sfdV6j0brydcHJbDF2+0V/FCgYxy2RMOk59M7WQMugLOT8ph9fMx6SCfmQovccALzeqMhsMlYJl+9OJTmUlaQ=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "4d10a6ae279e7cbfb3f390630c17d1a33096d176e495904d993734a02808039b"
+   ],
+   "list_target": false
+  },
+  "37": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794491792554155678",
+   "verdict": "block",
+   "judged_ns": "1794491819777114452",
+   "reasons": "sale refused 60 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 226 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "d6b723c19fdc5011a269faf404d7402606d3273be0c6f39bff02ce18fdc55ee7",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": "7ca0d52d8b8b38adddd7cfa95ba446ff41b56c2e1141d85cfcc5aba62d0c37c7",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "820f2bec44fb937d9b8684d7e6ba31c649d061d1f6d1b56dac63d30027fb9707"
+   ],
+   "list_target": true
+  },
+  "38": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794491833459003640",
+   "verdict": "block",
+   "judged_ns": "1794491862081151638",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding ; pool 245 blocks old: 100 % of the LP removable now (EOA 0xfa43..0006 holds 100 %)",
+   "evidence_sha256": "737cf9cf7378950a76999e2138c0e187d0b3f88fb8d59323d9c199c0f8a12984",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "71e8b9338fd1b5eafa00070a867d06a62e174c778c65fe9108380f56f49b04ca"
+   ],
+   "list_target": false
+  },
+  "39": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794491865101463754",
+   "verdict": "allow",
+   "judged_ns": "1794491896662971359",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55839015)",
+   "evidence_sha256": "39e0f14d1bb4b30a4268831d3cff3f2a8033737c54feac03d89fb35196f4bb6b",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBRSDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9ccFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwAGgCTkAVKi++rEpVJCQWpibuD0MkOmHN9S5j5roCwNptoKgXQ5DizoiayBaH3q9WyR8O5GGP8Fz3WjLVXyeZ8gShzA=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "b6c6227fceb6745fe5ddb71da75e092ad49d719170fa714e3c993d4a9175d18c"
+   ],
+   "list_target": false
+  },
+  "40": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794491912777200765",
+   "verdict": "allow",
+   "judged_ns": "1794491940095258060",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55839039)",
+   "evidence_sha256": "daff50ee3bb285963356c5189bd8bb192e4dc08f22e90beec3d1061bf7bccc1e",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBRWDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9cc0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgWeYKjfCxccJ3NN3nSw/YoXaHCS6XHl6DBMcu0BxmmgugIerEH0VfE7sm0Hh2u673Fia8PwZzT8vXR683UdqAzPM=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "da199169fbc0d3c3de1e59dd50c1aff3453b246d6554a9048c14d9cab29a72be"
+   ],
+   "list_target": false
+  },
+  "41": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794491955745547891",
+   "verdict": "allow",
+   "judged_ns": "1794491957792446419",
+   "reasons": "exit sale from the guard's address simulated: quote = the ETH it receives",
+   "evidence_sha256": "633965c189a1a3de0bfea1a1007b3fea35177befce8d4fa6904f7c8b87738ec2",
+   "amount_wei": "0",
+   "quote": "39759275668601",
+   "settled": true,
+   "approved": false,
+   "signed_tx": null,
+   "code": null,
+   "exit_amount": "81740",
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "6eb76523e0c5f191293b5da4ecf97347a0ccc278ae35d90b3b684d572461dae4",
+    "833814dc572929ce845f8b0fb93f30aec9f85b651be80e707ff068973e997c44"
+   ],
+   "list_target": false
+  },
+  "42": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x3dA52ABf017C90FAf659e3bFE39838b220Ca69cA",
+   "requested_ns": "1794491967599925295",
+   "verdict": "warn",
+   "judged_ns": "1794491988745175570",
+   "reasons": "20 % tax on the sale 79 blocks after the buy ; 20 % tax on the sale 214 blocks after the buy",
+   "evidence_sha256": "ea01868c5810a6dcf349099170e39ea179850d681a9e2d492c086e48aa10e150",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x70a386fdc0b764ec58d246be0aee8a8c4e4933f82782cec547093f58fbe79d10",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "426cc3dc1db152252de34a7a6b22557df7650cdf7b6deb7990a3d57feafb79ba"
+   ],
+   "list_target": false
+  },
+  "43": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x3dA52ABf017C90FAf659e3bFE39838b220Ca69cA",
+   "requested_ns": "1794492004554902454",
+   "verdict": "warn",
+   "judged_ns": "1794492031569671763",
+   "reasons": "20 % tax on the sale 52 blocks after the buy ; 20 % tax on the sale 205 blocks after the buy",
+   "evidence_sha256": "886c67ac7ae01dd4744c32620d9f1a4b4f81b5af605c9b6b2bddaf74a7de4d1e",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": true,
+   "approved": true,
+   "signed_tx": "AvkBV4IhBRiDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1ryXovzucYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9ceQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAD2lKr8BfJD69lnjv+OYOLIgymnKwAGgrwwTcrWwWgvKNPZoVQYZOCGA6ivZwN3aZwEmYHNmkwKgIHzFHMKT/HpRhsIxx/1xxFVA/pumZP9PXr08zwfpIO4=",
+   "code": {
+    "code_hash": "0x70a386fdc0b764ec58d246be0aee8a8c4e4933f82782cec547093f58fbe79d10",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "6c2fc106037e9cdf3fe05af8700961612bd16f5a9bd99e1961a848b3bfe4b011"
+   ],
+   "list_target": false
+  },
+  "44": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x960840B3AD7882b551bf510DE8C883b154116333",
+   "requested_ns": "1794492048627315037",
+   "verdict": "block",
+   "judged_ns": "1794492070113507382",
+   "reasons": "guard address only, not listed: sale refused 55 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; guard address only, not listed: sale refused 202 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "90d842011ef3eecf34523f9d8114e01e15f00eabbb14e63c58804a0e61b9160c",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x3cf02b00ee35f8847418fa2aa06e7ab8d2c7ed54cc1eeeeb6c37c8931b6eeb05",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "50273fa109a63c2b6f23df7857d41d2e27a3ee58cb240487f74bddea71a33b2e"
+   ],
+   "list_target": false
+  },
+  "45": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794492076121622079",
+   "verdict": "allow",
+   "judged_ns": "1794492101053273245",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55839125)",
+   "evidence_sha256": "1207dd981e4eb3845745ac1ef0de942368d158e4c8c8b8c63b11e03218f2ab26",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBRmDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9cfYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwAGgKKYruRiaZNSg1mF60p0+OIS313gVZICauTHtO59thFWgDKO8zRUGnHgtRH7taVfOikziEiF4md/7pK0Za8AMtS0=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": "f351ccbf56f87745cb704318dc81c6a99cfd92f0426c32a16734d3f788424087",
+   "buy_decision_sha256": "076e2f94b554e4011598c240c3bc8e2468c7ad2d428cc175a95f2090766c6dd2",
+   "tx_hashes": [
+    "7d180bc53b7348e9553cddbbe8efc2ebfd01dfcf9f6550c39be4edf5f274a21c"
+   ],
+   "list_target": false
+  },
+  "46": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794492202066082225",
+   "verdict": "block",
+   "judged_ns": "1794492227419670640",
+   "reasons": "sale refused 69 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 203 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "4cdace4af0dd6afff165cc9784186299dfef13db30929478ef99c70d3bd8264b",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": "a1d05d470c0ce321de992e945c535ca718919f621303d3b08ad4af6620736a2f",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "6fe8d3f15f02995bc87be5fc4850f6f966b812ebb7a4fcbb3bfa1113b8254213"
+   ],
+   "list_target": true
+  },
+  "47": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794492236735095318",
+   "verdict": "block",
+   "judged_ns": "1794492264092007133",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding ; pool 415 blocks old: 100 % of the LP removable now (EOA 0xfa43..0006 holds 100 %)",
+   "evidence_sha256": "03aa59dfe90002f871ea9e6aa606db7ece1550c8c2980f2cf26379f4dc1d009e",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "092de4dd794ffd824b3e90003bd7b2008d86029c25f95fa3999b196368f4ba2a"
+   ],
+   "list_target": false
+  },
+  "48": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794492267006320993",
+   "verdict": "allow",
+   "judged_ns": "1794492297995288710",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55839184)",
+   "evidence_sha256": "090a1fd05da1e34bbcbead3aa8d38aeb68535cf6f4a9375d1c2e5f0e0a8f6213",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBRqDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9ciXAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgn8mevRZqfOWuwPuN3CqriLJVN4njISZ0429vTvNIT56gS26JI8S3R6QX8mST/nAu2UnuDuilXjjVhxkBefbFyME=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "b5a5641420eac81b858df3da2ee06735ac7e4193513dfa7fe00a08fab10f38b1"
+   ],
+   "list_target": false
+  },
+  "49": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794492312968094178",
+   "verdict": "allow",
+   "judged_ns": "1794492340927239180",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55839207)",
+   "evidence_sha256": "e21ad2002b260a1aefecacec38e8e09649a6dc0c3d3838d4bf1da591755e35f8",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBRuDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9cjEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwAGgdSHft5SbQsygtw+yH3u8yx8DZqeaVzVDGIGlmiR44rKgOh+qk/j71I1grFg6sD9SzedJrX76+Ajf/CgQB1C7Zzo=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "2958f199f35b678537acf7281e20c8f3a4b41783b62dcf5691db1bc9714367b2"
+   ],
+   "list_target": false
+  },
+  "50": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794492356761185671",
+   "verdict": "allow",
+   "judged_ns": "1794492360196048679",
+   "reasons": "exit sale from the guard's address simulated: quote = the ETH it receives",
+   "evidence_sha256": "6f19d8f96e17d3f732253fcee6845e6b69a31f4a9f15f265ea3907fb8a9f7c02",
+   "amount_wei": "0",
+   "quote": "29819455808772",
+   "settled": true,
+   "approved": false,
+   "signed_tx": null,
+   "code": null,
+   "exit_amount": "61305",
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "2599439179905228325b4ea8194d824e6712c679fce5e58d743904341ea81207",
+    "5cb18de749c09156ab247ef5f48ff7174bce0b313e03977fb9967a9cab9b47a3"
+   ],
+   "list_target": false
+  },
+  "51": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x3dA52ABf017C90FAf659e3bFE39838b220Ca69cA",
+   "requested_ns": "1794492368447647435",
+   "verdict": "warn",
+   "judged_ns": "1794492394205882996",
+   "reasons": "20 % tax on the sale 81 blocks after the buy ; 20 % tax on the sale 203 blocks after the buy",
+   "evidence_sha256": "9e088455010c4cf648dfb0ed67037219b48bb335e19e15dc18e685e0e711f788",
+   "amount_wei": "10000000000000",
+   "quote": "996994029991808312",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x70a386fdc0b764ec58d246be0aee8a8c4e4933f82782cec547093f58fbe79d10",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "7ac18dad63d133c42250203877cd074eb97b8bd3c9db1a636d1faf10ff1e3fc3"
+   ],
+   "list_target": false
+  },
+  "52": {
+   "agent": "agent2.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794492414571467933",
+   "verdict": "block",
+   "judged_ns": "1794492438790100953",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding ; pool 507 blocks old: 100 % of the LP removable now (EOA 0xfa43..0006 holds 100 %)",
+   "evidence_sha256": "18fd13cb5af2c1ffa4c7eaa31f4c6119ca59c6c47b868ddffb4221878cdb4de1",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "03382290884513160214ef9aedf5452f7c54f29972b28204f85339eb0deb9afb"
+   ],
+   "list_target": false
+  },
+  "53": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794492497547045149",
+   "verdict": "block",
+   "judged_ns": "1794492526374208580",
+   "reasons": "sale refused 112 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 205 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "d40d1c9a06c1a669c5b3a8592c68175e2c804ffc0d5dd56c455c2c7656c20b03",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": "920dd4866c52913f7f18004b618392b38db68872727212fa4e9203983d5e004e",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "d4b420c156f30dadc9637cfbe9ef72aa3e7f26e54e55885cd6aeb7b5689cb669"
+   ],
+   "list_target": true
+  },
+  "54": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794492499363703364",
+   "verdict": "block",
+   "judged_ns": "1794492532400415172",
+   "reasons": "listed on NEAR by sentinel.goblin-guard-13713.testnet ; sale refused 19 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 218 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "645399d439a7d40d6145ddb63e640141768ed1af4ae7aa0956d238502ab99620",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": "39c19a42b17f3a22ac9d200ec76cbdafeb6d5833613def6b8343923be27404a2",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "7fb258c652ceb8a56e0856253aa15c9793e5466429f00404038630bd712abd62"
+   ],
+   "list_target": true
+  },
+  "55": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794492541151249655",
+   "verdict": "block",
+   "judged_ns": "1794492569045094691",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding ; pool 551 blocks old: 100 % of the LP removable now (EOA 0xfa43..0006 holds 100 %)",
+   "evidence_sha256": "06bd322fc97f6a6dd69f2de15080e1d6ba70459626e3b3d5b6f08e8ea888afde",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "70a36bae6e1d0528c2eff75eb46b273545c9439b7da53c533c19e72a7e4fd2d0"
+   ],
+   "list_target": false
+  },
+  "56": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794492571465940337",
+   "verdict": "allow",
+   "judged_ns": "1794492595817306784",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55839319)",
+   "evidence_sha256": "0d62f3d3e8ca84e1b0578cf62752539c0065eb56d2c4eddd96a5a8829a7a23c2",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBR+DD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9cnHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICg2gzDiVPU/UjOfduha4qjaI9PK03ZvcEMVyNR6lN+QTagDzpY8Ao8EQOy3+3lTcnqNUWh5N7qy6+2pB9p6BhY9ic=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "f448d1dce746d5a73851bcfbf559a5b9f4e0d8cffbd947bd010d693dcec27716"
+   ],
+   "list_target": false
+  },
+  "57": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794492611630801595",
+   "verdict": "allow",
+   "judged_ns": "1794492636361391558",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55839339)",
+   "evidence_sha256": "20d0f482ec8ca304d8c104383306120c281266a03ac11b6741d9dceca6f5c3cf",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBSCDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9cnvAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgatWIviayKbfXWD2PEgy3q2PMiBpXPC+Ddjbhe94jzBCgXvzY+0GOHJSSHHWkeFa7CQmpnmO0NKBxj7mtfpDpMc0=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "0eba73959ca02b40d2686886ce55c78a87e360cfd0a3c5109a03883f4f88a89c"
+   ],
+   "list_target": false
+  },
+  "58": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794492652068978879",
+   "verdict": "allow",
+   "judged_ns": "1794492654680466031",
+   "reasons": "exit sale from the guard's address simulated: quote = the ETH it receives",
+   "evidence_sha256": "afdbd96af6ee1f6a0b1b31b7d9e4329b7eb02c586a7678d2abf7c3e8cf45bb28",
+   "amount_wei": "0",
+   "quote": "19879636573532",
+   "settled": true,
+   "approved": false,
+   "signed_tx": null,
+   "code": null,
+   "exit_amount": "40870",
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "cb318b5ad15a9f4d715ea1833f4332d8ad33b9b4673f44bd67146c11f965f015",
+    "cb973c4d463f8b7b6c937825c5a11faf6486221a2459066bd9f3ee653bf7a7c2"
+   ],
+   "list_target": false
+  },
+  "59": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x3dA52ABf017C90FAf659e3bFE39838b220Ca69cA",
+   "requested_ns": "1794492664948457911",
+   "verdict": "warn",
+   "judged_ns": "1794492686699626897",
+   "reasons": "20 % tax on the sale 43 blocks after the buy ; 20 % tax on the sale 230 blocks after the buy",
+   "evidence_sha256": "f89d68450f320f4846b7e2bf5e48bc974d3d0fa8ac2c08417bb89c40de13b220",
+   "amount_wei": "10000000000000",
+   "quote": "996994029991808312",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x70a386fdc0b764ec58d246be0aee8a8c4e4933f82782cec547093f58fbe79d10",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "4b8bbdc8dfad974756c9d983b9cc5a63ab92d8685e4e3d617c2c49dffbfa2eb8"
+   ],
+   "list_target": false
+  },
+  "60": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x3dA52ABf017C90FAf659e3bFE39838b220Ca69cA",
+   "requested_ns": "1794492701971560684",
+   "verdict": "warn",
+   "judged_ns": "1794492725658108581",
+   "reasons": "20 % tax on the sale 114 blocks after the buy ; 20 % tax on the sale 250 blocks after the buy",
+   "evidence_sha256": "76de88fc63381b82fe63c708a66c5731df1c5d20486deacc459b37bc3e8f49ef",
+   "amount_wei": "10000000000000",
+   "quote": "996994029991808312",
+   "settled": true,
+   "approved": true,
+   "signed_tx": "AvkBV4IhBSODD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1rxfbe0kwuAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9cpJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAD2lKr8BfJD69lnjv+OYOLIgymnKwAGgfOabznTmiZm80MjXlf65X35HWjy4xAB3IFpPoNiK4WWgEferJN9Ssk4iK3BUXE+YvNoKOXYq4Gox0+ilggG93qU=",
+   "code": {
+    "code_hash": "0x70a386fdc0b764ec58d246be0aee8a8c4e4933f82782cec547093f58fbe79d10",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "319b8f08f29ba78b50008c8082d5d752e85700c8cb70abbb44354ff6f0ab04d4"
+   ],
+   "list_target": false
+  },
+  "61": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x960840B3AD7882b551bf510DE8C883b154116333",
+   "requested_ns": "1794492742128732633",
+   "verdict": "block",
+   "judged_ns": "1794492764694121717",
+   "reasons": "guard address only, not listed: sale refused 100 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; guard address only, not listed: sale refused 239 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "7c1b8b24ed08d673544e7f9b924db689b4df53c6d5afc60fdac9840a73819a29",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x3cf02b00ee35f8847418fa2aa06e7ab8d2c7ed54cc1eeeeb6c37c8931b6eeb05",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "d339fb631a1d8f0df94895fe56a1d2244e1af4d6d623e9a3a1c4182839a540fb"
+   ],
+   "list_target": false
+  },
+  "62": {
+   "agent": "agent2.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794492767521152510",
+   "verdict": "block",
+   "judged_ns": "1794492791170942941",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding ; pool 667 blocks old: 100 % of the LP removable now (EOA 0xfa43..0006 holds 100 %)",
+   "evidence_sha256": "b9fd07b90d15661d38ca0dccec7fcb440a797067a6eb1ca6bb165e5cd1911ab4",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "6613de0472706d04b54792239a4c62368b94aeeefb493f95ee15759277d2d421"
+   ],
+   "list_target": false
+  },
+  "63": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794492796291946637",
+   "verdict": "allow",
+   "judged_ns": "1794492818999501188",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55839435)",
+   "evidence_sha256": "3c372e52d2205fc0afb4352f0df7613161dd6434b64d049385ca827501dda2c6",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBSSDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9cqoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgyST0jNVN2g5rbselsUIv4Y4Mkz285nicN+Lnmr1hSQqgcI/9BTke9YiX78WnVMYcZoDsXtRjdmmH3nuU7XyRY8I=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": "d08cc057f20358d1f8ceaa5e92bbe07e6e65955064be95619e15570289244dc3",
+   "buy_decision_sha256": "2c4159738113f77af060fd9f0bc4edc1e7bbaf87812d5878b9b2dfa048c5a0f4",
+   "tx_hashes": [
+    "1666efbf0248683e768c5771888ccda60bd254e661dd6331815c0bc9a114aa38"
+   ],
+   "list_target": false
+  },
+  "64": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794492875180062040",
+   "verdict": "warn",
+   "judged_ns": "1794492970839202876",
+   "reasons": "template reputation not checked: no index for this chain ; 5 slot(s) the buy wrote moved on Base before block 56512627 (0x4200..0006, 0x8335..2913, 0x88a4..bb9c): the later sales ran on Base's values",
+   "evidence_sha256": "cc3d3903095906f167e8b8de515880ca2dd21cf83c2d64b10a9085d92cf828e1",
+   "amount_wei": "10000000000000",
+   "quote": "19999",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "4711a59a65bd73ae5d7c10479179ce62ec3438d74117d7ecf5cc91d1c2c311d2"
+   ],
+   "list_target": false
+  },
+  "65": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794497218028379239",
+   "verdict": "warn",
+   "judged_ns": "1794497242707212063",
+   "reasons": "template reputation not checked: no index for this chain",
+   "evidence_sha256": "2644c832e01aefcf58dc62762c89f6b4e333c3d653d9eb181dd8dd2321db1013",
+   "amount_wei": "10000000000000",
+   "quote": "19947",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "f2416df48444ee5a29536c2790ac59ff1f81ff2e6a7b8e2512e7dad1b9e786c3"
+   ],
+   "list_target": false
+  },
+  "66": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794497887378083722",
+   "verdict": "warn",
+   "judged_ns": "1794497916379746173",
+   "reasons": "template reputation not checked: no index for this chain",
+   "evidence_sha256": "12cca37a0094c563f2a72509c9fdf9c0204880d06307d1484a5921845553c48e",
+   "amount_wei": "10000000000000",
+   "quote": "19929",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "907cb077eff1ddfbc45375ab4ede3a767bd69f2ee13657a8d28fd477add40643"
+   ],
+   "list_target": false
+  },
+  "67": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794497995758939439",
+   "verdict": "warn",
+   "judged_ns": "1794498022129641444",
+   "reasons": "template reputation not checked: no index for this chain",
+   "evidence_sha256": "b8d27d866e4f9129a2945286e1ca348c23b57b5b1205fce2abb4e17254d197d2",
+   "amount_wei": "10000000000000",
+   "quote": "19929",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "56470e3ea094d1da6020897e283ba2fe5273e40a105d2de2adaf20fe2ae75126"
+   ],
+   "list_target": false
+  },
+  "68": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794498100976317503",
+   "verdict": "warn",
+   "judged_ns": "1794498131480721385",
+   "reasons": "template reputation not checked: no index for this chain",
+   "evidence_sha256": "3b2c08c4fdd3b45cc950d330222a77edf50d3846910a2eccaa80ef12bdd9f9bd",
+   "amount_wei": "10000000000000",
+   "quote": "19929",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "4b0eb43e7a1a7027d096c33837e1719e950e7bab6f01c37192e4f5f19514a0e7"
+   ],
+   "list_target": false
+  },
+  "69": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794498211495324358",
+   "verdict": "warn",
+   "judged_ns": "1794498237558850403",
+   "reasons": "template reputation not checked: no index for this chain",
+   "evidence_sha256": "589d7da0452e9373649d71a663e6505238abf11971439f1a6c1b5cb582864d4c",
+   "amount_wei": "10000000000000",
+   "quote": "19929",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "ce29d9827a380a1ea177ba09785449f79c3993bfadff5174d2909ddbd7a5b92a"
+   ],
+   "list_target": false
+  },
+  "70": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794498315535641367",
+   "verdict": "warn",
+   "judged_ns": "1794498368709073999",
+   "reasons": "template reputation not checked: no index for this chain",
+   "evidence_sha256": "7e4a13f3e69b455072acec09bb7ab0add4e8672210744b89e8ba15d64499d23d",
+   "amount_wei": "10000000000000",
+   "quote": "19931",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "67be3a9fb8a470ffd50a6959b4ace2486034c361244016bb205e488a275a172a"
+   ],
+   "list_target": false
+  },
+  "71": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794498964482058124",
+   "verdict": "block",
+   "judged_ns": "1794498994276891274",
+   "reasons": "sale refused 8 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 31 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "629c957f8d3401bf5a12405e3b701a0572880c82c5c5036d6add68b59f1877d4",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "99ca7d2ea496e52dc2916f5d2163f586c396b58108a9240f68a0a71ca715462f"
+   ],
+   "list_target": true
+  },
+  "72": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794498999144991627",
+   "verdict": "block",
+   "judged_ns": "1794499023395617778",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding",
+   "evidence_sha256": "558dbc7facffc205523ea7e63c95403aec1cc86ec547411920d3ed153efc491d",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "f04edd5af6d59fbfee754e239a766f0d88738eb1de4806f26886f5b67aa1bc15"
+   ],
+   "list_target": false
+  },
+  "73": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794499026462325429",
+   "verdict": "allow",
+   "judged_ns": "1794499051799675103",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55837177)",
+   "evidence_sha256": "527bffa96e59b9eb0c24ae1be7c5a1a4152f7b7eef0066ffb2301b7bf6da7f52",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBSaDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9eL+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwAGg7BvQaQRFpiDBCCAtfLYQ4YVeTlIIcyAxCGzDiZRv0uugPAz0S/NYvoOiNL4QFa1NDQmmIpK0TE5UbiiDDj9aKaI=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "de5ad874c1a37343f4d5c5a5c3e6da08b835c7ba99e963c326eec98430a9f700"
+   ],
+   "list_target": false
+  },
+  "74": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794499105773342540",
+   "verdict": "block",
+   "judged_ns": "1794499134267272275",
+   "reasons": "sale refused 18 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 35 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "7f12da3ae25dabae3238b63ca297fc2ecd6a919863ed555401c18dfc13f66bcb",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": "76eeb0055e6b6cbcc94823773b5e73d3af5b2e5cbcdefd198974edf3f003c37f",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "2f59ee4322482327b6072491b655b724ba38999a6f118bff86d165ba50e57b70"
+   ],
+   "list_target": true
+  },
+  "75": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794499146400965785",
+   "verdict": "block",
+   "judged_ns": "1794499181204391942",
+   "reasons": "simulation impossible after 3 tries : Cannot destructure property 'stateOverrides' from null or undefined value",
+   "evidence_sha256": "3dffb41d6634f73473ee54c7549d782ad3103a4b0051fb5954f6f4b1c3415127",
+   "amount_wei": "10000000000000",
+   "quote": "0",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": null,
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [],
+   "list_target": false
+  },
+  "76": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794499184466858122",
+   "verdict": "allow",
+   "judged_ns": "1794499211362796021",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55837308)",
+   "evidence_sha256": "93d57fc01dd5f064c154515191042b5bad334eb4a5b507b160685ca954f016b2",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBSeDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9eOcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgp8vsEC2wSB/c4+pm9Ls/gxGdYnixO9ayYWl3BX8WKaqgMZLWkhVNlpS+quwxyJ0eK0O0Bejxup/dWngy//BV04w=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "31cb7aa8f453cae9481dc5a07402fb90c1ac737b22160eaabc41625162eb5b06"
+   ],
+   "list_target": false
+  },
+  "77": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794499226739397167",
+   "verdict": "allow",
+   "judged_ns": "1794499247685616915",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55837350)",
+   "evidence_sha256": "ebb7d4e4295196dbdbb1c1de4e590bb58c07519d09dd1c964de574b932a2e233",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBSiDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9ePGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgaa2Oz2oHJ0jYoNwselqGPs0IYMxd0dCM2mRXl/3230CgBQoohg1hCIh2l6qLRzSJDNz+UcrTHofxO1aa8qOfwos=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "ecdfa99a56f0def3c73d106d2f82d8de493451a448291a940ad094136c6ae14d"
+   ],
+   "list_target": false
+  },
+  "78": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794499499028061419",
+   "verdict": "block",
+   "judged_ns": "1794499530458876099",
+   "reasons": "sale refused 16 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 33 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "9ac38327f87d53eba0b7152f11166b33bbc0ede708800fba9f035948f94425dd",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": "32e6b6a9ab4c5bb9c5c09c4bc4137afaf68681bdc71ce3481d684d81b488cd7c",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "b39e36250f8f76bf005c16575b5450ab4cd2b889cd8346edc3161c5fff42bc27"
+   ],
+   "list_target": true
+  },
+  "79": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794499540483579622",
+   "verdict": "block",
+   "judged_ns": "1794499568084608484",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding",
+   "evidence_sha256": "b5830d3e563f8b5b8e210fdcc75e5a211fabf905a418e9753a4a78a0d6e6ed9a",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "4bc37efa93e3a660f1a14f31bbf793adb2c096888975b474aaeff8ce8be0c9a8"
+   ],
+   "list_target": false
+  },
+  "80": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794499570465473667",
+   "verdict": "allow",
+   "judged_ns": "1794499592923295902",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55837567)",
+   "evidence_sha256": "cfe8f1598685d9be50cdc92637bf1214650087d2f2b642a12842e132d20a1c60",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBSmDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9eUeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgaYaIbJ8HfM9DOl5QTFBgOvlj/gEJ/27K2ouywNvlmH2gBHKFyOowWgEP2ZD53LlDkA2J6YQScxKPGsMdnUtJpRE=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "ebb67bbd0f9c1389d65f66ad53889f780497c821dc25800f255898b1bffc4645"
+   ],
+   "list_target": false
+  },
+  "81": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794499608087621632",
+   "verdict": "allow",
+   "judged_ns": "1794499636601640247",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55837605)",
+   "evidence_sha256": "60c6f3a12f036e914135c2dd838004e1aab4420602acbc777b0a17201e87e319",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBVoIhBSqDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9eVEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwAGgzpICcWT0jH2vEgaxxmZvrD8sunfFg/b4Nwe+vVGR0BGfmgMg3HrszXbhdCXsuw/UUiy9CtAsARnYsWfIk86beQ==",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "c876086e38bcc3e4b27a9db256d502376900b962419614e688ce1c8f818a6083"
+   ],
+   "list_target": false
+  },
+  "82": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794499710697791869",
+   "verdict": "block",
+   "judged_ns": "1794499733247561233",
+   "reasons": "sale refused 5 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 33 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "8ce9f9d863daa03be2d71cf2efaede7a6537120678b0be0411bf785274b7e1fc",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": "36896f89c71c2189d3b0d08c8957f7a594d8cb980afb1519c38c96489ab7adfd",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "6fbac78c419a587fcfb58f219549da251d2d4ec0c9bbe61d72b1499050a6607a"
+   ],
+   "list_target": true
+  },
+  "83": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794499743012731969",
+   "verdict": "block",
+   "judged_ns": "1794499774038257957",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding",
+   "evidence_sha256": "b0c8ad35c4607220c530254bbdd5da98b7d6632afeda198269c58b5352c4c7cd",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "76fca08a4a893b34803dbc21d1e459ea1a721240bb3aaee490a98aa4f14a9773"
+   ],
+   "list_target": false
+  },
+  "84": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794499776559890704",
+   "verdict": "allow",
+   "judged_ns": "1794499804867810541",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55837773)",
+   "evidence_sha256": "eb625acb1dfd086e7fc335a018d3997af914dd882b757a352872ef3df67398ce",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBSuDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9eXsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgKLuTINHfmhTi3pEa1hwkHmzOtYdznhoJy/7vUjcT9megc5E9nqJGn2K6QKdYDCRlI8iIDTHmz+2W/znio9MvF1s=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "b03026d3f72ffa11f65a5538df08c2f1957d01f59b4962670f854dae71dd694d"
+   ],
+   "list_target": false
+  },
+  "85": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794499822054470221",
+   "verdict": "allow",
+   "judged_ns": "1794499846758305697",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55837818)",
+   "evidence_sha256": "8bc88f9cf07cf571d786526765a92949195de662a8a930cdfa84e179207fa865",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBSyDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9eYaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwAGg1hY0kkuuOypOEezYoL6iUAWL1sviqz8O19xDFUPmhbigCcApPSk8GSGT/LhvVnA1+9Tn3ZaAz5TSQNWjyoVzbXM=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "3fb6e8fb20da77d782ba20e2df1f7c8982884b1390428c29962f5772149ffd4f"
+   ],
+   "list_target": false
+  },
+  "86": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794499860966652838",
+   "verdict": "allow",
+   "judged_ns": "1794499864426254823",
+   "reasons": "exit sale from the guard's address simulated: quote = the ETH it receives",
+   "evidence_sha256": "86ca13624ca28eb11f7bad0277d4f0868f97ebe8ca6cc09c657a7e21ba65386e",
+   "amount_wei": "0",
+   "quote": "69578739181073",
+   "settled": true,
+   "approved": false,
+   "signed_tx": null,
+   "code": null,
+   "exit_amount": "143045",
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "b8289e1d08441a9df551d4ea5624f95736c4cd19b9e428ae8eccf9c25f89cbcd",
+    "6f6bc5914524325783f7f3f814d5d6b2e67c3958379f8baea6ebbf2d2936274b"
+   ],
+   "list_target": false
+  },
+  "87": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x3dA52ABf017C90FAf659e3bFE39838b220Ca69cA",
+   "requested_ns": "1794499874057857346",
+   "verdict": "warn",
+   "judged_ns": "1794499889745326316",
+   "reasons": "20 % tax on the sale 6 blocks after the buy ; 20 % tax on the sale 50 blocks after the buy",
+   "evidence_sha256": "2b72790218c412ee3942056d510c3bed4a0612915dc1d3d65e6c66d78eea2f28",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x70a386fdc0b764ec58d246be0aee8a8c4e4933f82782cec547093f58fbe79d10",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "c92f44d6cb92df32f05b10004292669f61b618b2abf70ce8b7c0f5d0efabe8d7"
+   ],
+   "list_target": false
+  },
+  "88": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x3dA52ABf017C90FAf659e3bFE39838b220Ca69cA",
+   "requested_ns": "1794499905907508184",
+   "verdict": "warn",
+   "judged_ns": "1794499921131693382",
+   "reasons": "20 % tax on the sale 19 blocks after the buy ; 20 % tax on the sale 41 blocks after the buy",
+   "evidence_sha256": "d47ebfc9719a9b3dc188acf0f4f080ef42f4a06b13d29f133a042396ff1dcccf",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": true,
+   "approved": true,
+   "signed_tx": "AvkBV4IhBS+DD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1ryXovzucYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9eZtAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAD2lKr8BfJD69lnjv+OYOLIgymnKwAGgZsaW5DUY/GjG1PnQEZH8/S8zZP+F+oNaObyutgYCMCKgV58E6gXGFykPQiORQu1pozXFHzeBaOA1yGRxmouE3Ig=",
+   "code": {
+    "code_hash": "0x70a386fdc0b764ec58d246be0aee8a8c4e4933f82782cec547093f58fbe79d10",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "7b48fcf837eba4bbbebef46348ea0c5b510d64a5a3cd30be898c119ba5edce8e"
+   ],
+   "list_target": false
+  },
+  "89": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x960840B3AD7882b551bf510DE8C883b154116333",
+   "requested_ns": "1794499937273696151",
+   "verdict": "block",
+   "judged_ns": "1794499957607178501",
+   "reasons": "guard address only, not listed: sale refused 4 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; guard address only, not listed: sale refused 45 blocks after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "ba5aa4bfa3bf17ee47326755435b24837786e69c6e0ccfcc0fd6f2aaf324a555",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x3cf02b00ee35f8847418fa2aa06e7ab8d2c7ed54cc1eeeeb6c37c8931b6eeb05",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "9d95653acd4d58a92d159283e2f70c1766209f1b790d8048684862e31cdee962"
+   ],
+   "list_target": false
+  },
+  "90": {
+   "agent": "agent2.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794499961157786252",
+   "verdict": "block",
+   "judged_ns": "1794499982901361138",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding",
+   "evidence_sha256": "7100632c15d4920131f3b1b2a28bb0f135afc732d4d42c1b8690bb111a892356",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "d72553262febde87271c0b9fb59390d6c7bdd55417db05a961dbf1a3fbb5e7c9"
+   ],
+   "list_target": false
+  },
+  "91": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794500056913050081",
+   "verdict": "warn",
+   "judged_ns": "1794500086640542003",
+   "reasons": "template reputation not checked: no index for this chain",
+   "evidence_sha256": "0620924c8d2581f599baf19bb8b80e1b9909d59f060d563926691063bbd56038",
+   "amount_wei": "10000000000000",
+   "quote": "20116",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "d121b1bd6798b7ad2d09a2aeb6b1aea0ea18259fc074747aa6ee09244b682fe2"
+   ],
+   "list_target": false
+  },
+  "92": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794503284738825285",
+   "verdict": "block",
+   "judged_ns": "1794503307207017172",
+   "reasons": "sale refused 20 s after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 46 s after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 441 s after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "7d2e0f691c7f475e45d6f16c8197e0504c16f664c992998100a5ffa38122194c",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "898fe31b23678993808e981da15338bd6a5f401875b73af18933c3b82c4b5f28"
+   ],
+   "list_target": true
+  },
+  "93": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794503312314319347",
+   "verdict": "block",
+   "judged_ns": "1794503341358790719",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding",
+   "evidence_sha256": "d7ec9f225727a5b515869737cf30571ee657991d8b78174405f1047707f71a09",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "9cd22ff936eaf66759a79580d3d6dee9dcbe25cd47a6cb58ba8c8127b0a03b07"
+   ],
+   "list_target": false
+  },
+  "94": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794503344458041218",
+   "verdict": "allow",
+   "judged_ns": "1794503373137419361",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55837220)",
+   "evidence_sha256": "ef7655368efd4e0727f0bf36a707b74fe6025fb53d56504231b3c8d9096222be",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBTGDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9fPcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwAGgnrdb1z3msh0QGhYWCWUrh6p3Pw2S/hKC1fbrbVhlI06gT94PjuabLFAwO9NMbL1XE4p14j4gbxnKaAW7oBAUVNQ=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "ea74b31f4ae9bc4b3b6513112dc2941e715b1cf746a746431b70ef8d959240e1"
+   ],
+   "list_target": false
+  },
+  "95": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794503388745309120",
+   "verdict": "allow",
+   "judged_ns": "1794503414342824020",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55837264)",
+   "evidence_sha256": "2de62c01b78b290a13292e60002796d2458cc139af0820f1e8ebc0011000e293",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "1a930a297b1b360cbdf4fe010c74e928dbfcc1cab8ba8cb8e002726a2322db7c"
+   ],
+   "list_target": false
+  },
+  "96": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794503496476747494",
+   "verdict": "warn",
+   "judged_ns": "1794503519517929268",
+   "reasons": "template reputation not checked: no index for this chain",
+   "evidence_sha256": "9290e30f7da0f4f587cf71ff6512a7e5d29dfa955cf1393ea83f5d8a57e37f0b",
+   "amount_wei": "10000000000000",
+   "quote": "19979",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "0aa794ee66a9ada82f0e5c64ad5d5a75f42d46175228d417c32a87002461b801"
+   ],
+   "list_target": false
+  },
+  "97": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794503565062016119",
+   "verdict": "warn",
+   "judged_ns": "1794503588796419559",
+   "reasons": "template reputation not checked: no index for this chain",
+   "evidence_sha256": "dd1ade6d15399264b3b84c45956f5cd745a1ab5df85c11f99d35aa493a9bf376",
+   "amount_wei": "10000000000000",
+   "quote": "19979",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "4f44093f161ea076758137fd56e9de82d81ab7b5a39f5b24429d6ecf3a1c716c"
+   ],
+   "list_target": false
+  },
+  "98": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794503619758866909",
+   "verdict": "warn",
+   "judged_ns": "1794503645307791112",
+   "reasons": "template reputation not checked: no index for this chain",
+   "evidence_sha256": "870e056c1cbbd79bb88a207d39d5af8016c95309e17b8e99dd523aeaa90aec20",
+   "amount_wei": "10000000000000",
+   "quote": "19979",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "11ab942e03e182c6b360fb856bdaf0d2adbd32334eb99842845241f41b701280"
+   ],
+   "list_target": false
+  },
+  "99": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794503976703680255",
+   "verdict": "block",
+   "judged_ns": "1794504006313881219",
+   "reasons": "sale refused 18 s after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 29 s after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 683 s after the buy (TransferHelper: TRANSFER_FROM_FAILED)",
+   "evidence_sha256": "a3886a6b80cc0ea7ddf3a388e6796ac7d161f121893a9d54cce8b12873642581",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "49f098ab8379fcc634ce383d73ae0af0e17914b3f681f6205eb94698b165b3cf"
+   ],
+   "list_target": true
+  },
+  "100": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794504010048233353",
+   "verdict": "block",
+   "judged_ns": "1794504037396469051",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding",
+   "evidence_sha256": "d7cd19247b09cea711a84b756017947a97ca22bd2e05bd5d295c51e177570a5e",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "6f64265d20b687fa1ba4550aa7254b810e8df935d2d8419f89de5673d8b96a92"
+   ],
+   "list_target": false
+  },
+  "101": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794504040077549982",
+   "verdict": "allow",
+   "judged_ns": "1794504068792883781",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55837184)",
+   "evidence_sha256": "de2d45ada861b8935e3a0718506464a761e80d7d73698f983bcc4c900e5b24f0",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBTKDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9faUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwAGgqslPDkoTK2NvE3g5xbnUcck71SHejA4yTjyb9zvjIs+gQfqLv+Vxt2NfVdZ6tsjGoJh9bQf5CM82+CGUsmdhHPg=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "48b710946341f572dd00d50ba2b685fa00afb0182bc38dea654972364e8d971e"
+   ],
+   "list_target": false
+  },
+  "102": {
+   "agent": "agent.goblin-guard-13713.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794504083862117445",
+   "verdict": "allow",
+   "judged_ns": "1794504105334563779",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55837227)",
+   "evidence_sha256": "429f3b1a7a1610eb7047200229af44a7446337853d55d68c2713572364a98895",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBTODD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAABHSNvxlPdgNzQUF+k+O1YXc+0S7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9fa/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICgTowuvY945tZ4BuO/ZFbME1D1JV/xKQjoGMEuN5h0Qt+gHC80PSIe/eKPQ860FzT0V1i93+piD/x8i6Et9SGdb0U=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "a3cadf1e3965baccf7a7ee8b3c30cf36e9afe342a0005c2bc25e2beeaae2fa39"
+   ],
+   "list_target": false
+  }
+ },
+ "entries": [
+  [
+   "0xdb457fc3607cc9796f4cb9dec29900175787d5fe",
+   {
+    "reporter": "sentinel.goblin-guard-13713.testnet",
+    "at_ns": "1794504006313881219",
+    "evidence_sha256": "a3886a6b80cc0ea7ddf3a388e6796ac7d161f121893a9d54cce8b12873642581",
+    "note": "verdict #99"
+   }
+  ]
+ ],
+ "agents": {
+  "agent.goblin-guard-13713.testnet": {
+   "frozen": false,
+   "stopped_at": "1794499995035467038"
+  },
+  "agent2.goblin-guard-13713.testnet": {
+   "frozen": false,
+   "stopped_at": null
+  }
+ },
+ "signing_since": null,
+ "escrow": "0",
+ "credits_total": "22630000000000000000000",
+ "bounds": {
+  "max_budget": "500000000000000000000000",
+  "max_duration_s": 3600,
+  "max_7d": "5000000000000000000000000",
+  "max_buy_wei": "100000000000000"
+ },
+ "evm_config": {
+  "mpc": "v1.signer-prod.testnet",
+  "address": "0x4748dBF194F76037341417e93E3B561773Ed12eC",
+  "gas_limit": 250000,
+  "max_fee_per_gas": "50000000",
+  "max_priority_fee_per_gas": "1000000",
+  "yocto_per_wei": "1000000000",
+  "max_slippage_bps": 300,
+  "withdraw_to": "0x000000000000000000000000000000000000dEaD"
+ }
+}

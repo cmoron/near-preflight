@@ -60,7 +60,9 @@ async function rpc(params) {
   throw lastErr;
 }
 
+let rpcCalls = 0; // RPC requests this page load made (logged to the console)
 async function view(guard, method, args = {}) {
+  rpcCalls++;
   const res = await rpc({
     request_type: 'call_function', finality: 'final', account_id: guard, method_name: method,
     args_base64: btoa(JSON.stringify(args)),
@@ -79,22 +81,26 @@ function saveCache(key, cache) {
   catch (e) { console.warn('check cache not saved:', e); }
 }
 
-// Every check, newest first: the live counts need them all, the picker the latest of each token.
-async function readChecks(guard) {
-  const last = Number(await view(guard, 'last_check_id'));
+// Every check, newest first: the live counts need them all, the picker the latest of each token. `snap`: the
+// snapshot of this guard, whose final checks need no read; `live` false: answer from the snapshot alone (no RPC).
+async function readChecks(guard, snap, live = true) {
+  const v = live ? (m, a) => view(guard, m, a) : async (m, a) => Snapshot.view(snap, m, a);
+  const last = Number(await v('last_check_id'));
   const key = 'near-preflight:checks:' + guard;
-  const cache = loadCache(key);
+  const cache = live ? loadCache(key) : {};
+  const fromSnap = snap ? Snapshot.finals(snap) : new Map();
   const ids = Array.from({ length: last }, (_, i) => last - i);
   const checks = [];
   for (let i = 0; i < ids.length; i += BATCH) {
     checks.push(...await Promise.all(ids.slice(i, i + BATCH).map(async (id) => {
       if (id in cache) return { id, check: cache[id] };
-      const k = await view(guard, 'get_check', { id });
-      if (!k || (k.verdict && Date.now() / 1000 - secs(k.judged_ns) > FINAL_S)) cache[id] = k; // null: refunded
+      if (live && fromSnap.has(id)) return { id, check: fromSnap.get(id) };
+      const k = await v('get_check', { id });
+      if (live && (!k || (k.verdict && Date.now() / 1000 - secs(k.judged_ns) > FINAL_S))) cache[id] = k; // null: refunded
       return { id, check: k };
     })));
   }
-  saveCache(key, cache);
+  if (live) saveCache(key, cache);
   return { last, checks };
 }
 
@@ -132,7 +138,7 @@ const journalLink = (hash) => {
   return u.pathname.split('/').pop() + u.search + u.hash;
 };
 
-function renderLive(guard, last, checks) {
+function renderLive(guard, last, checks, note) {
   let blocked = 0, signed = 0;
   for (const { check: k } of checks) {
     if (k && k.verdict === 'block') blocked++;
@@ -141,7 +147,7 @@ function renderLive(guard, last, checks) {
   const n = (v) => el('strong', {}, String(v));
   $('live').replaceChildren(
     n(last), last === 1 ? ' check' : ' checks', ' requested so far, ', n(blocked), ' blocked, ', n(signed), signed === 1 ? ' purchase' : ' purchases',
-    ' signed by NEAR.', el('small', {}, 'Read from NEAR testnet by this page just now, on the demo guard ', el('code', { class: 'acct' }, guard), '.'));
+    ' signed by NEAR.', el('small', {}, note ? note + ' Demo guard ' : 'Live, read from NEAR testnet by this page just now, on the demo guard ', el('code', { class: 'acct' }, guard), '.'));
 }
 
 // What each lamp's line says, from the check's own fields.
@@ -203,6 +209,7 @@ function play(entry) {
   timers = STEP_MS.map((ms, i) => setTimeout(() => setStep(i + 1), ms));
 }
 
+let current, observed = false, pickerSig = '';
 function renderPicker(tokens, checks) {
   const entries = CHOICES.flatMap((choice) => {
     const addrs = [].concat(tokens[choice.key] || []).map((a) => String(a).toLowerCase());
@@ -214,15 +221,20 @@ function renderPicker(tokens, checks) {
     $('choices').replaceChildren(el('p', { class: 'empty' }, 'No check of these tokens on this guard yet.'));
     return;
   }
-  let current = entries[0];
+  const sig = entries.map((e) => e.choice.key + e.c.id).join();
+  if (sig === pickerSig) return; // the live read changed nothing the picker shows: keep the visitor's choice
+  pickerSig = sig;
+  current = entries[0];
   $('choices').replaceChildren(...entries.map((e, i) => {
     const input = el('input', { type: 'radio', name: 'token', value: e.choice.key });
     input.checked = i === 0;
     input.addEventListener('change', () => { current = e; play(e); $('board').scrollIntoView({ block: 'nearest', behavior: 'smooth' }); });
     return el('label', { class: 'choice' }, input, el('span', { class: 'name' }, e.choice.label), el('span', { class: 'id' }, 'check #' + e.c.id));
   }));
-  $('replay').addEventListener('click', () => play(current));
+  $('replay').onclick = () => play(current);
   $('picker').disabled = false;
+  if (observed) return;
+  observed = true;
   // The one orchestrated moment: the first token plays once, when the board comes into view.
   new IntersectionObserver((seen, obs) => {
     if (!seen.some((s) => s.isIntersecting)) return;
@@ -253,14 +265,41 @@ $('copy').addEventListener('click', async () => {
   }
 });
 
+async function loadSnapshot(guard) {
+  try {
+    const r = await fetch('snapshot.json');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return Snapshot.usable(await r.json(), guard);
+  } catch (e) { console.warn('no snapshot, reading NEAR directly:', e); return null; }
+}
+
 (async () => {
   if (query) document.querySelectorAll('a[href="journal.html"]').forEach((a) => (a.href = journalLink()));
   try {
     const guard = await guardId();
     $('cmd-guard').textContent = guard;
-    const [tokens, { last, checks }] = await Promise.all([loadTokens(), readChecks(guard)]);
-    renderLive(guard, last, checks);
-    renderPicker(tokens, checks);
+    const [tokens, snap] = await Promise.all([loadTokens(), loadSnapshot(guard)]);
+    const fromSnapshot = async (note) => {
+      const { last, checks } = await readChecks(guard, snap, false);
+      renderLive(guard, last, checks, note);
+      renderPicker(tokens, checks);
+    };
+    // At once, from the snapshot, labelled as such; the live read then replaces it (retried with backoff if it fails).
+    if (snap) await fromSnapshot('Snapshot of ' + Snapshot.utc(snap) + ', refreshing from NEAR…');
+    for (let fails = 0; ; fails++) {
+      try {
+        const { last, checks } = await readChecks(guard, snap);
+        renderLive(guard, last, checks);
+        renderPicker(tokens, checks);
+        console.info('RPC calls this load:', rpcCalls);
+        return;
+      } catch (e) {
+        if (!snap) throw e;
+        console.warn('live read failed:', e);
+        await fromSnapshot('NEAR RPC is rate-limiting this browser: showing the snapshot of ' + Snapshot.utc(snap) + ' (retrying in the background).');
+        await new Promise((r) => setTimeout(r, Math.min(30000 * 2 ** fails, 240000)));
+      }
+    }
   } catch (e) {
     console.error(e);
     renderDown(e);
