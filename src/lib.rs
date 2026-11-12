@@ -109,6 +109,9 @@ pub struct Check {
     /// from the guard's address, as `preview_check` built them: `buy` and `sell_quoted` sign only
     /// these exact transactions (same nonce, calldata, value, gas and fees), or refuse.
     pub tx_hashes: Vec<String>,
+    /// The sentinel's `list_target` with the verdict, as posted: replay compares it with the one its
+    /// evidence carries.
+    pub list_target: bool,
 }
 
 /// The target's code as the sentinel read it at the verdict's block: keccak256 of its runtime code
@@ -317,6 +320,8 @@ pub struct Guard {
     /// Price of requests awaiting a verdict and cost of the buy being signed: belongs neither to the agent
     /// nor to the owner.
     escrow: u128,
+    /// Sum of every account's credit: what `refund_credit` may pay out, which `withdraw_fees` never takes.
+    credits_total: u128,
     next_id: u64,
     evm: EvmConfig,
     /// EVM nonce of the derived address: advances only when a signature comes back.
@@ -532,6 +537,7 @@ impl Guard {
             frozen: LookupSet::new(b"f"),
             fees: 0,
             escrow: 0,
+            credits_total: 0,
             next_id: 0,
             evm,
             evm_nonce: 0,
@@ -566,8 +572,7 @@ impl Guard {
             0
         };
         require!(amount > storage_cost, "deposit does not cover storage");
-        self.credits
-            .insert(who, previous.unwrap_or(0) + amount - storage_cost);
+        self.set_credit(&who, previous.unwrap_or(0) + amount - storage_cost);
     }
 
     /// Owner only: bounds of every future arming, and the largest buy (`max_buy_wei`, applied to every
@@ -850,6 +855,7 @@ impl Guard {
                 decision_sha256: decision.map(str::to_owned),
                 buy_decision_sha256: None,
                 tx_hashes: vec![],
+                list_target: false,
             },
         );
         emit(
@@ -958,13 +964,14 @@ impl Guard {
         check.quote = quote;
         check.code = code;
         check.tx_hashes.clone_from(&tx_hashes);
+        check.list_target = list_target;
         self.escrow -= self.price;
         self.fees += self.price;
         emit(
             "verdict_posted",
             &near_sdk::serde_json::json!({
                 "id": id, "verdict": verdict, "reasons": reasons, "evidence": evidence, "quote": quote,
-                "tx_hashes": tx_hashes,
+                "tx_hashes": tx_hashes, "list_target": list_target,
             }),
         );
         // Only a block of a buy check that rests on the target's code, and that the sentinel asks to
@@ -1667,8 +1674,7 @@ impl Guard {
         }
         self.checks.remove(&id);
         self.escrow -= price;
-        let credit = self.credit_of(&who).0;
-        self.credits.insert(who.clone(), credit + price);
+        self.set_credit(&who, self.credit_of(&who).0 + price);
         emit(
             "check_refunded",
             &near_sdk::serde_json::json!({ "id": id, "agent": who }),
@@ -1704,14 +1710,26 @@ impl Guard {
         let who = env::predecessor_account_id();
         let credit = self.credit_of(&who).0;
         require!(credit > 0, "no credit to refund");
-        self.credits.insert(who.clone(), 0);
+        self.set_credit(&who, 0);
         Promise::new(who).transfer(NearToken::from_yoctonear(credit))
     }
 
-    /// Owner only: withdraws collected fees, never more than their total.
+    /// Owner only: withdraws collected fees, never more than their total, and never what the guard
+    /// needs: the balance left must still pay for its storage (a check's price or a report's cost
+    /// paid for some of it), every credit and the escrow.
     pub fn withdraw_fees(&mut self, amount: U128) -> Promise {
         self.assert_owner();
         require!(amount.0 <= self.fees, "withdrawal exceeds collected fees");
+        let needed = u128::from(env::storage_usage()) * env::storage_byte_cost().as_yoctonear()
+            + self.credits_total
+            + self.escrow;
+        let balance = env::account_balance().as_yoctonear();
+        if balance < needed.saturating_add(amount.0) {
+            env::panic_str(&format!(
+                "withdrawal leaves less than storage, credits and escrow need: at most {} yoctoNEAR",
+                balance.saturating_sub(needed).min(self.fees)
+            ));
+        }
         self.fees -= amount.0;
         Promise::new(self.owner.clone()).transfer(NearToken::from_yoctonear(amount.0))
     }
@@ -1725,6 +1743,38 @@ impl Guard {
     #[must_use]
     pub fn fees(&self) -> U128 {
         U128(self.fees)
+    }
+
+    /// yoctoNEAR owned by nobody yet: prices of checks awaiting a verdict, charges of a signature in
+    /// progress and of reserved (unsettled) transactions.
+    #[must_use]
+    pub fn escrow(&self) -> U128 {
+        U128(self.escrow)
+    }
+
+    /// Sum of every account's credit: with `escrow` and the storage, what `withdraw_fees` never takes.
+    #[must_use]
+    pub fn credits_total(&self) -> U128 {
+        U128(self.credits_total)
+    }
+
+    /// True while `account` is frozen by the owner's stop (`disarm`), until `unfreeze`.
+    #[must_use]
+    pub fn is_frozen(&self, account: &AccountId) -> bool {
+        self.frozen.contains(account)
+    }
+
+    /// Block time of the owner's last stop of `account`: checks it requested until then never buy or
+    /// sell. None if never stopped.
+    #[must_use]
+    pub fn stopped_at(&self, account: &AccountId) -> Option<U64> {
+        self.stopped.get(account).map(|&ns| U64(ns))
+    }
+
+    /// Block time at which the signature in progress was requested; none when the slot is free.
+    #[must_use]
+    pub fn signing_since(&self) -> Option<U64> {
+        self.signing.as_ref().map(|_| U64(self.signing_since_ns))
     }
 
     #[must_use]
@@ -1776,7 +1826,13 @@ impl Guard {
     fn debit_credit(&mut self, who: &AccountId, amount: u128) {
         let credit = self.credit_of(who).0;
         require!(amount <= credit, "insufficient credit");
-        self.credits.insert(who.clone(), credit - amount);
+        self.set_credit(who, credit - amount);
+    }
+
+    /// Sets `who`'s credit, keeping `credits_total` the sum of every credit.
+    fn set_credit(&mut self, who: &AccountId, amount: u128) {
+        self.credits_total = self.credits_total - self.credit_of(who).0 + amount;
+        self.credits.insert(who.clone(), amount);
     }
 
     /// False if `c` was requested before (or in the same block as) the owner's last stop of its agent.
@@ -1829,7 +1885,7 @@ impl Guard {
             credit >= cost,
             "insufficient credit for the entry's storage"
         );
-        self.credits.insert(who.clone(), credit - cost);
+        self.set_credit(&who, credit - cost);
         self.fees += cost;
         let entry = Entry {
             reporter: who,
@@ -2013,8 +2069,7 @@ impl Guard {
         if amount == 0 {
             return;
         }
-        let credit = self.credit_of(agent).0;
-        self.credits.insert(agent.clone(), credit + amount);
+        self.set_credit(agent, self.credit_of(agent).0 + amount);
         if let Some(budget) = self
             .budgets
             .get_mut(agent)
@@ -2091,6 +2146,9 @@ mod tests {
     }
 
     fn guard() -> Guard {
+        // Empty storage: a test that builds several guards would otherwise share their maps' prefixes,
+        // and one guard's credits would not add up to another's `credits_total`.
+        near_sdk::mock::with_mocked_blockchain(|b| drop(b.take_storage()));
         ctx("guard.test", 0, 0);
         Guard::new(
             id("owner.test"),
@@ -5709,5 +5767,113 @@ mod tests {
         buy(&mut g, next);
         callback_env(vec![PromiseResult::Successful(mpc_response(R0, S0, 1))]);
         g.on_signed(since);
+    }
+
+    // Judge pass 6: the owner withdrew every fee, then an agent's `refund_credit` failed for lack of
+    // balance for the state. A price collected paid for storage; credits and escrow are owed.
+    /// The runtime's view of the guard at a call: its balance and its storage usage.
+    fn ctx_holding(who: &str, balance: u128, storage: u64) {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id(id("guard.test"))
+            .predecessor_account_id(id(who))
+            .account_balance(NearToken::from_yoctonear(balance))
+            .storage_usage(storage)
+            .build());
+    }
+
+    /// A blocked check (its price in the fees), the guard's storage usage, and a balance that pays
+    /// for that storage and the agent's credit, nothing more: the price collected paid for storage.
+    fn fees_spent_on_storage() -> (Guard, u64, u128) {
+        let mut g = funded(ONE_NEAR, 100 * U, 1);
+        ctx("agent.test", 0, 500);
+        let check = g.request_check(TARGET.into(), U128(VALUE), None);
+        ctx("sentinel.test", 0, 600);
+        g.post_verdict(
+            check,
+            Verdict::Block,
+            String::new(),
+            String::new(),
+            U128(QUOTE),
+            code("aa"),
+            false,
+            vec![],
+        );
+        let storage = env::storage_usage();
+        let held = u128::from(storage) * env::storage_byte_cost().as_yoctonear()
+            + g.credit_of(&id("agent.test")).0;
+        (g, storage, held)
+    }
+
+    #[test]
+    #[should_panic(expected = "less than storage, credits and escrow need")]
+    fn a_fee_withdrawal_never_takes_what_storage_and_credits_need() {
+        let (mut g, storage, held) = fees_spent_on_storage();
+        ctx_holding("owner.test", held, storage);
+        let _ = g.withdraw_fees(g.fees());
+    }
+
+    #[test]
+    fn withdraw_fees_then_refund_credit_succeeds() {
+        let (mut g, storage, held) = fees_spent_on_storage();
+        ctx_holding("owner.test", held + PRICE / 2, storage); // half a price above what is owed
+        let _ = g.withdraw_fees(U128(PRICE / 2));
+        ctx_holding("agent.test", env::account_balance().as_yoctonear(), storage);
+        let _ = g.refund_credit();
+        assert_eq!(g.credit_of(&id("agent.test")), U128(0));
+        // what the runtime requires after the call: the balance left still pays for the state
+        assert!(
+            env::account_balance().as_yoctonear()
+                >= u128::from(env::storage_usage()) * env::storage_byte_cost().as_yoctonear()
+        );
+    }
+
+    // Judge pass 6: an agent's stop, a signature in progress and the escrow were not readable.
+    #[test]
+    fn views_show_a_stop_a_signature_in_progress_and_the_escrow() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1);
+        let agent = id("agent.test");
+        assert!(!g.is_frozen(&agent));
+        assert_eq!(g.stopped_at(&agent), None);
+        assert_eq!(g.signing_since(), None);
+        assert_eq!(g.credits_total(), g.credit_of(&agent));
+        ctx("agent.test", 0, 500);
+        let check = g.request_check(TARGET.into(), U128(VALUE), None);
+        assert_eq!(g.escrow(), U128(PRICE));
+        allow_at(&mut g, check, 600);
+        assert_eq!(g.escrow(), U128(0));
+        ctx("agent.test", 0, 700);
+        buy(&mut g, check);
+        assert_eq!(g.signing_since(), Some(U64(700)));
+        assert_eq!(g.escrow(), U128(COST));
+        ctx("owner.test", 0, 800);
+        g.disarm(agent.clone());
+        assert!(g.is_frozen(&agent));
+        assert_eq!(g.stopped_at(&agent), Some(U64(800)));
+        assert_eq!(g.credits_total(), g.credit_of(&agent));
+    }
+
+    // Judge pass 6: `list_target` was stored nowhere, so replay could not tell a listing the sentinel
+    // asked for from the one its evidence supports.
+    #[test]
+    fn the_check_keeps_the_list_target_the_sentinel_posted() {
+        let mut g = funded(ONE_NEAR, 100 * U, 1);
+        ctx("agent.test", 0, 500);
+        let asked = g.request_check(TARGET.into(), U128(VALUE), None);
+        let not_asked = g.request_check(WITHDRAW_TO.into(), U128(VALUE), None);
+        for (check, list_target) in [(asked, true), (not_asked, false)] {
+            ctx("sentinel.test", 0, 600);
+            g.post_verdict(
+                check,
+                Verdict::Block,
+                String::new(),
+                String::new(),
+                U128(QUOTE),
+                code("aa"),
+                list_target,
+                vec![],
+            );
+            assert_eq!(g.get_check(check).unwrap().list_target, list_target);
+            assert_eq!(events()[0]["data"][0]["list_target"], list_target);
+        }
     }
 }

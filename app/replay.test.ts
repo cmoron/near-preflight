@@ -64,6 +64,7 @@ const onChain = (p: Proof, over: Partial<NonNullable<OnChain>> = {}) => async ()
   amount_wei: evidenceOf(p).amount_wei ?? "0",
   tx_hashes: evidenceOf(p).tx_hashes.map((h: string) => h.slice(2)),
   signed_tx: null,
+  list_target: evidenceOf(p).list_target ?? false,
   ...over,
 });
 
@@ -100,8 +101,8 @@ describe("replay", () => {
   });
   test("a request whose shape is not checkToken's is detected (token, buyer)", async () => {
     const proof = structuredClone(await proofOf(tokens.safe as Address));
-    const calls = callsIn(proof, 1, 255);
-    calls[1].from = "0x" + "11".repeat(20); // the probe's late sale comes from another address than the buyer
+    const [swap] = callsIn(proof, 1, 255);
+    swap.from = "0x" + "11".repeat(20); // the probe's late sale comes from another address than the buyer
     const bad = failed(await replay(proof, RPC));
     expect(bad.some((l) => l.includes("request hash"))).toBe(true); // hash and shape fail together
     expect(bad.some((l) => l.includes("request shape"))).toBe(true);
@@ -156,7 +157,7 @@ describe("replay: the evidence string is the one posted on chain", () => {
   });
   test("a guard sale simulated with an approve of 2^256 - 1 instead of the exact amount is refused (request shape)", async () => {
     const proof = structuredClone(await proofOf(tokens.safe as Address));
-    const [approve] = callsIn(proof, 0, 1);
+    const [approve] = callsIn(proof, 0, evidenceOf(proof).first_sale.blocks - 1); // the first sale's approve
     approve.data = encodeFunctionData({ abi: parseAbi(["function approve(address,uint256) returns (bool)"]), args: [ROUTER, maxUint256] });
     expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("request shape: sale 1: not approve(router"))).toBe(true);
   });
@@ -439,8 +440,9 @@ describe("replay: the guard-side request holds only the guard's own transactions
   });
   test("a read between the guard's approve and its swap: refused", async () => {
     const proof = structuredClone(await proofOf(tokens.safe as Address));
-    const b2 = guardBlocks(proof)[1];
-    b2.calls.splice(1, 0, { ...b2.calls[0], ...balanceOf(GUARD_EVM, tokens.safe) });
+    const approve = guardBlocks(proof).findIndex((b, i) => i > 0 && b.calls.length); // the first sale's
+    const b = guardBlocks(proof)[approve + 1]; // its swap's block
+    b.calls.unshift({ ...b.calls[0], ...balanceOf(GUARD_EVM, tokens.safe) });
     expect(failed(await replay(rehashed(proof), RPC)).some((l) => l.includes("guard-side request"))).toBe(true);
   });
   test("a probe call moved into the guard-side request: refused", async () => {
@@ -519,5 +521,42 @@ describe("replay rejects altered evidence on a clean token", () => {
     const proof = await proofOf(tokens.safe as Address);
     const forged = withEvidence(proof, (e) => (e.amount_wei = (BigInt(e.amount_wei) * 2n).toString()));
     expect(failed(await replay(forged, RPC)).length).toBeGreaterThan(0);
+  });
+});
+
+// Judge pass 6: the first sale's block and share are derived like the probes, and list_target is in
+// the evidence; a sentinel could otherwise choose a friendly sale, or list a token its proof clears.
+describe("replay: the first sale and list_target", () => {
+  test("a first sale chosen by the sentinel replays, but --check refuses it: not derived from on-chain data", async () => {
+    const proof = await proofOf(tokens.safe as Address, { sale: { blocks: 5, bps: 5001 } });
+    expect(failed(await replay(proof, RPC))).toEqual([]);
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) }));
+    expect(bad).toEqual([expect.stringContaining("first sale not derived from on-chain data")]);
+  });
+  test("an evidence.first_sale other than the one simulated: refused", async () => {
+    const proof = withEvidence(await proofOf(tokens.safe as Address), (e) => (e.first_sale = { ...e.first_sale, blocks: e.first_sale.blocks === 5 ? 6 : 5 }));
+    expect(failed(await replay(proof, RPC)).some((l) => l.includes("the guard's sales are not where evidence.first_sale puts them"))).toBe(true);
+  });
+  test("a first sale of exactly half (a whole percent) is refused before anything is sent", async () => {
+    const proof = withEvidence(await proofOf(tokens.safe as Address), (e) => (e.first_sale.bps = 5000));
+    expect(failed(await replay(proof, RPC))).toEqual(["MISMATCH evidence fields have unexpected types (nothing sent to the node)"]);
+  });
+  test("evidence.list_target flipped: the rejudged one differs", async () => {
+    const proof = await proofOf(tokens.usdc as Address);
+    expect(evidenceOf(proof).list_target).toBe(false);
+    const forged = withEvidence(proof, (e) => (e.list_target = true));
+    expect(failed(await replay(forged, RPC))).toEqual([expect.stringContaining("evidence.list_target true != rejudged false")]);
+  });
+  test("an honest proof posted with list_target true (judge pass 6's lie): --check refuses it", async () => {
+    const proof = await proofOf(tokens.farm_fresh as Address); // a reputation block: never listed
+    expect(proof.verdict).toBe("block");
+    expect(evidenceOf(proof).list_target).toBe(false);
+    const bad = failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof, { list_target: true }) }));
+    expect(bad).toEqual([expect.stringContaining("on-chain list_target true != evidence.list_target false")]);
+  });
+  test("a listed trap's proof: list_target true in the evidence, rejudged and on chain alike", async () => {
+    const proof = await proofOf(tokens.next_block_key as Address);
+    expect(evidenceOf(proof).list_target).toBe(true);
+    expect(failed(await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) }))).toEqual([]);
   });
 });

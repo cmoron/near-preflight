@@ -58,8 +58,8 @@ async function scopedKey(name: string, methods: string[], allowance: `${number}`
   return key.toString();
 }
 
-// About 6.3 NEAR in all with the credit below: one 10 NEAR faucet account is enough, with room to spare.
-const guardKey = await subAccount("guard", "3.7"); // wasm of ~356 KB: ~3.56 NEAR of storage
+// About 6.4 NEAR in all with the credit below: one 10 NEAR faucet account is enough, with room to spare.
+const guardKey = await subAccount("guard", "3.8"); // wasm of ~361 KB and its account: ~3.75 NEAR of storage
 // Each role's own account pays the gas of its calls: a few thousandths of NEAR each.
 await subAccount("agent", "0.3");
 await subAccount("agent2", "0.2");

@@ -189,18 +189,26 @@ BASEFEE_TRAP=$(side src/EnvTraps.sol:BaseFeeTrap --constructor-args "Env Base Fe
 L1_HELPER=$(forge create --rpc-url $RPC --unlocked --from $DEPLOYER --broadcast --json src/EnvTraps.sol:L1Helper | jq -r .deployedTo)
 HELPER_TRAP=$(side src/EnvTraps.sol:HelperTrap --constructor-args "Env Helper L1" HELPERL1 "$L1_HELPER")
 
+# Deployed last, every address above stays: judge pass 6's NextBlockKey (a sale only in the block right
+# after the buy, where a check's first sale used to be) and AmountTrap (a sale only of half or all of the
+# seller's balance, the amounts a check used to sell).
+NEXT_BLOCK_KEY=$(side src/NextBlockKey.sol:NextBlockKey)
+AMOUNT_TRAP=$(side src/AmountTrap.sol:AmountTrap)
+
 jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked "$BLOCKED" \
   --arg later "$LATER" --arg tax "$TAX" --arg taxlater "$TAX_LATER" --arg hold "$HOLD" --arg sim "$SIM" \
   --arg frozen "$FROZEN" --arg tax20 "$TAX20" --arg late "$LATE" --arg lpburned "$LP_BURNED" --arg lpheld "$LP_HELD" --arg fresh "$FARM_FRESH" --arg gashungry "$GAS_HUNGRY" \
   --arg approvemax "$APPROVE_MAX_ONLY" --arg buy001 "$BUY_001_ONLY" --argjson copies "$(printf '%s\n' "${COPIES[@]}" | jq -R . | jq -s .)" --argjson block "$FORK_BLOCK" \
   --arg judgetrap "$JUDGE_TRAP" --arg untouched "$UNTOUCHED" --arg strangerkey "$STRANGER_KEY" --arg pairpull "$PAIR_PULL" \
   --arg redl1 "$RED_L1" --arg basefee "$BASEFEE_TRAP" --arg helper "$HELPER_TRAP" \
+  --arg nbk "$NEXT_BLOCK_KEY" --arg amount "$AMOUNT_TRAP" \
   '{fork_block: $block, usdc: $usdc, safe: $safe, owner_reclaim: $reclaim, sell_blocked: $blocked,
     sell_blocked_later: $later, sell_tax: $tax, sell_tax_later: $taxlater, hold_one_block: $hold, sim_detector: $sim,
     guard_frozen: $frozen, sell_tax_20: $tax20, late_liquidity: $late, lp_burned: $lpburned, lp_held: $lpheld,
     farm_fresh: $fresh, gas_hungry: $gashungry, approve_max_only: $approvemax, buy_001_only: $buy001,
     usdc_copies: $copies, judge_trap: $judgetrap, untouched_buyer: $untouched, stranger_key: $strangerkey,
-    pair_pull_tax: $pairpull, red_l1_trap: $redl1, basefee_trap: $basefee, helper_trap: $helper}' > tokens.json
+    pair_pull_tax: $pairpull, red_l1_trap: $redl1, basefee_trap: $basefee, helper_trap: $helper,
+    next_block_key: $nbk, amount_trap: $amount}' > tokens.json
 echo "guard_frozen freezes $GUARD_EVM"
 echo "Base fork at block $FORK_BLOCK ready on $RPC; tokens in evm/tokens.json:"
 cat tokens.json
