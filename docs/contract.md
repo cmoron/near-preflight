@@ -74,7 +74,7 @@ are refunded after 300 s (`refund_check`). An operational limit, not a bypass: n
 | Reporter         | `report`                                                                                                                                                                                                                                                                                                       |
 | Anyone           | `deposit_credit` (payable), `refund_credit` (own credit)                                                                                                                                                                                                                                                       |
 | The guard itself | `on_signed`, `on_exit_signed` (MPC callbacks)                                                                                                                                                                                                                                                                  |
-| Views            | `get_check`, `last_check_id`, `decision_of`, `preview_check`, `preview_sale`, `get_entry`, `list_entries`, `last_code`, `holding`, `credit_of`, `budget_left`, `armed_7d`, `bounds`, `evm_config`, `fees`, `escrow`, `credits_total`, `is_frozen`, `stopped_at`, `signing_since`, `last_exit`, `get_unsettled`, `token_limits`, `quarantined_until`, `pending_check`, `token_bought`, `sentinels` |
+| Views            | `get_check`, `last_check_id`, `decision_of`, `preview_check`, `preview_sale`, `get_entry`, `list_entries`, `last_code`, `holding`, `credit_of`, `budget_left`, `armed_7d`, `bounds`, `evm_config`, `fees`, `escrow`, `credits_total`, `is_frozen`, `stopped_at`, `signing_since`, `last_exit`, `get_unsettled`, `token_limits`, `quarantined_until`, `pending_check`, `token_bought`, `sentinels`, `vote_due`, `exit_ready` |
 
 Each method's contract is its doc comment in `src/lib.rs`.
 
@@ -86,7 +86,7 @@ NEP-297 logs (`EVENT_JSON:`), standard `goblin_guard`. The
 | About     | Events                                                                                                          |
 | --------- | --------------------------------------------------------------------------------------------------------------- |
 | Roles     | `armed`, `disarmed`, `frozen`, `unfrozen`, `armer_changed`, `sentinels_changed`, `armings_reset`, `reporter_set` |
-| Checks    | `check_requested`, `verdict_posted` (one per vote: the sentinel, its full evidence string, the votes so far and what they decide), `check_refunded`, `warn_approved` |
+| Checks    | `check_requested`, `verdict_posted` (one per vote: the sentinel, its full evidence string, the votes so far and what they decide), `verdict_decided` (votes already in, decided at the buy or the approval after the owner lowered the quorum), `check_refunded`, `warn_approved` |
 | Blocklist | `listed`, `unlisted`                                                                                            |
 | Limits    | `quarantined`, `quarantine_lifted`, `quarantine_set`, `token_cap_set`                                           |
 | Signing   | `sign_requested`, `signed`, `exit_requested`, `exit_signed`                                                     |
@@ -102,7 +102,7 @@ NEP-297 logs (`EVENT_JSON:`), standard `goblin_guard`. The
 | The guard builds the swap: chain 8453, router, path, recipient = its address, gas, fees, floor                             | `buy`, `preview_check`                |
 | An allow or warn carries the hashes of what the guard would sign; it signs nothing else                                    | `post_verdict`, `buy`                 |
 | A buy needs a token neither listed nor quarantined; signed within 180 s of the request, it has 120 s left to its deadline  | `buy`                                 |
-| A `block` vote that carries the token's code quarantines it, listed or not: no check, no buy, for any agent, 30 min at init | `post_verdict`, `request_check`, `buy` |
+| A `block` vote that carries the token's code quarantines it, listed or not, whatever was decided before it: no check, no buy, for any agent, 30 min at init | `post_verdict`, `request_check`, `buy` |
 | One buy check per token awaits its verdict, for all agents; the slot frees at the verdict, the refund, or after 300 s     | `request_check`                       |
 | All agents together buy at most the owner's cap of one token per rolling period; zero at init: no check until it is set   | `request_check`, `buy`, `set_token_cap` |
 | Only the owner sets the quarantine (10 min to 24 h) and the cap's period (1 h to 7 days), and lifts a quarantine          | `set_quarantine`, `set_token_cap`, `lift_quarantine` |
@@ -110,14 +110,15 @@ NEP-297 logs (`EVENT_JSON:`), standard `goblin_guard`. The
 | A sale never needs buying budget: an exit's quote and gas come from the agent's credit (a frozen agent cannot ask for one) | `request_exit`, `sell_quoted`         |
 | A token at the guard's address is held for one agent at a time                                                             | `buy`, `holding`                      |
 | Only the owner clears or reassigns a token's holding, never during a signature                                             | `set_holding`                         |
-| An agent sells at most its holding, on a sentinel exit quote at most 120 s old, used once, 60 s before its swap deadline   | `request_exit`, `sell_quoted`         |
+| An agent sells at most its holding, on the highest exit quote the sentinels posted, at most 120 s old, used once, 60 s before its swap deadline | `request_exit`, `sell_quoted` |
 | An agent's exit signs only the approve and swap its exit quote simulated                                                   | `sell_quoted`                         |
 | The owner sells any token, amount, floor and approve (up to 2^256 - 1), no quote, no budget                                | `sell`                                |
 | The owner sets gas limit and fees within bounds, never during a signature                                                  | `set_evm_gas`                         |
 | Only a sentinel votes, once per check, with the sha256 of its evidence; the owner names the sentinels and the quorum       | `post_verdict`, `set_sentinels`       |
-| An `allow` or a `warn` takes the quorum's votes, identical on verdict, quote, transaction hashes, code and listing         | `post_verdict`, `buy`, `approve_warn` |
-| One `block` vote blocks at once; votes that disagree block too; the 120 s run from the vote that completes the quorum      | `post_verdict`                        |
-| An exit quote takes one vote, from any sentinel: a sentinel that is down never keeps an agent from selling                 | `post_verdict`, `sell_quoted`         |
+| A vote counts only while its sentinel is one of the guard's: a sentinel removed stops counting at once, on the checks it voted on too | `post_verdict`, `buy`, `approve_warn`, `sell_quoted` |
+| An `allow` or a `warn` takes the quorum's votes, identical on verdict, quote, transaction hashes, code and listing; the quorum is the one in force when the vote, the buy or the approval comes | `post_verdict`, `buy`, `approve_warn` |
+| One `block` vote blocks at once, and overturns an `allow` or a `warn` whose buy is not yet sent to signing; votes that disagree block too; the 120 s run from the vote that completes the quorum | `post_verdict` |
+| An exit quote takes every sentinel's vote: the highest quote stands, a `block` never cancels another sentinel's quote; it sells once the quorum voted, or 60 s after the request | `post_verdict`, `sell_quoted` |
 | A block lists its token only with the token's code and the quorum's identical `block` votes, each asking to list           | `post_verdict`                        |
 | Blocklist: tokens only, never a template; entries never overwritten; only the owner unlists; a sentinel is no reporter     | `report`, `unlist`                    |
 | An `allow` on code that differs from the reference is refused                                                              | `post_verdict`                        |
@@ -140,7 +141,9 @@ trap. The owner names up to three sentinels and a quorum (`set_sentinels`; one a
 
 - **Allow or warn**: `quorum` votes identical on the verdict, the quote, the transaction hashes, the
   code and `list_target`. The verdict's 120 s run from the vote that completes the quorum.
-- **Block**: one `block` vote, at once. Any sentinel vetoes; a stolen key can only block.
+- **Block**: one `block` vote, at once. Any sentinel vetoes, an `allow` or a `warn` already decided
+  too, until its buy is sent to signing: a signature requested is not recalled, and no vote is taken
+  on a check being signed or signed.
 - **Disagreement**: a vote that differs on any of those fields blocks too, lists nothing and
   quarantines nothing (no sentinel found a refusal). Reasons: `sentinels disagree on …`.
 - **Listing**: the quorum's `block` votes, identical, each asking to list. One key lists nothing, and a
@@ -151,14 +154,55 @@ derives from its hash, so two honest sentinels on two nodes simulate the same th
 transactions, same code, same listing. Their evidence strings can still differ by a byte (the NEAR facts
 each read at its own moment), so each vote's sha256 is stored and none is compared.
 
-**Exit quotes take one vote**, from any sentinel: with two votes needed, one sentinel down would keep
-every agent from selling. The price: one key can post a low exit quote, as before the quorum.
+**Votes that count.** A vote counts while its sentinel is one of the guard's. `set_sentinels` takes
+effect in its own block, with no delay: `buy`, `approve_warn` and `sell_quoted` count the votes again,
+so a vote from a sentinel removed since (a stolen key) makes no quorum, on the checks it already voted
+on too. The guard cannot walk its checks, so nothing is rewritten at the change: a vote is weighed
+when it is used, and the next vote on a buy check drops the removed sentinels' votes (their
+`verdict_posted` events stay). A check never holds more votes than there are sentinels.
+
+**A quorum changed while a check waits** is the one its votes are weighed with. Raised: one more
+vote is needed. Lowered: the next vote decides; when none is left to come, the agent's `buy` (or the
+owner's `approve_warn`) decides with the votes in (event `verdict_decided`, the 120 s run from that
+call), and the token's slot is free at once. A verdict decided under a lower quorum, or that lost a
+vote, neither buys nor is approved: `verdict below the sentinels' quorum`.
+
+**Exit quotes.** Two sentinels quote an exit at two Base blocks: their quotes differ, so no identical
+vote can be asked for. Every sentinel may vote until the exit is sold, and:
+
+- the quote that stands is the **highest `allow`** posted: a `block` never cancels another sentinel's
+  quote, and a low quote never lowers the floor under another's;
+- `sell_quoted` waits for the quorum's votes, or 60 s after the request (view `exit_ready`): a
+  sentinel that is down delays an exit by a minute and never refuses it;
+- a quote a sentinel removed since voted on no longer sells: the agent asks another.
+
+The highest and not the lowest: a floor too high makes the sale revert on Base, the tokens still
+held; a floor too low lets the pool's next trader take the difference.
+
+**What one stolen key can still do**, until the owner replaces it:
+
+- on a buy check: block it, before or after the others' `allow` (until the buy is sent to signing),
+  and quarantine its token. No `allow`, no `warn`, no listing;
+- on an exit: post a quote above the others'. The sale reverts on Base, the agent's charge is spent
+  and its holding stays debited until the owner [restores it](#recovery). No token is lost, and the
+  owner's `sell` takes no quote;
+- on an exit no other sentinel quotes (down for 60 s, or its own simulation failing): set its floor
+  with a low quote, or leave it without a quote.
+
+An account removed and named again counts again on the checks it voted on, unless a vote since
+dropped its own (those less than 180 s old still buy): after a theft, name another account.
+
+**For a sentinel process.** `vote_due(id, sentinel)` says in one call whether its vote on a check
+can still count: false once it voted, once the check is 300 s old, signed, or holds the quorum's
+votes on a block or an exit quote. A restarted sentinel skips every old check on it. The guard still
+takes a vote that comes later: a `block` naming the code quarantines whenever it is posted.
 
 **What it costs.** A vote that arrives after another signature moved the guard's nonce carries other
 transaction hashes: that check blocks (no quarantine) and the agent asks again. One sentinel down, or
 its node failing three times (a fail-closed `block` vote), stops every buy: the quorum fails closed.
 
-With three sentinels and a quorum of two, the first two votes decide; the third is not waited for.
+With three sentinels and a quorum of two, the first two votes decide; the third is not waited for,
+and its `block` still stops the buy when it comes before the agent buys.
 
 ## Token limits
 
@@ -166,9 +210,12 @@ A check samples sales at drawn delays and sizes; a review after nine judge passe
 alone does not converge. So the contract bounds what any wrong `allow` costs, whatever missed the trap: a
 draw, a rule, or a lying sentinel.
 
-**Quarantine.** A `block` on a buy check keeps its token from being checked or bought, by any agent, until
-`now + quarantine_s` (30 min at init; the owner sets 10 min to 24 h, never zero). Listed or not: a block
-that lists nothing is the one an agent would otherwise ask again until a draw misses the trap.
+**Quarantine.** A `block` vote that carries the token's code, on a buy check, keeps its token from
+being checked or bought, by any agent, until `now + quarantine_s` (30 min at init; the owner sets
+10 min to 24 h, never zero). In every order: as the first vote, after a fallback block or a
+disagreement already decided the check, or after the quorum's `allow`. A later one never shortens a
+quarantine already running. Listed or not: a block that lists nothing is the one an agent would
+otherwise ask again until a draw misses the trap.
 
 Two blocks quarantine nothing, because no sentinel found a refusal: the fail-closed fallback, posted
 without the token's code when a simulation could not run (a node that times out must not close an
@@ -199,8 +246,11 @@ token to signing over a rolling period (1 h to 7 days). `request_check` refuses 
 longer leaves, before the agent pays; `buy` enforces it and logs the buy.
 
 - Zero at init, like the bounds: no check until the owner sets it.
-- A buy whose signature does not come back stays counted: the MPC may still publish it.
-- A token keeps at most 32 buys per period (24 bytes each, paid by their checks); a 33rd waits.
+- A buy whose signature does not come back stays counted, also once the owner refunded it: the MPC
+  may still publish it.
+- A token's log keeps 32 buys per period (24 bytes each, paid by their checks). A 33rd merges the two
+  oldest into one, counted until the newer of them leaves the period: never less than what was
+  bought, and 32 small buys do not close a token to every agent.
 - One trap, or one lying `allow`, takes at most the cap per period, not every agent's armed budget.
 
 **Freshness from the request.** The sentinel judges the reference block, 4 s after the request, however
@@ -324,6 +374,15 @@ The owner role is separate: an account named at init, whose key changes bounds a
   it on this guard for the quarantine; an agent keeps a token's slot for up to 300 s per paid check. The
   owner lifts a quarantine; nothing lifts a slot but its verdict, its refund or the 300 s.
 - **One draw per quarantine, not none.** After the quarantine an agent may ask again, with new draws.
+- **Asking again after a `warn` or a disagreement costs one price, no wait.** Only a block that found
+  a refusal quarantines. No cool-down on the others, on purpose: no sentinel found a refusal, so the
+  draw that missed a trap is not one the agent escapes by asking again; and a cool-down would let
+  whoever can force a `warn` (eleven trades of a pool) or a disagreement (a signature that moves the
+  nonce between two votes) close an honest token to every agent. The per-token cap bounds what a
+  wrong `allow` costs, however many draws led to it.
+- **Votes on old checks.** The guard takes a vote whenever it comes: a sentinel, or a stolen key,
+  can quarantine a token again through a `block` on an old check it never voted on. `vote_due` tells
+  an honest sentinel not to; the owner lifts the quarantine and replaces the key.
 - **Per-token cap.** Counted in wei at signing, not in what Base mined: a buy that reverted on Base, or
   was never broadcast, still counts until it leaves the period. It bounds one token, not a farm's copies.
 - **A signed transaction that is never mined.** Only a nonce whose signature did not come back can be
