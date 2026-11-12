@@ -132,6 +132,10 @@ if (import.meta.main) {
     return { listed, previous: last ? { id: last.id, ...last.code } : null };
   };
 
+  // One read of the guard per round while nothing is asked. 2.5 s: three sentinels at 1.5 s, with the
+  // agent's own polling, kept one address above the public NEAR RPC's rate limit for minutes (a check
+  // refused on HTTP 429 in the full demo). A vote comes at most that much later.
+  const POLL_MS = 2500;
   // ponytail: rereads every request from 1 at startup; start from a saved cursor if they number in the thousands.
   let next = 1;
   const failures = new Map<number, number>();
@@ -250,6 +254,6 @@ if (import.meta.main) {
       // NEAR RPC unavailable or too slow: nothing is lost, the next round rereads from `next`.
       log(`reading the guard failed, will retry (${e instanceof Error ? e.message.split("\n")[0] : e})`);
     }
-    await Bun.sleep(1500);
+    await Bun.sleep(POLL_MS);
   }
 }

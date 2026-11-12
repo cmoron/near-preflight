@@ -150,9 +150,8 @@ pub struct Vote {
     pub verdict: Verdict,
     /// sha256 (lowercase hex) of that sentinel's `evidence` string, computed by the contract.
     pub evidence_sha256: String,
-    /// On an exit quote, the ETH out an `allow` vote quoted, while it counts toward the floor: none
-    /// once the guard's nonce, gas or fees moved since (it was of transactions no longer signed).
-    /// None on a buy check, whose votes share the check's `quote`.
+    /// On an exit quote, the ETH out an `allow` vote quoted: it counts toward the floor. None on a
+    /// `block`, and on a buy check, whose votes share the check's `quote`.
     pub quote: Option<U128>,
 }
 
@@ -332,9 +331,10 @@ pub const VERDICT_FRESH_NS: u64 = 180 * 1_000_000_000;
 pub const EXIT_VOTES_WAIT_NS: u64 = 60 * 1_000_000_000;
 /// How long an exit that holds the quorum's quotes, but not every sentinel's, waits for the missing
 /// ones. Without it, with three sentinels and a quorum of two, a liar's high quote beside one honest
-/// quote sold at once on the highest: the median never applied. 15 s: an exit quote took 5 to 10 s on
-/// real Base, to which a sentinel adds its 1.5 s poll and the vote's inclusion on NEAR; an honest
-/// third quote is in by then, and a sentinel that is down costs an exit these 15 s, no more.
+/// quote sold at once on the highest: the median never applied. 15 s: measured on 2026-11-12, an exit
+/// quote simulates in 0.5 to 2 s on three public Base nodes, to which a sentinel adds its 2.5 s poll
+/// and about 2 s for the vote's inclusion on NEAR; an honest third quote is in within 8 s, and a
+/// sentinel that is down costs an exit these 15 s, no more.
 pub const EXIT_GRACE_NS: u64 = 15 * 1_000_000_000;
 /// Bounds and default of the quarantine a `block` puts its token in: 10 min to 24 h, 30 min at init.
 /// Never zero: a token blocked on one draw could be asked again at once until a draw misses the trap.
@@ -811,7 +811,8 @@ impl Guard {
     /// - a buy check decided `allow` or `warn`: true within 180 s of its request, while a `block` can
     ///   still stop its buy (any other vote is refused);
     /// - a buy check blocked: true while fewer votes than the quorum are in (listing takes them);
-    /// - an exit quote: true (every sentinel's quote counts toward the floor).
+    /// - an exit quote: true (every sentinel's quote counts toward the floor), until the guard's
+    ///   nonce, gas or fees move under a quote already posted (`exit_over`).
     #[must_use]
     #[allow(clippy::needless_pass_by_value)] // near-sdk's JSON ABI requires an owned type
     pub fn vote_due(&self, id: u64, sentinel: AccountId) -> bool {
@@ -824,6 +825,7 @@ impl Guard {
             || self.signing_for(id)
             || c.votes.iter().any(|v| v.sentinel == sentinel)
             || !within(VERDICT_TIMEOUT_NS)
+            || self.exit_over(c)
         {
             return false;
         }
@@ -838,12 +840,13 @@ impl Guard {
     /// True once exit quote `id` no longer waits for other sentinels (a `block` is no quote): every
     /// sentinel's quote is in; or the quorum's are and 15 s have passed since the request; or one vote
     /// is and 60 s have. `sell_quoted` is refused until then; whether there is a quote to sell on is
-    /// the check's verdict.
+    /// the check's verdict. True as well once the guard's nonce, gas or fees moved under its quotes:
+    /// it waits for no vote any more, `sell_quoted` refuses it, and the agent asks another.
     #[must_use]
     pub fn exit_ready(&self, id: u64) -> bool {
-        self.checks
-            .get(&id)
-            .is_some_and(|c| c.exit_amount.is_some() && self.exit_votes_in(c))
+        self.checks.get(&id).is_some_and(|c| {
+            c.exit_amount.is_some() && (self.exit_votes_in(c) || self.exit_over(c))
+        })
     }
 
     /// True once exit quote `c` holds every sentinel's quote, so that one key never sets the floor
@@ -855,6 +858,15 @@ impl Guard {
         quotes >= self.sentinels.len()
             || (quotes >= usize::from(self.quorum) && since(EXIT_GRACE_NS))
             || (!c.votes.is_empty() && since(EXIT_VOTES_WAIT_NS))
+    }
+
+    /// True once exit quote `c` holds a quote whose transactions the guard would no longer sign: its
+    /// nonce, gas or fees moved since. The sentinels that quoted cannot quote again, so a later quote
+    /// would stand alone and sell on the strength of their votes and of the time elapsed: the exit
+    /// quote takes no more votes and never sells (`sell_quoted` refuses it), and the agent asks
+    /// another. Every quote on a check is thus of the same transactions.
+    fn exit_over(&self, c: &Check) -> bool {
+        c.exit_amount.is_some() && c.verdict == Some(Verdict::Allow) && !self.previewed(c)
     }
 
     /// The buy check of `token` awaiting its verdict, if any: no other can be requested meanwhile.
@@ -1303,12 +1315,14 @@ impl Guard {
             self.counted(check)
         };
         // A check takes votes for 300 s (after it, it is refunded or too old to buy: a vote would only
-        // quarantine again a token the owner has lifted since), and never once sent to signing. A buy
-        // check decided `allow` or `warn` takes only a block, while that verdict can still buy.
+        // quarantine again a token the owner has lifted since), and never once sent to signing, nor
+        // once an exit's quotes are of transactions the guard no longer signs. A buy check decided
+        // `allow` or `warn` takes only a block, while that verdict can still buy.
         let within = |ns: u64| env::block_timestamp() < check.requested_ns.0.saturating_add(ns);
         let open = within(VERDICT_TIMEOUT_NS)
             && !check.settled
             && !self.signing_for(id)
+            && !self.exit_over(check)
             && (exit
                 || before.is_none()
                 || vetoed
@@ -1457,10 +1471,10 @@ impl Guard {
     /// at two Base blocks, so their quotes differ and none can be asked to match: the quote that
     /// stands is the median of the `allow` quotes once three are in, which one liar moves neither way,
     /// and the highest of fewer (a floor too high makes the sale revert, tokens kept; one too low
-    /// gives them away). A `block` never cancels another sentinel's quote. A quote is of the
-    /// transactions simulated: once the guard's nonce, gas or fees moved, the quotes posted before
-    /// count no more. The quote's 120 s run from the oldest one that counts. Returns the votes in and
-    /// the verdict that stands.
+    /// gives them away). A `block` never cancels another sentinel's quote. Every quote is of the
+    /// transactions the guard signs now: once its nonce, gas or fees moved under a quote, `post_verdict`
+    /// takes no more votes (`exit_over`). The quote's 120 s run from the first one. Returns the votes
+    /// in and the verdict that stands.
     #[allow(clippy::too_many_arguments)] // one vote, as `post_verdict` received it
     fn exit_vote(
         &mut self,
@@ -1478,15 +1492,12 @@ impl Guard {
         let before = check.verdict;
         let had_quote = before == Some(Verdict::Allow);
         let allow = verdict == Verdict::Allow;
-        // The transactions of the quote that stands are no longer what the guard would sign.
-        let stale = allow && had_quote && !self.previewed(check);
         // The quote that stands with this one: its vote's evidence, and the transactions the guard
         // signs on it (those its sentinel posted: nothing moved since).
         let standing = allow.then(|| {
             let mut quotes: Vec<(u128, &str)> = check
                 .votes
                 .iter()
-                .filter(|_| !stale)
                 .filter_map(|v| v.quote.map(|q| (q.0, v.evidence_sha256.as_str())))
                 .collect();
             quotes.push((quote.0, evidence_sha256));
@@ -1508,11 +1519,6 @@ impl Guard {
         let Some(check) = self.checks.get_mut(&id) else {
             env::panic_str("unknown check")
         };
-        if stale {
-            for v in &mut check.votes {
-                v.quote = None;
-            }
-        }
         if let Some((stands, sha, hashes)) = standing {
             if stands == quote && sha == evidence_sha256 {
                 reasons.clone_into(&mut check.reasons);
@@ -1521,7 +1527,7 @@ impl Guard {
             check.evidence_sha256 = sha;
             check.tx_hashes = hashes;
             check.verdict = Some(Verdict::Allow);
-            if !had_quote || stale {
+            if !had_quote {
                 check.judged_ns = now;
             }
         } else if before.is_none() {
@@ -1831,9 +1837,10 @@ impl Guard {
             self.counted(check) == check.votes.len(),
             "a sentinel that voted on this exit quote was replaced: request a new quote"
         );
-        // One key does not set the floor while another sentinel may still quote higher.
+        // One key does not set the floor while another sentinel may still quote higher. Quotes of
+        // transactions the guard no longer signs wait for no vote (`exit_over`): refused below.
         require!(
-            self.exit_votes_in(check),
+            self.exit_votes_in(check) || self.exit_over(check),
             "exit quote awaits the other sentinels: it sells once all quoted, 15 s after the request with the quorum's quotes, or 60 s after it"
         );
         require!(
@@ -8481,43 +8488,70 @@ mod tests {
         assert_eq!(g.last_exit().unwrap().min_out, U128(SELL_MIN));
     }
 
-    // A quote is of the transactions simulated: once another signature moved the guard's nonce, the
-    // quotes posted before it count no more, for the floor nor for the quorum.
+    // A quote is of the transactions simulated. Once another signature moved the guard's nonce, the
+    // sentinels that quoted cannot quote again: a later quote would stand alone, and sell on the
+    // strength of their votes and of the time elapsed. So the exit quote takes no more votes and never
+    // sells; the agent asks another, which every sentinel quotes afresh.
     #[test]
-    fn exit_quotes_posted_before_the_nonce_moved_count_no_more() {
+    fn a_quote_after_the_nonce_moved_does_not_sell_on_older_votes() {
+        for lie in [EXIT_QUOTE / 100, 1000 * EXIT_QUOTE] {
+            let (mut g, exit) = exit_asked_of_three();
+            exit_vote(&mut g, THREE[0], exit, Verdict::Allow, EXIT_QUOTE, 1001);
+            exit_vote(&mut g, THREE[1], exit, Verdict::Allow, EXIT_QUOTE + 7, 1002);
+            g.evm_nonce += 1; // another signature came back
+            for late in [1003, 1000 + EXIT_GRACE_NS, 1000 + EXIT_VOTES_WAIT_NS] {
+                ctx(THREE[2], 0, late);
+                assert!(!g.vote_due(exit, id(THREE[2])));
+                assert!(g.exit_ready(exit)); // it waits for no vote: the agent learns it at once
+                let said =
+                    panic_of(|| exit_vote(&mut g, THREE[2], exit, Verdict::Allow, lie, late));
+                assert!(said.contains("verdict already posted"), "{said}");
+                let said = panic_of(|| sell_quoted_at(&mut g, exit, late));
+                assert!(said.contains("transaction differs"), "{said}");
+            }
+            // the honest quotes stay on record, and sold nothing
+            let c = g.get_check(exit).unwrap();
+            assert_eq!((c.quote, c.votes.len()), (U128(EXIT_QUOTE + 7), 2));
+            assert!(c.votes.iter().all(|v| v.quote.is_some()) && !c.settled);
+            // a block is refused too: the exit quote is over
+            let said = panic_of(|| exit_vote(&mut g, THREE[2], exit, Verdict::Block, 0, 1004));
+            assert!(said.contains("verdict already posted"), "{said}");
+        }
+    }
+
+    // The same when the lone quote before the move was a liar's: the honest quotes of the new nonce
+    // are not added to it, and nothing sells on it.
+    #[test]
+    fn exit_quotes_posted_before_the_nonce_moved_take_no_later_quote() {
         let (mut g, exit) = exit_asked_of_three();
         exit_vote(
             &mut g,
-            "sentinel.test",
+            THREE[0],
             exit,
             Verdict::Allow,
             1000 * EXIT_QUOTE,
             1001,
         );
-        g.evm_nonce += 1; // another signature came back
-        exit_vote(
-            &mut g,
-            "sentinel2.test",
-            exit,
-            Verdict::Allow,
-            EXIT_QUOTE,
-            1002,
-        );
+        g.evm_nonce += 1;
+        let said = panic_of(|| exit_vote(&mut g, THREE[1], exit, Verdict::Allow, EXIT_QUOTE, 1002));
+        assert!(said.contains("verdict already posted"), "{said}");
+        let said = panic_of(|| sell_quoted_at(&mut g, exit, 1000 + EXIT_VOTES_WAIT_NS));
+        assert!(said.contains("transaction differs"), "{said}");
+    }
+
+    // A block is no quote: after one, the nonce may move and the quotes that follow are all of the
+    // transactions the guard signs now.
+    #[test]
+    fn quotes_after_a_block_and_a_nonce_move_are_of_one_nonce() {
+        let (mut g, exit) = exit_asked_of_three();
+        exit_vote(&mut g, THREE[0], exit, Verdict::Block, 0, 1001);
+        g.evm_nonce += 1;
+        exit_vote(&mut g, THREE[1], exit, Verdict::Allow, EXIT_QUOTE, 1002);
+        exit_vote(&mut g, THREE[2], exit, Verdict::Allow, EXIT_QUOTE + 7, 1003);
         let c = g.get_check(exit).unwrap();
-        assert_eq!((c.quote, c.judged_ns), (U128(EXIT_QUOTE), U64(1002)));
-        assert_eq!(c.tx_hashes, previewed(&g, exit, EXIT_QUOTE));
-        ctx("agent.test", 0, 1003);
-        assert!(!g.exit_ready(exit)); // one quote counts, two are needed
-        exit_vote(
-            &mut g,
-            "sentinel3.test",
-            exit,
-            Verdict::Allow,
-            EXIT_QUOTE + 7,
-            1004,
-        );
-        assert_eq!(g.get_check(exit).unwrap().quote, U128(EXIT_QUOTE + 7)); // the highest of two
-        sell_quoted_at(&mut g, exit, 1000 + EXIT_GRACE_NS); // two quotes count, of three sentinels
+        assert_eq!(c.quote, U128(EXIT_QUOTE + 7)); // the highest of two
+        assert_eq!(c.tx_hashes, previewed(&g, exit, EXIT_QUOTE + 7));
+        sell_quoted_at(&mut g, exit, 1000 + EXIT_GRACE_NS);
         assert!(g.signing_since().is_some());
     }
 

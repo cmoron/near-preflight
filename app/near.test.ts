@@ -52,3 +52,19 @@ test("a key file is written as 0600, new or already present as 0664", async () =
     await rm(dir, { recursive: true });
   }
 });
+
+// The guard refuses a sale whose quotes are of transactions it no longer signs (another signature moved
+// its nonce): the agent's wrapper asks a new exit quote, a bounded number of times, and fails on anything else.
+test("a sale refused because the guard's nonce moved is asked again on a new quote, three times at most", async () => {
+  const { requoted } = await import("./near");
+  const moved = () => new Error("Smart contract panicked: transaction differs from the one simulated (nonce, gas or fees changed since the verdict): request a new check");
+  const tries: number[] = [];
+  expect(await requoted(async (n) => (tries.push(n), n < 3 ? Promise.reject(moved()) : "sold"))).toBe("sold");
+  expect(tries).toEqual([1, 2, 3]);
+  let calls = 0;
+  await expect(requoted(async () => (calls++, Promise.reject(moved())))).rejects.toThrow("transaction differs");
+  expect(calls).toBe(3);
+  calls = 0;
+  await expect(requoted(async () => (calls++, Promise.reject(new Error("Smart contract panicked: verdict expired"))))).rejects.toThrow("verdict expired");
+  expect(calls).toBe(1); // any other refusal is not retried
+});

@@ -4,7 +4,7 @@
 // EVM key: the guard builds every transaction and NEAR signs it. The contract enforces each rule again:
 // this wrapper fails early, it is not the security boundary.
 import { createPublicClient, formatEther, http, parseAbi, parseTransaction, type Address, type Hex } from "viem";
-import { account, call, env, view, type Check } from "./near";
+import { account, call, env, requoted, view, type Check } from "./near";
 
 export const agent = account(env("AGENT"), env("AGENT_KEY"));
 /** Gas attached to `buy`: its own, the `sign` call to the MPC (15 TGas reserved) and the callback (10). */
@@ -120,9 +120,17 @@ const erc20 = parseAbi(["function balanceOf(address) view returns (uint256)"]);
  *  (request_exit, the sale each sentinel simulates from the guard's address), waits until the guard
  *  takes the quote as final (exit_ready), then sell_quoted has NEAR sign
  *  approve and swap with the floor set by the guard (quote minus the owner's 3 %), charged to the
- *  prepaid credit alone (a sale never needs buying budget). Returns the exit quote's id, the nonce of
- *  the first signed transaction and the transactions. */
-export async function sellAll(buyId: number): Promise<{ id: number; nonce: number; signed: Hex[] }> {
+ *  prepaid credit alone (a sale never needs buying budget). When another signature moved the guard's
+ *  nonce under the quotes, the guard refuses the sale and takes no more votes on them: a new exit quote
+ *  is asked, three in all at most, each at its price. Returns the exit quote's id, the nonce of the
+ *  first signed transaction and the transactions. */
+export const sellAll = (buyId: number) =>
+  requoted((n) => {
+    if (n > 1) log(`the guard's nonce, gas or fees moved under the exit quotes: asking a new exit quote (${n} of 3)`);
+    return sellOnce(buyId);
+  });
+
+async function sellOnce(buyId: number): Promise<{ id: number; nonce: number; signed: Hex[] }> {
   const bought = await view<Check>("get_check", { id: buyId });
   const token = bought.target as Address;
   const { address } = await view<{ address: Address }>("evm_config");

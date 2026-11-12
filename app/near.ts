@@ -56,6 +56,19 @@ export function reason(e: unknown): string {
   return msg.match(/Smart contract panicked: ([^"\n]+)/)?.[1] ?? msg.split("\n")[0];
 }
 
+/** Runs `attempt` (given its number, from 1) again while the guard refuses it because its nonce, gas or
+ *  fees moved since the simulation: a quote is of the transactions simulated, so the attempt must ask a
+ *  new one each time. `tries` attempts at most; the last refusal, and any other failure, is thrown. */
+export async function requoted<T>(attempt: (n: number) => Promise<T>, tries = 3): Promise<T> {
+  for (let n = 1; ; n++) {
+    try {
+      return await attempt(n);
+    } catch (e) {
+      if (n >= tries || !reason(e).includes("transaction differs from the one simulated")) throw e;
+    }
+  }
+}
+
 /** Link to a testnet transaction on nearblocks. */
 export const explorer = (tx: string) => `https://testnet.nearblocks.io/txns/${tx}`;
 
@@ -107,7 +120,7 @@ export type Check = {
   votes: Vote[];
 };
 /** One sentinel's vote on a check: its verdict and the sha256 of the evidence it posted. `quote`: on an
- *  exit quote, the ETH out (wei) an allow vote quoted, while it counts toward the floor; null otherwise. */
+ *  exit quote, the ETH out (wei) an allow vote quoted, which counts toward the floor; null otherwise. */
 export type Vote = { sentinel: string; verdict: "allow" | "warn" | "block"; evidence_sha256: string; quote?: string | null };
 /** The guard's sentinels and how many must post the same allow or warn (view `sentinels`). */
 export type Sentinels = { sentinels: string[]; quorum: number };

@@ -558,7 +558,7 @@ export function exitVoteLines(id: number, c: NonNullable<OnChain>, h: string, fi
   if (stands) lines.push(line(true, c.verdict === "allow" ? `on-chain exit quote #${id}: allow, ${c.quote} wei, ${rule}: this file's vote is the one that stands, same reasons` : `on-chain exit quote #${id}: ${c.verdict}, no sentinel quoted; this file's vote is the first, same reasons`));
   else if (c.verdict !== "allow" && file.verdict === "allow") return fail(`on-chain verdict ${c.verdict} for #${id}, yet this file's vote is an allow`);
   else if (c.verdict !== "allow") lines.push(line(true, `on-chain exit quote #${id}: ${c.verdict}, no sentinel quoted; the reasons stored are the first vote's`));
-  else if (!quotes.length) lines.push(line(true, `on-chain exit quote #${id}: its quotes count no more (the guard's nonce, gas or fees moved since): nothing sells on it`));
+  else if (!quotes.length) return fail(`on-chain verdict allow for #${id}, yet no vote carries a quote`);
   else lines.push(line(true, `${file.verdict === "allow" ? `this vote's quote ${file.quote} does not stand` : "this vote was a block, no quote"}: the guard sells on ${c.quote} wei, ${rule}`));
   return { lines, stands };
 }
