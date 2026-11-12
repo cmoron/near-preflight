@@ -330,6 +330,12 @@ pub const VERDICT_FRESH_NS: u64 = 180 * 1_000_000_000;
 /// so a sentinel that is down delays an exit by this much and never refuses it. Until then another
 /// sentinel's quote can still replace a low one.
 pub const EXIT_VOTES_WAIT_NS: u64 = 60 * 1_000_000_000;
+/// How long an exit that holds the quorum's quotes, but not every sentinel's, waits for the missing
+/// ones. Without it, with three sentinels and a quorum of two, a liar's high quote beside one honest
+/// quote sold at once on the highest: the median never applied. 15 s: an exit quote took 5 to 10 s on
+/// real Base, to which a sentinel adds its 1.5 s poll and the vote's inclusion on NEAR; an honest
+/// third quote is in by then, and a sentinel that is down costs an exit these 15 s, no more.
+pub const EXIT_GRACE_NS: u64 = 15 * 1_000_000_000;
 /// Bounds and default of the quarantine a `block` puts its token in: 10 min to 24 h, 30 min at init.
 /// Never zero: a token blocked on one draw could be asked again at once until a draw misses the trap.
 const MIN_QUARANTINE_S: u64 = 600;
@@ -829,10 +835,10 @@ impl Guard {
         }
     }
 
-    /// True once exit quote `id` no longer waits for other sentinels: the quorum's quotes are in (a
-    /// `block` is no quote), or one vote is and 60 s have passed since the request. `sell_quoted` is
-    /// refused until then; whether there is a quote to sell on is the check's verdict. With more
-    /// sentinels than the quorum, a later quote may still move the floor (the median of three).
+    /// True once exit quote `id` no longer waits for other sentinels (a `block` is no quote): every
+    /// sentinel's quote is in; or the quorum's are and 15 s have passed since the request; or one vote
+    /// is and 60 s have. `sell_quoted` is refused until then; whether there is a quote to sell on is
+    /// the check's verdict.
     #[must_use]
     pub fn exit_ready(&self, id: u64) -> bool {
         self.checks
@@ -840,11 +846,15 @@ impl Guard {
             .is_some_and(|c| c.exit_amount.is_some() && self.exit_votes_in(c))
     }
 
-    /// True once exit quote `c` has the quorum's quotes, or one vote 60 s after its request.
+    /// True once exit quote `c` holds every sentinel's quote, so that one key never sets the floor
+    /// while the others answer (the median of three); or the quorum's quotes after `EXIT_GRACE_NS`,
+    /// so that a sentinel that is down costs a short wait; or one vote after `EXIT_VOTES_WAIT_NS`.
     fn exit_votes_in(&self, c: &Check) -> bool {
-        c.votes.iter().filter(|v| v.quote.is_some()).count() >= usize::from(self.quorum)
-            || (!c.votes.is_empty()
-                && env::block_timestamp() >= c.requested_ns.0.saturating_add(EXIT_VOTES_WAIT_NS))
+        let quotes = c.votes.iter().filter(|v| v.quote.is_some()).count();
+        let since = |ns: u64| env::block_timestamp() >= c.requested_ns.0.saturating_add(ns);
+        quotes >= self.sentinels.len()
+            || (quotes >= usize::from(self.quorum) && since(EXIT_GRACE_NS))
+            || (!c.votes.is_empty() && since(EXIT_VOTES_WAIT_NS))
     }
 
     /// The buy check of `token` awaiting its verdict, if any: no other can be requested meanwhile.
@@ -1789,10 +1799,11 @@ impl Guard {
     /// An agent's exit on the sentinels' exit quote `id` (`request_exit`), within 120 s of it, once:
     /// the floor is the quoted ETH out minus the owner's slippage bound, never the agent's choice. The
     /// quote is the median of three, or the highest of fewer, by current sentinels only, and it sells
-    /// once the quorum's quotes are in (a `block` is no quote) or 60 s after the request
-    /// (`exit_ready`): a sentinel that is down delays an exit, and under a quorum of two or more one
-    /// key alone neither refuses it nor sets its floor while another sentinel answers with a quote. The
-    /// guard signs only the approve and swap the sentinel simulated (`tx_hashes`). Two transactions at
+    /// once every sentinel's quote is in (a `block` is no quote), 15 s after the request with the
+    /// quorum's, or 60 s after it with one vote (`exit_ready`): a sentinel that is down delays an
+    /// exit, and under a quorum of two or more one key alone neither refuses it nor sets its floor
+    /// while the other sentinels answer with a quote. The guard signs only the approve and swap the
+    /// sentinel simulated (`tx_hashes`). Two transactions at
     /// the gas cap are charged to the credit alone (a sale never needs buying budget); never refused
     /// because the token was listed or its code changed, nor because the budget is spent or expired.
     pub fn sell_quoted(&mut self, id: u64) -> Promise {
@@ -1823,7 +1834,7 @@ impl Guard {
         // One key does not set the floor while another sentinel may still quote higher.
         require!(
             self.exit_votes_in(check),
-            "exit quote awaits the other sentinels: it sells once the quorum voted, or 60 s after the request"
+            "exit quote awaits the other sentinels: it sells once all quoted, 15 s after the request with the quorum's quotes, or 60 s after it"
         );
         require!(
             env::block_timestamp() < check.judged_ns.0.saturating_add(VERDICT_TTL_NS),
@@ -8406,8 +8417,10 @@ mod tests {
             1004,
         );
         ctx("agent.test", 0, 1005);
+        assert!(!g.exit_ready(exit)); // two quotes of three: the grace
+        ctx("agent.test", 0, 1000 + EXIT_GRACE_NS);
         assert!(g.exit_ready(exit));
-        sell_quoted_at(&mut g, exit, 1005);
+        sell_quoted_at(&mut g, exit, 1000 + EXIT_GRACE_NS);
         assert_eq!(last_event()["data"][0]["min_out"], SELL_MIN.to_string());
     }
 
@@ -8432,7 +8445,7 @@ mod tests {
             1002,
         );
         ctx("sentinel3.test", 0, 1003);
-        assert!(g.exit_ready(exit));
+        assert!(!g.exit_ready(exit)); // its quote is waited for, a short grace
         assert!(g.vote_due(exit, id("sentinel3.test")));
     }
 
@@ -8504,7 +8517,7 @@ mod tests {
             1004,
         );
         assert_eq!(g.get_check(exit).unwrap().quote, U128(EXIT_QUOTE + 7)); // the highest of two
-        sell_quoted_at(&mut g, exit, 1100);
+        sell_quoted_at(&mut g, exit, 1000 + EXIT_GRACE_NS); // two quotes count, of three sentinels
         assert!(g.signing_since().is_some());
     }
 
@@ -8603,5 +8616,124 @@ mod tests {
             list_target: false,
             votes: vec![],
         }
+    }
+
+    // 26. With more sentinels than the quorum, an exit ready on the quorum's quotes let one key bypass
+    // the median: its high quote beside one honest quote stood at once, and the sale reverted. An exit
+    // is ready on every sentinel's quote; on the quorum's only after a short grace for the missing
+    // ones; on a single vote after 60 s.
+    #[test]
+    fn a_high_quote_beside_one_honest_quote_does_not_sell_before_the_third() {
+        let (mut g, exit) = exit_asked_of_three();
+        let high = 1000 * EXIT_QUOTE;
+        exit_vote(&mut g, "sentinel.test", exit, Verdict::Allow, high, 1001);
+        exit_vote(
+            &mut g,
+            "sentinel2.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1002,
+        );
+        assert_eq!(g.get_check(exit).unwrap().quote, U128(high)); // the highest of two, for now
+        ctx("agent.test", 0, 1003);
+        assert!(!g.exit_ready(exit), "ready on the liar's floor");
+        let said = panic_of(|| sell_quoted_at(&mut g, exit, 1003));
+        assert!(
+            said.contains("exit quote awaits the other sentinels"),
+            "{said}"
+        );
+        // the third quote comes: every sentinel quoted, no more wait, and the median stands
+        exit_vote(
+            &mut g,
+            "sentinel3.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE + 7,
+            1004,
+        );
+        ctx("agent.test", 0, 1005);
+        assert!(g.exit_ready(exit));
+        sell_quoted_at(&mut g, exit, 1005);
+        assert_eq!(
+            last_event()["data"][0]["min_out"],
+            floor(EXIT_QUOTE + 7, 300).to_string()
+        );
+    }
+
+    // One sentinel of three down: the quorum's quotes sell after the grace, a bounded delay.
+    #[test]
+    fn the_quorums_quotes_sell_after_a_short_grace_for_the_missing_one() {
+        let (mut g, exit) = exit_asked_of_three();
+        exit_vote(
+            &mut g,
+            "sentinel.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1001,
+        );
+        ctx("agent.test", 0, 1000 + EXIT_GRACE_NS);
+        assert!(!g.exit_ready(exit)); // one quote is below the quorum: the 60 s
+        exit_vote(
+            &mut g,
+            "sentinel3.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1002,
+        );
+        ctx("agent.test", 0, 1000 + EXIT_GRACE_NS - 1);
+        assert!(!g.exit_ready(exit));
+        ctx("agent.test", 0, 1000 + EXIT_GRACE_NS);
+        assert!(g.exit_ready(exit));
+        sell_quoted_at(&mut g, exit, 1000 + EXIT_GRACE_NS);
+        assert_eq!(last_event()["data"][0]["min_out"], SELL_MIN.to_string());
+    }
+
+    // A block is no quote: three sentinels of which one blocks never have every quote in, so the two
+    // others' quotes sell after the grace, on the highest of the two.
+    #[test]
+    fn one_block_among_three_delays_an_exit_by_the_grace_only() {
+        let (mut g, exit) = exit_asked_of_three();
+        exit_vote(&mut g, "sentinel.test", exit, Verdict::Block, 0, 1001);
+        exit_vote(
+            &mut g,
+            "sentinel2.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1002,
+        );
+        exit_vote(
+            &mut g,
+            "sentinel3.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1003,
+        );
+        ctx("agent.test", 0, 1004);
+        assert!(!g.exit_ready(exit));
+        sell_quoted_at(&mut g, exit, 1000 + EXIT_GRACE_NS);
+        assert_eq!(last_event()["data"][0]["min_out"], SELL_MIN.to_string());
+    }
+
+    // Two sentinels, both needed: both quotes, or the 60 s. The grace changes nothing there.
+    #[test]
+    fn with_two_sentinels_one_quote_still_waits_the_60_s() {
+        let (mut g, exit) = exit_asked_of_two();
+        exit_vote(
+            &mut g,
+            "sentinel.test",
+            exit,
+            Verdict::Allow,
+            EXIT_QUOTE,
+            1001,
+        );
+        ctx("agent.test", 0, 1000 + EXIT_GRACE_NS);
+        assert!(!g.exit_ready(exit));
+        ctx("agent.test", 0, 1000 + EXIT_VOTES_WAIT_NS);
+        assert!(g.exit_ready(exit));
     }
 }

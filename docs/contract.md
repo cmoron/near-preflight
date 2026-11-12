@@ -118,7 +118,7 @@ NEP-297 logs (`EVENT_JSON:`), standard `goblin_guard`. The
 | A vote counts only while its sentinel is one of the guard's: a sentinel removed stops counting at once, on the checks it voted on too | `post_verdict`, `buy`, `approve_warn`, `sell_quoted` |
 | An `allow` or a `warn` takes the quorum's votes, identical on verdict, quote, transaction hashes, code and listing; the quorum is the one in force when the vote, the buy or the approval comes | `post_verdict`, `buy`, `approve_warn` |
 | One `block` vote blocks at once, and overturns an `allow` or a `warn` that can still buy (180 s from the request, not yet sent to signing); votes that disagree block too; the 120 s run from the vote that completes the quorum | `post_verdict` |
-| An exit quote takes every sentinel's vote: the median of three quotes stands, the highest of fewer; a `block` never cancels another sentinel's quote; it sells once the quorum's quotes are in, or 60 s after the request | `post_verdict`, `sell_quoted` |
+| An exit quote takes every sentinel's vote: the median of three quotes stands, the highest of fewer; a `block` never cancels another sentinel's quote; it sells once every sentinel quoted, 15 s after the request with the quorum's quotes, or 60 s after it with one vote | `post_verdict`, `sell_quoted` |
 | A block lists its token only with the token's code and the quorum's identical `block` votes, each asking to list           | `post_verdict`                        |
 | Blocklist: tokens only, never a template; entries never overwritten; only the owner unlists; a sentinel is no reporter     | `report`, `unlist`                    |
 | An `allow` on code that differs from the reference is refused                                                              | `post_verdict`                        |
@@ -182,27 +182,35 @@ vote can be asked for. Every sentinel may vote until the exit is sent to signing
 - with fewer, the **highest** stands. With two quotes no rule resists one liar both ways: a floor too
   high makes the sale revert on Base, the tokens still held; a floor too low lets the pool's next
   trader take the difference;
-- a `block` never cancels another sentinel's quote, and is no quote: `sell_quoted` waits for the
-  quorum's **quotes**, or 60 s after the request (view `exit_ready`). A sentinel that is down, or
-  whose simulation fails, delays an exit by a minute and never refuses it;
+- a `block` never cancels another sentinel's quote, and is no quote;
 - a quote is of the transactions simulated: once another signature moved the guard's nonce, or the
   owner its gas, the quotes posted before count no more, for the floor nor for the quorum;
 - a quote a sentinel removed since voted on no longer sells: the agent asks another.
 
-The quote's 120 s run from the oldest quote that counts. With three sentinels and a quorum of two,
-the exit is ready on two quotes, the highest of them: the median applies once the third is in, so an
-agent that waits a few seconds for it is not at the mercy of one high quote.
+**When it sells** (`sell_quoted`, view `exit_ready`), counting quotes only:
+
+- at once, when **every** sentinel's quote is in: one key never sets the floor while the others
+  answer;
+- 15 s after the request, with the **quorum's** quotes: a sentinel that is down, or whose simulation
+  fails, costs an exit a short wait. An exit quote took 5 to 10 s on real Base, plus the sentinel's
+  1.5 s poll and the vote's inclusion on NEAR: an honest quote is in by then;
+- 60 s after the request, with **one** vote: no sentinel down ever refuses an exit.
+
+With two sentinels, both needed, that is both quotes or the 60 s. The quote's 120 s run from the
+oldest quote that counts.
 
 **What one stolen key can still do**, until the owner replaces it:
 
 - on a buy check less than 300 s old: block it, before or after the others' `allow` (within 180 s,
   until the buy is sent to signing), and quarantine its token. No `allow`, no `warn`, no listing;
-- on an exit with three quotes in: nothing, the median stands;
-- on an exit with two quotes in: post the higher one. The sale reverts on Base, the agent's charge is
-  spent and its holding stays debited until the owner [restores it](#recovery): one exit lost per
-  holding, no token lost, and the owner's `sell` takes no quote;
-- on an exit with two sentinels: post a `block`, which delays the sale to 60 s after the request (the
-  other sentinel's quote then stands);
+- on an exit, three sentinels all answering: nothing. The sale waits for the three quotes and the
+  median stands; a `block` or no vote from that key delays it by 15 s, on the others' quotes;
+- on an exit, three sentinels of which another does not quote within 15 s, or two sentinels: post
+  the higher of two quotes. The sale reverts on Base, the agent's charge is spent and its holding
+  stays debited until the owner [restores it](#recovery): one exit lost per holding, no token lost,
+  and the owner's `sell` takes no quote;
+- on an exit, two sentinels: post a `block`, or nothing, which delays the sale to 60 s after the
+  request (the other sentinel's quote then stands);
 - on an exit no other sentinel quotes within 60 s (down, or its own simulation failing): set its
   floor with a low quote, or leave it without a quote.
 
