@@ -7,6 +7,8 @@
 // verdict carries their hashes, and the guard signs nothing else for that check.
 // The full proof (eth_simulateV1 request, response and posted evidence string, byte for byte)
 // goes to proofs/<id>.json; the contract stores the sha256 of that string with the verdict.
+// A check that fails 3 times gets a block (fail closed): a token cannot stall the queue nor be bought.
+// Usage: [INDEX=<index.json>] bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts   (EVM_RPC: the node)
 import { formatEther, type Address, type Hex } from "viem";
 import type { Index } from "./index";
 import type { Check, Entry } from "./near";

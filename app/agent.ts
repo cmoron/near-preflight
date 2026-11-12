@@ -1,7 +1,8 @@
-// Agent-side wrapper: no buy without a verdict, refuses to buy on block. Signs only with
-// the agent's function-call key, limited to the guard (request_check, buy, refund_check, request_exit,
-// sell_quoted); the agent
-// has no EVM key: the guard builds the buy transaction and NEAR signs it.
+// Agent-side wrapper: how the agent (scripted, or the model's tools in app/llm.ts) reaches the guard.
+// No buy without a verdict, none on a block. Signs only with the agent's function-call key,
+// limited to the guard (request_check, buy, refund_check, request_exit, sell_quoted); the agent has no
+// EVM key: the guard builds every transaction and NEAR signs it. The contract enforces each rule again:
+// this wrapper fails early, it is not the security boundary.
 import { createPublicClient, formatEther, http, parseAbi, parseTransaction, type Address, type Hex } from "viem";
 import { account, call, env, view, type Check } from "./near";
 
@@ -23,6 +24,8 @@ export async function requestCheck(target: string, wei: bigint, decision?: strin
   return id;
 }
 
+/** Polls check #id until the sentinel's verdict is on chain; null after the 300 s the contract waits
+ *  before a refund. A read that fails is logged and retried, never taken as a verdict. */
 export async function waitVerdict(id: number): Promise<Check | null> {
   const end = Date.now() + TIMEOUT_MS;
   while (Date.now() < end) {

@@ -11,13 +11,15 @@ export const MPC_CONTRACT = "v1.signer-prod.testnet";
 export const GUARD_PATH = "evm-1";
 const RPC = process.env.NEAR_RPC ?? "https://test.rpc.fastnear.com";
 
-// Master key "secp256k1:<base58 of x||y>" -> 64 bytes
+/** Master key "secp256k1:<base58 of x||y>" -> its 64 bytes; throws on any other length. */
 export function parseNearSecpKey(s: string): Uint8Array {
   const raw = bs58.decode(s.replace(/^secp256k1:/, ""));
   if (raw.length !== 64) throw new Error(`NEAR secp256k1 key expected on 64 bytes, got ${raw.length}`);
   return raw;
 }
 
+/** The EVM address Chain Signatures signs for when `predecessor` calls `sign` with `path`: the guard's
+ *  Base address is deriveEvmAddress(master, "guard.<parent>.testnet", "evm-1"). Pure, checksummed. */
 export function deriveEvmAddress(masterPublicKey: string, predecessor: string, path: string): Hex {
   const xy = parseNearSecpKey(masterPublicKey);
   const master = secp256k1.Point.fromBytes(new Uint8Array([4, ...xy]));
@@ -28,7 +30,7 @@ export function deriveEvmAddress(masterPublicKey: string, predecessor: string, p
   return getAddress("0x" + keccak256(toHex(uncompressed.slice(1))).slice(26));
 }
 
-// View call public_key on the MPC contract
+/** The MPC contract's master public key (view `public_key`), read from the NEAR RPC. */
 export async function fetchMasterPublicKey(): Promise<string> {
   const r = await fetch(RPC, {
     method: "POST",

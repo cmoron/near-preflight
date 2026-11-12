@@ -1,6 +1,11 @@
-// Replay of a proof: anyone recovers the verdict from proofs/<id>.json and an EVM node.
-// The file carries the exact `evidence` string posted on chain; all of its content is rechecked.
-// Usage: bun app/replay.ts <proof.json> [rpc] [--check]
+// Replay of a proof: anyone recovers the verdict from proofs/<id>.json and an EVM node, with no key.
+// The file carries the exact `evidence` string posted on chain; all of its content is rechecked: the
+// requests are resent and must be the ones the sentinel builds, the verdict and list_target rejudged,
+// the trace, liquidity, index and code facts recomputed. With --check, everything is also compared with
+// the guard on NEAR (GUARD), and what the sentinel must not choose (probes, sales, the busy side's
+// sender) is derived again from on-chain data. Replay comes after the fact: it shows a lie, it cannot
+// prevent the buy it allowed. docs/replay.md lists each line.
+// Usage: bun app/replay.ts <proof.json> [rpc] [--check]   (exit code 0 only if every line holds)
 import { decodeFunctionData, encodeFunctionData, keccak256, parseAbi, parseTransaction, serializeTransaction, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
 import { ENV_OPCODES, touched } from "./environment";
 import { beforeBlock, buildIndex, INDEX_LAG_BLOCKS, INDEX_SPAN_BLOCKS, indexSha256, ownFunding, reputationOf, templateOf, windowProblem, type Reputation } from "./index";
@@ -381,6 +386,9 @@ type Opts = {
   clock?: () => number;
 };
 
+/** Replays one proof against the node at `url`: one Line per fact, OK, MISMATCH, ERROR or SKIPPED
+ *  (not verifiable on this node). A malformed file is refused before anything is sent. `opts` injects
+ *  the NEAR reads and the clock in tests; `check` adds the on-chain comparisons. */
 export async function replay(
   proof: Proof,
   url: string,
@@ -737,6 +745,7 @@ async function timing(url: string, blockTs: number, c: NonNullable<OnChain>, clo
   return { ok: inside, line: `${inside ? "OK      " : "MISMATCH"} ${text}` };
 }
 
+/** The last line printed: REPLAY OK says whether it was compared with the chain (--check). */
 export function summary(lines: Line[], checked: boolean, verdict: string): string {
   const bad = lines.filter((l) => !l.ok).length;
   if (bad) return `REPLAY FAILED: ${bad} check(s) not confirmed`;

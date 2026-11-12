@@ -13,6 +13,7 @@ globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) =>
 export const RPC = process.env.NEAR_RPC ?? "https://test.rpc.fastnear.com";
 export const provider = new JsonRpcProvider({ url: RPC });
 
+/** A required setting from the environment (.env or a role's key file); throws, naming setup, if unset. */
 export function env(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`${name} is not set (.env or the role's key file): run bun app/setup.ts <parent>.testnet first`);
@@ -38,6 +39,7 @@ export async function humanAccount(id: string): Promise<Account> {
   return account(id, private_key);
 }
 
+/** A view call on the guard named by GUARD (no key, no gas). */
 export function view<T>(method: string, args: Record<string, unknown> = {}): Promise<T> {
   return provider.callFunction({ contractId: env("GUARD"), method, args }) as Promise<T>;
 }
@@ -54,6 +56,7 @@ export function reason(e: unknown): string {
   return msg.match(/Smart contract panicked: ([^"\n]+)/)?.[1] ?? msg.split("\n")[0];
 }
 
+/** Link to a testnet transaction on nearblocks. */
 export const explorer = (tx: string) => `https://testnet.nearblocks.io/txns/${tx}`;
 
 /** Guard call signed by `who`; returns the value, the transaction link and what it

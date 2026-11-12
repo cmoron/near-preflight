@@ -1,5 +1,8 @@
-// Pre-buy sentinel: checks by read-only simulation (eth_simulateV1) on an
-// EVM chain, Uniswap V2 route WETH -> token. Nothing is signed or sent on the EVM chain.
+// The check behind every verdict: read-only simulation (eth_simulateV1) on an EVM chain, Uniswap V2
+// route WETH -> token. Nothing is signed or sent on the EVM chain. checkToken runs a buy check (four
+// requests: guard side, probe side, synthetic calls, busy side; plus code, liquidity, environment and
+// reputation facts), checkExit an agent's exit quote; judge and judgeExit are pure, so app/replay.ts
+// rejudges a proof with the same code. app/sentinel.ts posts the result; docs/sentinel.md explains it.
 import {
   concat,
   decodeAbiParameters,
@@ -186,6 +189,7 @@ function asProbe(c: Call, label: string, probe: Address, amount = 0n): Call {
   return { label, from: probe, to: c.to, data, ...(c.value ? { value: c.value } : {}) };
 }
 
+/** One JSON-RPC call with a timeout (RPC_TIMEOUT_MS, 20 s by default); throws on an error or no result. */
 export async function rpc<T>(url: string, method: string, params: unknown[]): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
@@ -386,6 +390,7 @@ export function plan(token: Address, who: Who, block: bigint, amount: bigint, tx
   };
 }
 
+/** The simulated call succeeded. */
 export const ok = (r: Result) => r.status === "0x1";
 const uint = (abi: Abi, fn: string, r: Result) => decodeFunctionResult({ abi, functionName: fn, data: r.returnData } as Parameters<typeof decodeFunctionResult>[0]);
 
@@ -557,8 +562,12 @@ export function nearFindings(n: NearFacts, codeHash: Hex, implementation: Addres
   return out;
 }
 
-/** Simulates buying `token` as two buyers, the probe and `guard` (the guard's EVM address); `probes`
- *  gets the block simulated on (the sentinel passes deriveProbes of its ticket). */
+/** The buy check of `token` at the node's latest block: the verdict, reasons, list_target, evidence and
+ *  the full requests and responses (Report). `guard` is the guard's EVM address; `probes` gets the block
+ *  simulated on (the sentinel passes deriveProbes of its ticket); `ctx` gives the index, the guard's
+ *  NEAR facts, the amount stated at the check and the guard's previews. A first simulation measures the
+ *  buys; the full one (plan) runs the guard's buy as it would sign it on that quote, then its two sales.
+ *  Throws when the index window is not bound to the block: no verdict rather than an unknown reputation. */
 export async function checkToken(url: string, token: Address, guard: Address, probes: (head: Header) => Probe, ctx: Context): Promise<Report> {
   const head = await headAt(url, "latest");
   const { sale, ...probe } = probes(head);
@@ -754,6 +763,7 @@ export function quoteOf(labels: string[], results: Result[], w: Parties): bigint
   return amount > 0n ? amount : 0n;
 }
 
+/** Results keyed by call label, the form judge reads them in. */
 export const byLabel = (labels: string[], results: Result[]) => Object.fromEntries(labels.map((l, i) => [l, results[i]]));
 
 /** Facts beside the simulation that the verdict rests on, all in the evidence. */
@@ -822,8 +832,10 @@ export function judgeExit(labels: string[], results: Result[], w: { token: Addre
   return { verdict: "allow", reasons: "exit sale from the guard's address simulated: quote = the ETH it receives", quote };
 }
 
-/** `preview`: preview_check of the exit quote, the approve and swap the guard would sign with a quote.
- *  Simulated twice: with no floor for the quote, then exactly as signed on that quote. */
+/** An agent's exit quote: selling `amount` of `token` from the guard's EVM address. `preview`:
+ *  preview_check of the exit quote, the approve and swap the guard would sign with a quote. Simulated
+ *  twice: with no floor for the quote, then exactly as signed on that quote. allow with the ETH received
+ *  as quote, or block without one. */
 export async function checkExit(url: string, token: Address, guard: Address, amount: bigint, preview: (quote: bigint) => Promise<Hex[]>): Promise<ExitReport> {
   const head = await headAt(url, "latest");
   const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
@@ -856,6 +868,7 @@ export async function checkExit(url: string, token: Address, guard: Address, amo
  *  sha256 the contract stores; app/replay.ts rereads it as is. */
 export type ProofFile = Omit<Report, "evidence" | "list_target"> & { id: number; target: string; evidence: string };
 
+/** The proof file of check #id: the report with its evidence serialized once, as posted on chain. */
 export function toProof(id: number, target: string, r: Report | ExitReport): ProofFile {
   return { id, target, verdict: r.verdict, reasons: r.reasons, evidence: JSON.stringify(r.evidence), request: r.request, response: r.response };
 }

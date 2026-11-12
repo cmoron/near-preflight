@@ -35,6 +35,9 @@ const short = (a: string) => `${a.slice(0, 6)}..${a.slice(-4)}`;
 const why = (e: unknown) => (e instanceof Error ? e.message : String(e)).split("\n")[0];
 const claims = (jwt: string) => JSON.parse(Buffer.from(jwt.split(".")[1], "base64url").toString());
 
+/** Verifies a decision package on its own (no NEAR read): signature, archived bytes, TDX quote and its
+ *  report_data, compose, GPU verdict. One line per fact; a fact that cannot be verified is reported
+ *  as SKIPPED, not as OK. `deps` fetches Intel's collateral and NVIDIA's verdict (recorded ones in the tests). */
 export async function attest(p: Package, deps: Deps = live): Promise<Line[]> {
   const out: Line[] = [];
   const signer = p.signature.signing_address.toLowerCase();
@@ -145,6 +148,7 @@ export async function bound(p: Package, id: number, check: Check, guard: string,
   return out;
 }
 
+/** The last line printed: ATTEST OK only when every line holds, SKIPPED ones counted apart. */
 export function summary(lines: Line[]): string {
   const bad = lines.filter((l) => !l.ok).length;
   const skipped = lines.filter((l) => l.skipped).length;
