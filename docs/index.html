@@ -159,6 +159,92 @@
         </div>
       </section>
 
+      <section class="run quick" id="quick" aria-labelledby="h-quick">
+        <h2 id="h-quick">Or check your own token</h2>
+        <p class="intro">
+          Paste a token's address on Base. This page simulates a buy of 0.0001
+          ETH, then two sales, from your browser on a public Base node: read
+          only, nothing is signed or sent. A quick check, not the guard's
+          verdict.
+        </p>
+        <div class="console">
+          <form class="qform" id="qform" novalidate>
+            <label for="qaddr">Token address on Base</label>
+            <input
+              id="qaddr"
+              name="token"
+              type="text"
+              placeholder="0x…"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+              maxlength="66"
+              aria-describedby="qhint"
+            />
+            <p class="hint" id="qhint">0x then 40 hexadecimal digits.</p>
+            <button type="submit" class="btn small" id="qrun">
+              Check this token
+            </button>
+            <p class="examples">
+              Or try
+              <button
+                type="button"
+                data-addr="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+              >
+                USDC</button
+              >,
+              <button
+                type="button"
+                data-addr="0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b"
+              >
+                VIRTUAL
+              </button>
+              or
+              <button
+                type="button"
+                data-addr="0x940181a94A35A4569E4529A3CDfB74e38FD98631"
+              >
+                AERO</button
+              >.
+            </p>
+          </form>
+          <div class="board" id="qboard" data-v="none" aria-busy="false">
+            <p class="caption" id="qcaption">
+              Four lamps, four steps: the pool, the buy, a sale seconds later,
+              the rest at the last block a simulation reaches.
+            </p>
+            <ol class="seq">
+              <li>
+                <span class="lamp" aria-hidden="true"></span><b>Pool</b>
+                <p class="what" id="q1"></p>
+              </li>
+              <li>
+                <span class="lamp" aria-hidden="true"></span><b>Buy</b>
+                <p class="what" id="q2"></p>
+              </li>
+              <li>
+                <span class="lamp" aria-hidden="true"></span><b>First sale</b>
+                <p class="what" id="q3"></p>
+              </li>
+              <li>
+                <span class="lamp" aria-hidden="true"></span><b>Last sale</b>
+                <p class="what" id="q4"></p>
+              </li>
+            </ol>
+            <p class="plate" id="qplate" aria-live="polite"></p>
+            <p class="more">
+              The full check adds the reputation of the token's code template, a
+              trace of what the token reads, the sales again on a later real
+              Base block, and a verdict stored on NEAR that anyone can replay.
+              <a
+                href="https://github.com/cmoron/near-preflight/blob/main/docs/sentinel.md"
+                >How the sentinel checks</a
+              >
+            </p>
+          </div>
+        </div>
+      </section>
+
       <section class="limits" aria-label="What it stops and what it does not">
         <div>
           <h2>What it stops</h2>
@@ -434,8 +520,8 @@ bun app/attest.ts app/fixtures/decision.json --check 1
       <p>
         Built for the NEAR Hackathon, track AI Security &amp; Defense. MIT
         license. The demo's tokens live on a local fork of Base; nothing is sent
-        to Base. The figures above are read from NEAR testnet by your browser,
-        with no backend, no wallet and no key.
+        to Base. The figures above are read by your browser from NEAR testnet
+        and a public Base node, with no backend, no wallet and no key.
       </p>
       <ul>
         <li><a href="https://github.com/cmoron/near-preflight">GitHub</a></li>
@@ -449,5 +535,6 @@ bun app/attest.ts app/fixtures/decision.json --check 1
       </ul>
     </footer>
     <script src="landing.js"></script>
+    <script type="module" src="quickcheck.js"></script>
   </body>
 </html>
