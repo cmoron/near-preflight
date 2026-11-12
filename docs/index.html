@@ -214,8 +214,8 @@
                   ><b class="verdict">block</b> <small>listed</small></span
                 >
                 <span
-                  >A token that sells only in a simulation, or at the delay a
-                  check would try</span
+                  >A token that sells only in a simulation, or only at the sizes
+                  and delays a check tries</span
                 >
               </a>
             </li>
@@ -292,17 +292,18 @@
           <ul>
             <li>
               <b>Both sentinels lying.</b> One alone can only block. In this
-              demo both run on one machine and read one Base node: two keys, not
-              two parties. Replay shows a lie afterwards.
+              demo both run on one machine, each on its own nodes on Base (on the
+              fork, the fork): two keys, not two parties. Replay shows a lie
+              afterwards.
             </li>
             <li>
               <b>What a token does later.</b> A pause, tax or blacklist after
               the buy.
             </li>
             <li>
-              <b>Asking again, later.</b> A block quarantines its token for 30
-              min, for every agent; after it an agent may ask again, with new
-              draws.
+              <b>Asking again, later.</b> A block on the token's code
+              quarantines it for 30 min, for every agent; a warn or a split vote
+              does not. Then an agent may ask again, with new draws.
             </li>
             <li>
               <b>What no code shows.</b> A holder of most of the supply can sell
@@ -466,7 +467,7 @@
           ><code>git clone https://github.com/cmoron/near-preflight &amp;&amp; cd near-preflight &amp;&amp; bun install
 export GUARD=<span id="cmd-guard">guard.goblin-guard-69369.testnet</span>   <span class="c"># the demo guard on NEAR testnet, read only</span>
 
-<span class="c"># Check #22 (USDC on Base mainnet): resent, traced on a local fork, its template index rebuilt, re-judged, compared with NEAR</span>
+<span class="c"># Check #28 (USDC on Base mainnet): resent, traced on a local fork, its template index rebuilt, re-judged, compared with NEAR</span>
 INDEX_RPC=https://base-rpc.publicnode.com bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
 <span class="c">#   REPLAY OK: verdict allow confirmed, same as on chain</span>
 

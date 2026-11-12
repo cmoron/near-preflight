@@ -9,6 +9,7 @@
 // (and trades of a token's pool, if asked), and `bun app/testkit.ts live` (demo.sh) mines one every
 // second of wall-clock time: the checker waits for them as it waits for Base.
 import { encodeFunctionData, pad, parseAbi, serializeTransaction, toHex, type Address, type Hex } from "viem";
+import { MAX_REPLAYED } from "./later";
 import { CADENCE_BLOCKS, LATER_S, REF_MARGIN_S, ROUTER, rpc, WETH, type Fees, type Previews } from "./verifier";
 
 /** The fork's block time, in seconds: the shortest anvil's eth_simulateV1 accepts. */
@@ -16,6 +17,8 @@ export const FORK_S = 1n;
 
 /** Gas and fees app/setup.ts gives the guard: 250,000 gas, 0.05 gwei at most, 0.001 gwei tip. */
 export const SETUP_FEES: Fees = { gas: 250_000n, maxFeePerGas: 50_000_000n, maxPriorityFeePerGas: 1_000_000n };
+/** The slippage bound app/setup.ts gives the guard (max_slippage_bps): a swap's minimum is its quote minus 3 %. */
+export const SETUP_SLIPPAGE_BPS = 300;
 const abi = parseAbi([
   "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256) payable",
   "function approve(address,uint256) returns (bool)",
@@ -23,12 +26,13 @@ const abi = parseAbi([
 ]);
 
 /** What the guard would sign for a check of `target` requested at `requestedS` (its swap deadline is
- *  300 s later), at `nonce`, slippage 3 %: a buy of `amount` wei, or with `exitAmount` an exit quote. */
+ *  300 s later), at `nonce`, slippage SETUP_SLIPPAGE_BPS: a buy of `amount` wei, or with `exitAmount` an
+ *  exit quote. */
 export function localPreviews(o: { guard: Address; target: Address; amount: bigint; requestedS?: bigint; nonce?: number; fees?: Fees; exitAmount?: bigint }): Previews {
   const fees = o.fees ?? SETUP_FEES;
   const nonce = o.nonce ?? 0;
   const deadline = (o.requestedS ?? 0n) + 300n;
-  const floor = (quote: bigint) => (quote * 9_700n) / 10_000n;
+  const floor = (quote: bigint) => (quote * BigInt(10_000 - SETUP_SLIPPAGE_BPS)) / 10_000n;
   const tx = (n: number, to: Address, data: Hex, value = 0n): Hex =>
     serializeTransaction({ type: "eip1559", chainId: 8453, nonce: n, to, value, data, gas: fees.gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas, accessList: [] });
   const exit = (amount: bigint, min: bigint, by: bigint) => [
@@ -41,7 +45,27 @@ export function localPreviews(o: { guard: Address; target: Address; amount: bigi
         ? exit(o.exitAmount, floor(quote), deadline)
         : [tx(nonce, ROUTER, encodeFunctionData({ abi, functionName: "swapExactETHForTokensSupportingFeeOnTransferTokens", args: [floor(quote), [WETH, o.target], o.guard, deadline] }), o.amount)],
     sale: async (amount, by) => exit(amount, 0n, by),
+    slippage_bps: SETUP_SLIPPAGE_BPS,
   };
+}
+
+/** Another node in front of the fork at `url`: it forwards every JSON-RPC call, answers the `refuse`d
+ *  methods with an error (as mainnet.base.org refuses eth_getLogs), and passes each other result of a
+ *  single call through `edit` (a node on another chain, or lying). */
+export function nodeBefore(url: string, o: { refuse?: string[]; edit?: (method: string, params: unknown[], result: unknown) => unknown }): { url: string; stop: () => void } {
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = await req.text();
+      const call = JSON.parse(body) as { id?: unknown; method?: string; params?: unknown[] };
+      if (!Array.isArray(call) && o.refuse?.includes(call.method!)) return Response.json({ jsonrpc: "2.0", id: call.id, error: { code: -32011, message: "request limit reached" } });
+      const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
+      if (Array.isArray(call) || !o.edit) return new Response(await res.text(), { status: res.status, headers: { "content-type": "application/json" } });
+      const out = (await res.json()) as { result?: unknown };
+      return Response.json("result" in out ? { ...out, result: o.edit(call.method!, call.params ?? [], out.result) } : out);
+    },
+  });
+  return { url: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) };
 }
 
 /** Users without a key whose transactions fill the fork's blocks; evm/fork.sh gives each 1,000 ETH. */
@@ -83,18 +107,23 @@ function trade(token: Address): Record<string, Hex> {
 /** Mines `n` blocks on the fork at `url`, each FORK_S after the one before (no sooner than now with
  *  `realTime`), each holding one to three transactions of `activity`, and with `trades`, a third party's
  *  buy of that token's pool in about one block in three, among them, in no fixed place; always in one of
- *  the 6th to 15th blocks, which a check requested before the first waits for (CHECK_BLOCKS). */
+ *  the 6th to 15th blocks, which a check requested before the first waits for (CHECK_BLOCKS); at most
+ *  MAX_REPLAYED in all, as many as a check re-executes (more is the check's "not verified" case). */
 export async function mine(url: string, n: number, realTime = false, trades?: Address): Promise<void> {
   for (const u of USERS) await rpc(url, "anvil_impersonateAccount", [u]);
   await rpc(url, "evm_setAutomine", [false]);
   const forced = 5 + Math.floor(Math.random() * 10);
+  let traded = 0;
   try {
     for (let i = 0; i < n; i++) {
       const last = BigInt((await rpc<{ timestamp: Hex }>(url, "eth_getBlockByNumber", ["latest", false])).timestamp) + FORK_S;
       const now = BigInt(Math.floor(Date.now() / 1000));
       const txs = [];
       for (let k = 1 + Math.floor(Math.random() * 3); k > 0; k--) txs.push(await activity(url));
-      if (trades && (i === forced || Math.random() < 1 / 3)) txs.splice(Math.floor(Math.random() * (txs.length + 1)), 0, trade(trades));
+      if (trades && traded < MAX_REPLAYED && (i === forced || Math.random() < 1 / 3)) {
+        txs.splice(Math.floor(Math.random() * (txs.length + 1)), 0, trade(trades));
+        traded++;
+      }
       for (const tx of txs) await rpc(url, "eth_sendTransaction", [tx]);
       await rpc(url, "evm_mine", [Number(realTime && now > last ? now : last)]);
     }

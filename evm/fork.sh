@@ -235,6 +235,11 @@ GUARD_LATER=$(side src/J9GuardLater.sol:J9GuardLater --constructor-args "$GUARD_
 LATE_CLOSE=$(side src/LateClose.sol:LateClose --constructor-args "Late Close" LATECLOSE false)
 POOL_CLOCK=$(side src/LateClose.sol:LateClose --constructor-args "Pool Clock" POOLCLOCK true)
 
+# Deployed last, every address above stays: a sale refused when it sells 88 % to 99.99 % of the seller's
+# balance (src/ExitSizeTrap.sol). Every sale a check drew went through; an agent's exit (97 % of what the
+# guard bought) never does.
+EXIT_SIZE=$(side src/ExitSizeTrap.sol:ExitSizeTrap)
+
 # USDC is real Base state: the fork fetches from its upstream node whatever it has not read yet, one
 # request each (code of the proxy, the implementation, the pool, their slots). A buy through the router,
 # called and never sent, reads most of it now: the first check of USDC, by two sentinels at once, does not
@@ -259,7 +264,7 @@ jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked
   --arg redl1 "$RED_L1" --arg basefee "$BASEFEE_TRAP" --arg helper "$HELPER_TRAP" \
   --arg nbk "$NEXT_BLOCK_KEY" --arg amount "$AMOUNT_TRAP" --arg wethkey "$WETH_KEY" --arg cooldown "$COOLDOWN_60" \
   --arg approvekey "$APPROVE_KEY" --arg busytell "$BUSY_TELL" --arg implmark "$IMPL_MARK" --arg guardlater "$GUARD_LATER" \
-  --arg lateclose "$LATE_CLOSE" --arg poolclock "$POOL_CLOCK" \
+  --arg lateclose "$LATE_CLOSE" --arg poolclock "$POOL_CLOCK" --arg exitsize "$EXIT_SIZE" \
   '{fork_block: $block, usdc: $usdc, safe: $safe, owner_reclaim: $reclaim, sell_blocked: $blocked,
     sell_blocked_later: $later, sell_tax: $tax, sell_tax_later: $taxlater, hold_one_block: $hold, sim_detector: $sim,
     guard_frozen: $frozen, sell_tax_20: $tax20, late_liquidity: $late, lp_burned: $lpburned, lp_held: $lpheld,
@@ -268,7 +273,7 @@ jq -n --arg usdc $USDC --arg safe "$SAFE" --arg reclaim "$RECLAIM" --arg blocked
     pair_pull_tax: $pairpull, red_l1_trap: $redl1, basefee_trap: $basefee, helper_trap: $helper,
     next_block_key: $nbk, amount_trap: $amount, weth_key: $wethkey, cooldown_60: $cooldown,
     approve_key: $approvekey, busy_tell: $busytell, impl_mark: $implmark, guard_later: $guardlater,
-    late_close: $lateclose, pool_clock: $poolclock}' > tokens.json
+    late_close: $lateclose, pool_clock: $poolclock, exit_size: $exitsize}' > tokens.json
 cp tokens.json ../docs/tokens.json
 echo "guard_frozen freezes $GUARD_EVM"
 echo "Base fork at block $FORK_BLOCK ready on $RPC; tokens in evm/tokens.json:"

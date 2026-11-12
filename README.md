@@ -10,9 +10,9 @@
 
 A spending cap stops an agent from spending too much. It does not stop a prompt-injected agent from spending a little on a trap.
 
-Before NEAR signs any purchase, near-preflight simulates the buy and the resale, checks whether the token's code has drained pools before, and stores a verdict anyone can replay.
+Before NEAR signs any purchase, two sentinels simulate the buy and its resales, check that the token's own code reads no clock and calls no other contract then, and whether it drained pools before; anyone can replay their verdict.
 
-The agent holds no key for Base, the chain it buys on: the contract builds the transaction and NEAR signs it.
+The agent holds no key for Base, the chain it buys on: the contract builds the transaction and NEAR signs it, within bounds: both sentinels must agree, a `block` on its code quarantines the token for every agent, each token has a cap.
 
 ## One purchase
 
@@ -47,7 +47,7 @@ First, the [status page](https://cmoron.github.io/near-preflight/journal.html) l
 git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun install
 export GUARD=guard.goblin-guard-69369.testnet   # the demo guard on NEAR testnet, read only
 
-# Check #22 (USDC on Base mainnet): resent, traced and its far sales mined on a local fork, its template index rebuilt, re-judged, compared with NEAR
+# Check #28 (USDC on Base mainnet): resent, traced and its far sales mined on a local fork, its template index rebuilt, re-judged, compared with NEAR
 INDEX_RPC=https://base-rpc.publicnode.com bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
 #   REPLAY OK: verdict allow confirmed, same as on chain
 
@@ -55,9 +55,9 @@ INDEX_RPC=https://base-rpc.publicnode.com bun app/replay.ts app/fixtures/usdc-ba
 bun app/attest.ts app/fixtures/decision.json --check 1
 #   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)
 
-# Every trap below, on a local Base fork, as CI runs it (about 30 s, then 5 min)
+# Every trap below, on a local Base fork, as CI runs it (about 30 s, then 6 min)
 echo GUARD=$GUARD > .env && evm/fork.sh   # then, in another terminal:
-bun test --timeout 30000                  #   333 pass, 0 fail
+bun test --timeout 30000                  #   350 pass, 0 fail
 ```
 
 `INDEX_RPC` serves the logs the template index is rebuilt from; `mainnet.base.org` refuses them.
@@ -69,7 +69,7 @@ bun test --timeout 30000                  #   333 pass, 0 fail
 | A token you can buy but never sell                                                      | 🔴 block, listed                          | [honeypot](docs/threat-model.md#sale-refused-after-the-buy)      |
 | The token's owner takes tokens back without approval                                    | 🔴 block, listed                          | [takeback](docs/threat-model.md#the-owner-takes-tokens-back)     |
 | A clean copy of code whose earlier pools were drained                                   | 🔴 block                                  | [farm](docs/threat-model.md#template-farm)                       |
-| A token that sells only in a simulation, or at the delay a check would try              | 🔴 block, listed                          | [tells](docs/threat-model.md#telling-the-check-from-a-real-sale) |
+| A token that sells only in a simulation, or only at the sizes and delays a check tries  | 🔴 block, listed                          | [tells](docs/threat-model.md#telling-the-check-from-a-real-sale) |
 | A token keyed on WETH or the factory, or that fails on a later Base block               | 🔴 block                                  | [state](docs/threat-model.md#state-base-moves-every-block)       |
 | Code that reads values no simulation can match (base fee, coinbase…)                    | 🟠 warn; 🔴 block once the base fee moved | [opcodes](docs/threat-model.md#values-no-simulation-can-match)   |
 | A token whose own code reads the time or its pool, to change after the check            | 🟠 warn, the owner decides                | [own code](docs/threat-model.md#what-the-tokens-own-code-did)    |
@@ -81,9 +81,9 @@ bun test --timeout 30000                  #   333 pass, 0 fail
 
 ## What it does not stop
 
-- **Both sentinels lying.** One alone can only block. In the demo both run on one machine and read one Base node: two keys, not two parties. Replay shows a lie afterwards.
+- **Both sentinels lying.** One alone can only block. In the demo both run on one machine, each on its own nodes on Base (on the fork, the fork): two keys, not two parties. Replay shows a lie afterwards.
 - **What a token does later.** A pause, tax or blacklist after the buy; a change past the check's last sale, 15 min after the buy, by code that read neither the time nor its pool during the check.
-- **Asking again, later.** A `block` [quarantines](docs/contract.md#token-limits) its token for 30 min, for every agent; after it an agent may ask again, with new draws.
+- **Asking again, later.** A `block` on the token's code [quarantines](docs/contract.md#token-limits) it for 30 min, for every agent; a `warn` or a split vote does not. Then an agent may ask again, with new draws.
 - **What no code shows.** A holder of most of the supply can sell into the pool; liquidity older than one hour is not read; each sentinel believes the Base node it reads.
 - **Front-running.** The signing request is public on NEAR before the swap reaches Base.
 - **Template evasion.** Changing the code makes a new template; fewer than 3 earlier pools give no finding.
@@ -102,11 +102,11 @@ Every limit, with its reason: [threat model](docs/threat-model.md#what-it-does-n
 1. Install Rust with `cargo-near` 0.23, `near` CLI 0.31, `bun` 1.4, Foundry 1.8 and `jq`. `cargo test` gives `295 passed`; then `bun install`.
 2. Get a testnet account holding about 8 NEAR. The faucet gives 10; if it answers `429`, see [troubleshooting](docs/reproduce.md#troubleshooting).
 3. `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard and creates the agent, armer and two sentinel accounts, each with a key limited to the guard.
-4. `evm/fork.sh` in another terminal, then `bun test --timeout 30000`: `333 pass`.
+4. `evm/fork.sh` in another terminal, then `bun test --timeout 30000`: `350 pass`.
 5. `./demo.sh` exits 0 in 3 to 5 min (each check waits about 25 s for Base blocks): a poisoned message pushes the agent to a trap (blocked), a farm copy (blocked), USDC (allowed, signed by NEAR, broadcast to the fork), then the agent's bypasses (refused).
 6. It prints this run's `replay --check` and `attest --check` commands; each exits 0.
 7. Optional: `NEAR_AI_API_KEY` in `.env.llm` runs the live model; `./demo.sh --full` adds an exit, an approved `warn`, a second agent and the emergency stop.
-8. `./check-mainnet.sh` exits 0: USDC simulated on Base mainnet, read only, `allow`, then replayed; nothing is signed.
+8. `./check-mainnet.sh` exits 0: USDC simulated on Base mainnet by each sentinel on its own nodes, read only, `allow`, then replayed; nothing is signed.
 
 Expected output of each step and the deployment facts: [reproduce](docs/reproduce.md).
 

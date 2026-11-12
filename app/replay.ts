@@ -43,6 +43,9 @@ import {
   ROUTER,
   rpc,
   saleAmounts,
+  sameChain,
+  EXIT,
+  exitShare,
   saleRanges,
   SALES,
   secondsAfterBuy,
@@ -87,6 +90,7 @@ type Evidence = {
   token_balances: string[] | null;
   token_opcodes: string[] | null;
   sales: Sale;
+  slippage_bps: number;
   later: Later | null;
   list_target: boolean;
 };
@@ -122,7 +126,7 @@ const blocksOf = (q: Request) => (q.params[0] as { blockStateCalls: BlockStateCa
 /** What replay compares of a call's result: status, return data and logs (emitter, topics, data). */
 const outcome = (r: Result) => JSON.stringify([r.status, r.returnData, (r.logs ?? []).map((l) => [l.address.toLowerCase(), l.topics, l.data])]);
 
-const EVIDENCE_KEYS = "amount_wei,block,cadence,calls,chain_id,code_hash,implementation,later,liquidity,list_target,method,near,opcodes,quote,reputation,request_sha256,sales,template,token_balances,token_calls,token_opcodes,touched,tx_hashes";
+const EVIDENCE_KEYS = "amount_wei,block,cadence,calls,chain_id,code_hash,implementation,later,liquidity,list_target,method,near,opcodes,quote,reputation,request_sha256,sales,slippage_bps,template,token_balances,token_calls,token_opcodes,touched,tx_hashes";
 const EXIT_KEYS = "amount,block,cadence,calls,chain_id,kind,method,quote,request_sha256,tx_hashes";
 const REPUTATION_KEYS = "before_block,drained,from,index_sha256,median_drain_blocks,pools,template,to";
 
@@ -182,6 +186,7 @@ function parseEvidence(p: Proof): Evidence | ExitEvidence | string {
     (e.token_balances === null || addresses(e.token_balances)) &&
     (e.token_opcodes === null || (Array.isArray(e.token_opcodes) && e.token_opcodes.every((o) => Object.values(TOKEN_OPCODES).includes(o as string)))) &&
     isSale(e.sales, e.cadence as Cadence) &&
+    within(e.slippage_bps, [0, 9_999]) &&
     (e.later === null || isLater(e.later, e.block as number)) &&
     typeof e.list_target === "boolean";
   return typed ? (e as unknown as Evidence) : "evidence fields have unexpected types";
@@ -283,7 +288,7 @@ const placeholder = (functionName: string, args: unknown[]) =>
   serializeTransaction({ type: "eip1559", chainId: 1, to: NOBODY, data: encodeFunctionData({ abi: shape, functionName, args } as Parameters<typeof encodeFunctionData>[0]), gas: 1n, maxFeePerGas: 1n, maxPriorityFeePerGas: 1n });
 const SKELETON: GuardTxs = (() => {
   const sale = [placeholder("approve", [NOBODY, 0n]), placeholder("swapExactTokensForETHSupportingFeeOnTransferTokens", [0n, 0n, [], NOBODY, 0n])];
-  return { buy: placeholder("swapExactETHForTokensSupportingFeeOnTransferTokens", [0n, [], NOBODY, 0n]), sales: [sale, sale] };
+  return { buy: placeholder("swapExactETHForTokensSupportingFeeOnTransferTokens", [0n, [], NOBODY, 0n]), sales: [sale, sale], exit: sale };
 })();
 /** One of the guard's calls of the request as the unsigned transaction it stands for (its hash is what
  *  the MPC signs). */
@@ -305,9 +310,9 @@ export function unsignedOf(c: RequestCall, chainId: number): Hex {
 
 /** The guard's transactions must be what the guard builds for this check: a buy of `amount` wei of the
  *  target for the guard's address, and sales that approve exactly the amount they sell then swap it to
- *  ETH for the guard's address. Without --check this is all replay can say; with it, their hashes are
- *  the ones the guard stored. Returns the defect, or null. */
-function guardShape(txs: GuardTxs, token: Address, guard: Address, amount: bigint, sold: [bigint, bigint] | null): string | null {
+ *  ETH for the guard's address: a share, the rest and, as the exit-size sale, `exit`. Without --check this
+ *  is all replay can say; with it, their hashes are the ones the guard stored. Returns the defect, or null. */
+function guardShape(txs: GuardTxs, token: Address, guard: Address, amount: bigint, sold: [bigint, bigint] | null, exit: bigint | null): string | null {
   const b = parseTransaction(txs.buy);
   const buy = decodeFunctionData({ abi: shape, data: b.data ?? "0x" });
   const [, bp, bto] = buy.args as unknown as [bigint, Address[], Address];
@@ -317,7 +322,8 @@ function guardShape(txs: GuardTxs, token: Address, guard: Address, amount: bigin
     const bad = saleShape(sale, token, guard, sold![i]);
     if (bad) return `sale ${i + 1}: ${bad}`;
   }
-  return null;
+  const bad = txs.exit && saleShape(txs.exit, token, guard, exit!);
+  return bad ? `exit-size sale: ${bad}` : null;
 }
 
 /** A sale as the guard signs it: approve(router, x) on the token, then the swap of x to ETH for `guard`. */
@@ -372,23 +378,27 @@ async function rebuild(url: string, p: Proof, e: Evidence, fresh: Result[][]): P
     const full = !st.stop && !!e.liquidity;
     if (full !== !!e.later) return { error: full ? "the check sold, yet evidence.later is null" : "evidence.later is set, yet the check stopped at the buy" };
     if (full) {
-      const layout = plan(token, unknown, block, amount, SKELETON, { amounts: st.amounts, owner: st.owner, sale: e.sales });
+      const layout = plan(token, unknown, block, amount, SKELETON, { amounts: st.amounts, owner: st.owner, sale: e.sales, slippage_bps: e.slippage_bps });
       stranger = at(layout.synthetic, sy, "transferFrom by a stranger")?.from ?? null;
       if (!stranger) return { error: "request has no stranger probe where checkToken puts one" };
       const sales = SALES.map((when) => [`${GUARD}approve router${when}`, `${GUARD}sale${when}`].map((l) => at(layout.guard, g, l)));
       if (sales.flat().some((c) => !c)) return { error: `the guard's sales are not where evidence.sales puts them (${e.sales.first} and ${e.sales.late} blocks after the buy)` };
       txs.sales = sales.map((sale) => sale.map((c) => unsignedOf(c!, e.chain_id))) as [Hex[], Hex[]];
-      sides = plan(token, { guard, buyer, stranger }, block, amount, txs, { amounts: st.amounts, owner: st.owner, sale: e.sales });
+      // the guard's exit-size sale, in the far request where farBlocks puts it
+      const exit = [`${GUARD}approve router${EXIT}`, `${GUARD}sale${EXIT}`].map((l) => at(farBlocks(layout, block, e.sales, e.cadence), blocksOf(p.request[4]), l));
+      if (exit.some((c) => !c)) return { error: "the far request holds no exit-size sale of the guard's where checkToken puts it" };
+      txs.exit = exit.map((c) => unsignedOf(c!, e.chain_id));
+      sides = plan(token, { guard, buyer, stranger }, block, amount, txs, { amounts: st.amounts, owner: st.owner, sale: e.sales, slippage_bps: e.slippage_bps });
       sides.later = laterBlocks(sides.guard, block, e.sales, BigInt(e.later!.block));
       sides.far = farBlocks(sides, block, e.sales, e.cadence);
     }
-    const bad = guardShape(txs, token, guard, amount, txs.sales ? saleAmounts(st.amounts.guard, e.sales.bps) : null);
+    const bad = guardShape(txs, token, guard, amount, txs.sales ? saleAmounts(st.amounts.guard, e.sales.bps) : null, txs.exit ? exitShare(st.amounts.guard, e.slippage_bps) : null);
     if (bad) return { error: bad };
     const owner = full ? st.owner : null;
     const want = await Promise.all(FROZEN.map(async (k) => buildRequest(head, e.cadence, await balances(url, head, sides[k], fees, guard, owner), sides[k], fees)));
     if (JSON.stringify(want) !== JSON.stringify(p.request.slice(0, 3))) return { error: "requests are not the ones checkToken builds for this target" };
     const far = full ? farRequest(head, e.cadence, sides.far, fees) : null;
-    if (far && JSON.stringify(far) !== JSON.stringify(p.request[4])) return { error: `the far sales are not the late sale's approve and swap 301 s, ${e.sales.far} blocks and 900 s after the buy, the guard's then the probe's` };
+    if (far && JSON.stringify(far) !== JSON.stringify(p.request[4])) return { error: `the far sales are not the late sale's approve and swap 301 s, ${e.sales.far} blocks and 900 s after the buy, then the exit-size sale at the late sale's blocks, the guard's then the probe's` };
     const labels = labelsOf(sides);
     const simulated = labels.length - sides.far.flatMap((b) => b.calls).length;
     if (simulated !== fresh.flat().length) return { error: `expected ${simulated} calls, node returned ${fresh.flat().length}` };
@@ -408,7 +418,7 @@ async function retrace(url: string, p: Proof, e: Evidence, r: Rebuilt): Promise<
   const add = (ok: boolean, text: string) => out.push({ ok, line: `${ok ? "OK      " : "MISMATCH"} ${text}` });
   let traced: (Trace & { far: Result[] | null }) | null = null;
   try {
-    const far = r.far ? { probe: p.request[1], far: r.far, until: e.block + e.sales.late } : undefined;
+    const far = r.far ? { probe: p.request[1], far: r.far, until: e.block + e.sales.late, first: e.block + e.sales.first } : undefined;
     traced = e.liquidity ? await trace(url, p.request[0], e.block, p.target as Address, e.implementation as Address | null, far) : null;
   } catch (err) {
     return { lines: [{ ok: false, line: `ERROR    tracing the guard's transactions and the far sales on a local fork: ${msg(err)}` }], far: null };
@@ -416,7 +426,8 @@ async function retrace(url: string, p: Proof, e: Evidence, r: Rebuilt): Promise<
   const far = traced?.far ?? null;
   if (far) {
     const same = JSON.stringify(far.map(outcome)) === JSON.stringify((p.response[4] ?? []).map(outcome));
-    const when = `301 s, ${secondsAfterBuy(e.cadence, e.sales.far)} s (${e.sales.far} blocks) and 900 s after the buy`;
+    const [lo, hi] = saleRanges(e.cadence).far.map((n) => secondsAfterBuy(e.cadence, n));
+    const when = `${lo} s, ${secondsAfterBuy(e.cadence, e.sales.far)} s (${e.sales.far} blocks) and ${hi} s after the buy, and the exit-size sale (${(10_000 - e.slippage_bps) / 100} % of the tokens bought)`;
     add(same, same ? `far sales re-run on a local fork, the late sale again ${when}: status, return data and logs of their ${far.length} calls identical` : `far sales re-run on a local fork ${when}: their results differ from the proof's`);
   }
   const seen: Reach | null = traced && e.later ? await laterLines(url, p, e, r, traced, add, out) : traced;
@@ -510,12 +521,14 @@ export function voteLines(id: number, c: NonNullable<OnChain>, h: string, file: 
   else out.push(line(true, `on-chain verdict ${c.verdict} for #${id} matches (same target, ${deciding ? "same reasons" : "the reasons stored are the first vote's"}): ${posted} sentinel(s) posted it, ${needed} needed`));
   return out;
 }
-/** The guard account (GUARD in .env) and its EVM address derived through Chain Signatures. */
-export type GuardInfo = { account: string; evm: Address };
+/** The guard account (GUARD in .env), its EVM address derived through Chain Signatures, and its slippage
+ *  bound (evm_config.max_slippage_bps, fixed at init), which sets the exit-size sale. */
+export type GuardInfo = { account: string; evm: Address; slippage_bps: number };
 async function readGuard(): Promise<GuardInfo> {
-  const { env } = await import("./near");
+  const { env, view } = await import("./near");
   const { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH } = await import("./derive");
-  return { account: env("GUARD"), evm: deriveEvmAddress(await fetchMasterPublicKey(), env("GUARD"), GUARD_PATH) };
+  const { max_slippage_bps } = await view<{ max_slippage_bps: number }>("evm_config");
+  return { account: env("GUARD"), evm: deriveEvmAddress(await fetchMasterPublicKey(), env("GUARD"), GUARD_PATH), slippage_bps: max_slippage_bps };
 }
 const same = (a: string | null, b: string) => a?.toLowerCase() === b.toLowerCase();
 
@@ -646,9 +659,11 @@ export async function replay(
   }
   if (!rebuilt) out.push({ ok: true, skipped: true, line: "SKIPPED  the guard's transactions not traced, the later side not rebuilt: the requests are not confirmed as the ones checkToken builds" });
 
-  // (e2) LP facts recomputed from the node at the block (the rejudging above used the file's)
+  // (e2) LP facts recomputed from the node at the block, their logs from the logs node (the rejudging
+  // above used the file's)
+  const logs = opts.indexRpc ?? url;
   try {
-    const l = JSON.stringify(await liquidityFacts(url, proof.target as Address, await stampOf(url, toHex(e.block)), e.cadence));
+    const l = JSON.stringify(await liquidityFacts(url, proof.target as Address, await stampOf(url, toHex(e.block)), e.cadence, logs));
     const same = l === JSON.stringify(e.liquidity);
     add(same, same ? "liquidity facts (pair, LP supply, holders) recomputed identically" : `liquidity facts differ: evidence ${JSON.stringify(e.liquidity)} vs node ${l}`);
   } catch (err) {
@@ -663,14 +678,17 @@ export async function replay(
     try {
       const window = windowProblem(await stampOf(url, toHex(e.block)), await stampOf(url, toHex(r.from)), r.to);
       add(!window, window ?? `template index window ${r.from}..${r.to} bound to block ${e.block}: it starts at least ${INDEX_SPAN_S / 3600} h before it and ends at it`);
-      const logs = opts.indexRpc ?? url;
+      if (logs !== url) {
+        const tied = await sameChain(url, logs, [r.to, r.from]).then(() => null, (err: unknown) => msg(err));
+        add(!tied, tied ?? `the logs node ${new URL(logs).host} gives blocks ${r.from} and ${r.to} the hashes the node gives them: one chain`);
+      }
       let requests = 0;
       const index = await buildIndex(logs, r.from, r.to, async () => void requests++);
       const sha = indexSha256(index);
       const where = logs === url ? "the node" : logs;
       add(sha === r.index_sha256, sha === r.index_sha256 ? `template index of blocks ${r.from}..${r.to} rebuilt from ${where}: same sha256 ${sha.slice(0, 10)}... (${requests} requests)` : `template index of blocks ${r.from}..${r.to} rebuilt from ${where} with sha256 ${sha}, evidence says ${r.index_sha256}`);
       const own = e.liquidity?.pair ?? null;
-      const want = JSON.stringify(reputationOf(index, e.template as Hex, beforeBlock(index, own, await ownFunding(logs, index, own)), e.cadence));
+      const want = JSON.stringify(reputationOf(index, e.template as Hex, beforeBlock(index, own, await ownFunding(logs, index, own, url)), e.cadence));
       add(want === JSON.stringify(r), want === JSON.stringify(r) ? `template reputation recomputed identically (${r.drained} of ${r.pools} earlier pools drained)` : `template reputation differs: evidence ${JSON.stringify(r)} vs rebuilt ${want}`);
     } catch (err) {
       fail("checking the template index window or rebuilding the index", err);
@@ -869,6 +887,12 @@ async function derivation(url: string, id: number, r: Rebuilt, e: Evidence, c: N
     line(
       same(r.guard, g.evm),
       same(r.guard, g.evm) ? `guard side simulated as ${g.account}'s derived EVM address ${g.evm}` : `guard side simulated as ${r.guard}, not ${g.account}'s derived EVM address ${g.evm}`,
+    ),
+    line(
+      e.slippage_bps === g.slippage_bps,
+      e.slippage_bps === g.slippage_bps
+        ? `slippage bound ${e.slippage_bps} bps is the guard's: the exit-size sale sold what an agent's exit sells, ${(10_000 - e.slippage_bps) / 100} % of the tokens bought`
+        : `slippage bound ${e.slippage_bps} bps is not the guard's, ${g.slippage_bps} bps: the exit-size sale did not sell what an agent's exit sells`,
     ),
   ];
 }

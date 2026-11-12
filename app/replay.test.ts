@@ -5,7 +5,7 @@ import { encodeFunctionData, maxUint256, parseAbi, sha256, stringToHex, toHex, t
 import tokens from "../evm/tokens.json";
 import { buildIndex } from "./index";
 import { replay, summary, voteLines, type OnChain, type Proof } from "./replay";
-import { CHECK_BLOCKS, localPreviews, mine } from "./testkit";
+import { CHECK_BLOCKS, localPreviews, mine, nodeBefore, SETUP_SLIPPAGE_BPS } from "./testkit";
 import { checkExit, checkToken, deriveProbes, FAR_METHOD, LATER_S, rpc, ROUTER, saleRanges, specialOf, toProof, WETH, type Cadence, type NearFacts, type Probe } from "./verifier";
 
 const RPC = process.env.EVM_RPC ?? "http://127.0.0.1:8545";
@@ -19,7 +19,7 @@ const toHexAddr = (b: Uint8Array) => `0x${Buffer.from(b).toString("hex")}` as Ad
 
 /** The guard's EVM address the guard_frozen trap freezes (evm/fork.sh). */
 const GUARD_EVM = await specialOf(RPC, tokens.guard_frozen as Address);
-const GUARD_INFO = { account: "guard.test", evm: GUARD_EVM };
+const GUARD_INFO = { account: "guard.test", evm: GUARD_EVM, slippage_bps: SETUP_SLIPPAGE_BPS };
 /** The template index the sentinel builds for a check: every pool of the fork setup, up to its block. */
 const INDEX = (block: number) => buildIndex(RPC, tokens.fork_block + 1, block);
 const NO_NEAR: NearFacts = { listed: [], previous: null };
@@ -678,6 +678,24 @@ describe("replay: the far sale", () => {
   });
 });
 
+// Review of a274879: a sale of what an agent's exit sells, the quote minus the guard's slippage bound,
+// mined with the far sales.
+describe("replay: the exit-size sale", () => {
+  test("a block on the exit-size sale replays identically, with --check: the guard's slippage bound is the evidence's", async () => {
+    const proof = await proofOf(tokens.exit_size as Address);
+    expect(proof.reasons).toStartWith("exit-size sale (97 %) refused");
+    const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) });
+    expect(failed(lines)).toEqual([]);
+    expect(lines.some((l) => l.ok && l.line.includes(`slippage bound ${SETUP_SLIPPAGE_BPS} bps`))).toBe(true);
+  });
+  test("an exit-size sale of another share than the slippage bound gives: MISMATCH; a slippage bound other than the guard's: --check refuses it", async () => {
+    const proof = await proofOf(tokens.safe as Address);
+    expect(failed(await replay(withEvidence(proof, (e) => (e.slippage_bps = 500)), RPC)).some((l) => l.includes("request shape: exit-size sale: not approve(router,"))).toBe(true);
+    const other = { ...GUARD_INFO, slippage_bps: 500 };
+    expect(failed(await replay(proof, RPC, { check: true, guard: other, chain: onChain(proof) }))).toEqual([expect.stringContaining(`slippage bound ${SETUP_SLIPPAGE_BPS} bps is not the guard's, 500 bps`)]);
+  });
+});
+
 // Judges 7 and 8: the guard's sales run again on a real block mined after the reference block (a fourth
 // request, on its own base block), and the template index window is bound to the check's block.
 describe("replay: the later side and the index window", () => {
@@ -717,6 +735,7 @@ describe("replay: the later side and the index window", () => {
   });
   test("USDC's pool traded while the check waited: replays identically, the trades fetched again from the node and re-executed after the buy", async () => {
     const proof = await proofOf(tokens.usdc as Address, {}, GUARD_EVM, NO_NEAR, true);
+    expect(evidenceOf(proof).later.unverified).toBeNull(); // first: a window of more than MAX_REPLAYED trades names itself here
     expect(evidenceOf(proof).later.replayed.length).toBeGreaterThan(0);
     const lines = await replay(proof, RPC, { check: true, guard: GUARD_INFO, chain: onChain(proof) });
     expect(failed(lines)).toEqual([]);
@@ -724,12 +743,32 @@ describe("replay: the later side and the index window", () => {
   });
   test("a sentinel that leaves out a trade of the pool: MISMATCH", async () => {
     const proof = await proofOf(tokens.usdc as Address, {}, GUARD_EVM, NO_NEAR, true);
+    expect(evidenceOf(proof).later.unverified).toBeNull();
+    expect(evidenceOf(proof).later.replayed.length).toBeGreaterThan(0); // a trade to leave out
     const forged = withEvidence(proof, (e) => (e.later.replayed = e.later.replayed.slice(1)));
     expect(failed(await replay(forged, RPC))).toEqual([expect.stringContaining("is not what the node gives")]);
   });
   test("a proof judged on an index window that does not cover the 2 h before its block: MISMATCH", async () => {
     const proof = withEvidence(await proofOf(tokens.farm_fresh as Address), (e) => (e.reputation.from = e.block - 100));
     expect(failed(await replay(proof, RPC)).some((l) => l.includes("template index window"))).toBe(true);
+  });
+  test("a logs node that answers other hashes for the index window's ends than the simulation node: MISMATCH, never OK", async () => {
+    const proof = await proofOf(tokens.safe as Address);
+    const liar = nodeBefore(RPC, { edit: (m, _, r) => (m === "eth_getBlockByNumber" && r ? { ...(r as object), hash: sha256((r as { hash: Hex }).hash) } : r) });
+    try {
+      expect(failed(await replay(proof, RPC, { indexRpc: liar.url })).some((l) => /answers another hash for block \d+ than the simulation node/.test(l))).toBe(true);
+    } finally {
+      liar.stop();
+    }
+  });
+  test("a young pool's LP holders read again from the logs node, the simulation node refusing eth_getLogs as mainnet.base.org does: replays identically", async () => {
+    const proof = await proofOf(tokens.lp_held as Address);
+    const sim = nodeBefore(RPC, { refuse: ["eth_getLogs"] });
+    try {
+      expect(failed(await replay(proof, sim.url, { indexRpc: RPC }))).toEqual([]);
+    } finally {
+      sim.stop();
+    }
   });
   test("a proof judged on an index window ending before its block (a farm's newest pools dropped): MISMATCH", async () => {
     const proof = withEvidence(await proofOf(tokens.farm_fresh as Address), (e) => (e.reputation.to = e.block - 1));

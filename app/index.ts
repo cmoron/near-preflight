@@ -194,10 +194,12 @@ export function beforeBlock(index: Index, ownPair: Address | null, outside: numb
  *  window (no code at `to`) or funded after it; its funding block (MIN_POOL_WETH net, from its Mint and
  *  Burn logs) when that falls within the window; null only when it already held MIN_POOL_WETH of WETH in
  *  reserve at the block before the window: older than the window by its funding, not by its code (a
- *  pair created empty before the window and funded inside it is judged). */
-export async function ownFunding(url: string, index: Index, ownPair: Address | null): Promise<number | null> {
+ *  pair created empty before the window and funded inside it is judged). Logs from `url`, the pair's code
+ *  and reserves from `state` (the simulation node; `url` by default). */
+export async function ownFunding(url: string, index: Index, ownPair: Address | null, state = url): Promise<number | null> {
   if (!ownPair || Object.values(index.templates).flat().some((p) => p.pair === ownPair.toLowerCase())) return null;
-  const call = <T>(method: string, params: unknown[]) => rpc<T>(url, method, params);
+  const call = <T>(method: string, params: unknown[]) => rpc<T>(state, method, params);
+  const logs = <T>(method: string, params: unknown[]) => rpc<T>(url, method, params);
   if ((await call<Hex>("eth_getCode", [ownPair, toHex(index.to)])) === "0x") return index.to + 1;
   const wethIs0 = `0x${(await call<Hex>("eth_call", [{ to: ownPair, data: TOKEN0 }, toHex(index.to)])).slice(-40)}` === WETH.toLowerCase();
   const at = toHex(index.from - 1);
@@ -206,7 +208,7 @@ export async function ownFunding(url: string, index: Index, ownPair: Address | n
     if (BigInt(`0x${reserves.slice(wethIs0 ? 2 : 66, wethIs0 ? 66 : 130)}`) >= MIN_POOL_WETH) return null;
   }
   let net = 0n;
-  for (const l of await logsIn(url, call, { address: ownPair, topics: [[MINT, BURN]] }, index.from, index.to)) {
+  for (const l of await logsIn(url, logs, { address: ownPair, topics: [[MINT, BURN]] }, index.from, index.to)) {
     net = addWeth(net, l, wethIs0);
     if (net >= MIN_POOL_WETH) return Number(BigInt(l.blockNumber));
   }

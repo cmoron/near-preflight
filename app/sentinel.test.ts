@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { toHex } from "viem";
 import { INDEX_SPAN_S, windowProblem } from "./index";
 import type { Check } from "./near";
-import { indexer, step } from "./sentinel";
+import { indexer, refusal, step } from "./sentinel";
 import { patientFetch, rpc, stampOf } from "./verifier";
 
 const check = (verdict: Check["verdict"]): Check => ({
@@ -56,6 +56,32 @@ describe("two sentinels, both needed", () => {
     expect(step({ ...voted("s1.test", "allow", "allow"), exit_amount: "5" }, 100, 100, "s2.test", 2)).toBe("skip");
     expect(step({ ...check(null), exit_amount: "5" }, 100, 100, "s2.test", 2)).toBe("judge");
   });
+});
+
+// Review of a274879: restarted by check-mainnet.sh, the sentinels voted mainnet warns on fork checks #8 and #9,
+// decided blocks still short of the quorum. A sentinel now votes only on checks requested since it started:
+// its own run, on the node it was given (a fork check and a mainnet one share chain id 8453 and the guard).
+describe("checks from before this sentinel started", () => {
+  const at = (ns: string, c: Check): Check => ({ ...c, requested_ns: ns });
+  const blocked: Check = { ...check("block"), votes: [{ sentinel: "s1.test", verdict: "block", evidence_sha256: "" }] };
+  test("requested before its start: skipped, undecided or a block short of the quorum", () => {
+    expect(step(at("4", check(null)), 100, 100, "s2.test", 2, 5n)).toBe("skip");
+    expect(step(at("4", blocked), 100, 100, "s2.test", 2, 5n)).toBe("skip");
+  });
+  test("requested since its start: judged as before, a block short of the quorum too (listing takes it)", () => {
+    expect(step(at("5", check(null)), 100, 100, "s2.test", 2, 5n)).toBe("judge");
+    expect(step(at("6", blocked), 100, 100, "s2.test", 2, 5n)).toBe("judge");
+    expect(step(at("6", blocked), 100, 100, "s1.test", 2, 5n)).toBe("skip"); // its own vote is in
+  });
+});
+// A vote the guard refuses because the sentinel set or the quorum changed since this one read them.
+describe("a vote refused for the set or the quorum", () => {
+  test("decided by others, or a quorum lowered: settled, the set and quorum read again", () => {
+    expect(refusal("Smart contract panicked: verdict already posted")).toBe("settled");
+    expect(refusal("Smart contract panicked: sentinel already voted")).toBe("settled");
+  });
+  test("no longer one of the guard's sentinels: the set read again", () => expect(refusal("Smart contract panicked: sentinel only")).toBe("not a sentinel"));
+  test("any other refusal: retried as a failure", () => expect(refusal("tx hashes are not what the guard would sign now: preview again")).toBeNull());
 });
 
 // Batch 9: the later side reads 100 blocks of receipts from Base's public node, which answers HTTP 429

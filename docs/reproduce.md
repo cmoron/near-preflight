@@ -29,12 +29,12 @@ No NEAR account, no key: `GUARD` only names the contract to read.
 git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun install
 export GUARD=guard.goblin-guard-69369.testnet
 INDEX_RPC=https://base-rpc.publicnode.com bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
-#   41 OK lines, then: REPLAY OK: verdict allow confirmed, same as on chain
+#   43 OK lines, then: REPLAY OK: verdict allow confirmed, same as on chain
 bun app/attest.ts app/fixtures/decision.json --check 1
 #   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)
 ```
 
-- `replay` resends check #22 (USDC on Base mainnet) to `mainnet.base.org`, traces it on throwaway anvil
+- `replay` resends check #28 (USDC on Base mainnet) to `mainnet.base.org`, traces it on throwaway anvil
   forks, mines its far sales there again, rebuilds its template index from `INDEX_RPC` (a node that
   serves logs), rejudges it and compares everything with the guard
   ([what it checks](replay.md#what-replay-recomputes)).
@@ -45,7 +45,7 @@ Then every trap on a local Base fork, as CI runs it:
 
 ```sh
 echo GUARD=$GUARD > .env && evm/fork.sh    # Base fork at block 55836672 ready on http://127.0.0.1:8545 (about 30 s)
-bun test --timeout 30000                   # in another terminal: 333 pass, 0 fail (5 to 6 min)
+bun test --timeout 30000                   # in another terminal: 350 pass, 0 fail (6 to 7 min)
 ```
 
 `evm/fork.sh` starts anvil on a copy of Base at block 55,836,672 and deploys the demo tokens at fixed
@@ -68,7 +68,7 @@ reverts the fork; `demo.sh` mines one a second (`bun app/testkit.ts live`).
    and creates `agent.`, `agent2.`, `sentinel.`, `sentinel2.` and `armer.`, each with a function-call key
    limited to the guard. An `allow` takes both sentinels' votes; the armer, a key apart from the agent's,
    opens the agent's armed budget.
-4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`333 pass`) and
+4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`350 pass`) and
    `bunx tsc --noEmit` (exit 0).
 5. **Run the demo.** `./demo.sh` exits 0 in 3 to 5 min (255 and 290 s with the live model, measured with one sentinel; each check waits for Base blocks and for both votes), in four moments:
    - a poisoned inbox message pushes the agent to a trap: `BLOCK (sale refused N s after the buy …)`,
@@ -90,15 +90,20 @@ The journal reads any guard: `https://cmoron.github.io/near-preflight/journal.ht
 
 ## Real Base
 
-`./check-mainnet.sh` exits 0 in about a minute and a half (81 s here, with both sentinels; longer when
-its pool trades during the wait). The armer arms; each sentinel simulates USDC on Base mainnet
-(`mainnet.base.org`, read only, nothing broadcast), traces it on an anvil forked from it, builds the
+`./check-mainnet.sh` exits 0 in about a minute and a half (68 s here, with both sentinels; longer when
+its pool trades during the wait). The armer arms; each sentinel simulates USDC on Base mainnet (read
+only, nothing broadcast) on its own nodes, traces it on an anvil forked from its node, builds the
 template index over the 2 h before the check's block, waits for the later side's block and posts its
 vote. Then the armer disarms the agent, and the first sentinel's proof is replayed with `--check`.
 
-- **The index** reads `INDEX_RPC`, `https://base-rpc.publicnode.com` by default: `mainnet.base.org`
-  refuses `eth_getLogs`. Here each sentinel built the same one (blocks 56,606,606 to 56,642,602, same
-  sha256) in 54 requests, 3 to 3.5 s.
+- **The nodes.** The first sentinel simulates on `mainnet.base.org` and reads logs from
+  `base.public.blockpi.network` (`INDEX_RPC`: `mainnet.base.org` refuses `eth_getLogs`); the second reads
+  `base-rpc.publicnode.com` for both (`EVM_RPC_2`, `INDEX_RPC_2`). Each logs node must give the check's
+  block and the index window's start the hashes its simulation node gives them. A real deployment gives
+  each sentinel its own machine and providers no other sentinel reads, in the same variables. On the local
+  fork both read the fork. Each proof names its nodes (`nodes`), and the script prints them.
+- **The index.** Here each sentinel built the same one (blocks 56,623,006 to 56,659,002, same sha256)
+  in 52 requests, 3.0 and 3.9 s.
 - **The verdict is `allow`**, from both sentinels: USDC's pool held 0.5 ETH before the window, so
   reputation is "not applied", a note. When USDC/WETH trades during the wait, the trades are re-executed
   after the buy, or a second reason says the resale was not verified, a `warn`
@@ -106,9 +111,9 @@ vote. Then the armer disarms the agent, and the first sentinel's proof is replay
 - **Nothing is signed.** The script never calls `buy`, and it disarms the agent once the verdict is in:
   `buy` needs an armed budget, so the guard signs no swap for that `allow`. The guard's Base address
   holds no ETH on mainnet.
-- **The proof.** Check #22's ships as `app/fixtures/usdc-base-mainnet.json` (nobody traded its pool
-  during its wait; its far sales ran 301 s, 572 s and 900 s after the buy). Both sentinels posted that
-  very evidence string: the one file is the proof of both votes.
+- **The proof.** Check #28's ships as `app/fixtures/usdc-base-mainnet.json` (nobody traded its pool
+  during its wait; its far sales ran 301 s, 831 s and 900 s after the buy). Both sentinels posted that
+  very evidence string, from three providers: the one file is the proof of both votes.
 
 To build an index by hand: `bun app/index.ts <rpc> <from> <to> <out.json> --pace-ms 1000`. The
 measurements are in [sentinel](sentinel.md#measured-on-real-base).
@@ -125,7 +130,7 @@ measurements are in [sentinel](sentinel.md#measured-on-real-base).
 | `../.env missing`                                | `evm/fork.sh` needs `GUARD` in `.env` (or `GUARD_EVM`)                                                                                                                                                                                     |
 | `transaction differs from the one simulated`     | another signature or a gas change happened since the verdict: request a new check                                                                                                                                                          |
 | `verdict expired`                                | more than 120 s since the verdict: request a new check                                                                                                                                                                                     |
-| `./demo.sh` was interrupted                      | run it again: a check it left pending is judged first, and the owner unlists or lifts the quarantine of a trap that check blocks again |
+| `./demo.sh` was interrupted                      | run it again: a check it left pending is not judged by the new sentinels (they vote only on checks requested since they started); the demo waits out its 300 s |
 | `target is quarantined after a block verdict`    | a check blocked that token less than 30 min ago: wait, or the owner lifts it (`app/human.ts lift <token>`)                                                                                                                                |
 | `a check of this target is already awaiting its verdict` | one check per token at a time, for all agents: wait for its verdict (at most 300 s)                                                                                                                                              |
 | `check requested more than 180 s ago`            | the verdict came late or the buy waited: request a new check                                                                                                                                                                               |

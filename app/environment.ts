@@ -178,8 +178,10 @@ export async function reachOf(url: string, hash: Hex, token: Address, implementa
 }
 
 /** The far sales' runs (app/verifier.ts farBlocks, farRequest): the probe-side request, the far
- *  request, and `until`, the block of the late sale's approve: each side's blocks before it run first. */
-export type FarRuns = { probe: Request; far: Request; until: number };
+ *  request (each side's far sales, then its exit-size sale), `until`, the block of the late sale's
+ *  approve: each side's blocks before it run first, and `first`, the first sale's approve's: the
+ *  exit-size sale runs after the side's blocks before it, its buy alone. */
+export type FarRuns = { probe: Request; far: Request; until: number; first: number };
 
 const blocksOf = (q: Request) => (q.params as [{ blockStateCalls: SimBlock[] }])[0].blockStateCalls;
 const same = (a: string | undefined, b: string) => a?.toLowerCase() === b.toLowerCase();
@@ -193,8 +195,9 @@ function runner(local: string, token: Address, implementation: Address | null) {
   /** Mines `run` on the fork from where it stands, its senders funded and impersonated as `side`'s first
    *  block says; a gap before a block is mined at once, empty. With `own`, records what each call touches
    *  and what the token's code reaches. Returns each call sent, in order, with the addresses it accessed,
-   *  and a snapshot taken before block `pause` (a revert there keeps the state fetched before it). */
-  const mine = async (run: SimBlock[], side: SimBlock[], own: boolean, pause = -1n) => {
+   *  and a snapshot taken before each block of `pause`, in order (a revert there keeps the state fetched
+   *  before it; a revert to one drops those taken after it). */
+  const mine = async (run: SimBlock[], side: SimBlock[], own: boolean, pause: bigint[] = []) => {
     const set = new Map(Object.entries(side[0].stateOverrides ?? {}).map(([a, o]) => [a.toLowerCase(), o.balance]));
     const calls = run.flatMap((b) => b.calls);
     for (const s of new Set(calls.map((c) => c.from.toLowerCase()))) {
@@ -205,13 +208,13 @@ function runner(local: string, token: Address, implementation: Address | null) {
       if (first) await call("anvil_setNonce", [s, first]);
     }
     const sent: { hash: Hex; accessed: Set<string> }[] = [];
-    let paused: Hex | null = null;
+    const paused: Hex[] = [];
     const latest = await call<{ number: Hex; timestamp: Hex }>("eth_getBlockByNumber", ["latest", false]);
     let [at, last] = [BigInt(latest.number), latest.timestamp];
     for (const b of run) {
       const n = BigInt(b.blockOverrides.number);
       if (n <= at) throw new Error(`trace: block ${n} does not follow block ${at}`);
-      if (n === pause) paused = await call<Hex>("evm_snapshot", []);
+      if (pause.includes(n)) paused.push(await call<Hex>("evm_snapshot", []));
       // a gap (a far sale's, or the blocks a run skips): empty blocks, mined at once from the time of
       // the block before them (only BLOCKHASH, a flagged opcode, sees them); the next block gets its
       // own time below. Left to the fork's clock, which runs on while it fetches state from the node,
@@ -271,9 +274,10 @@ function runner(local: string, token: Address, implementation: Address | null) {
  *  With `far`, the far sales on the same fork, each from where its run starts: for the guard, back before
  *  its late approve, the empty blocks up to the far sale mined at once (anvil_mine: in memory, the last
  *  300 states kept), then its far approve and swap at their numbers and times, traced as above; then back
- *  at `block`, the probe side's buy and first sale at their blocks and times, and from there each of its
- *  far approves and swaps after its gap, not traced. `far` holds their results in farBlocks' order, as
- *  eth_simulateV1 gives them (resultOf). */
+ *  before its first approve, its exit-size sale at the late sale's blocks, traced too; then back at
+ *  `block`, the probe side's buy and first sale at their blocks and times, and from there each of its far
+ *  approves and swaps after its gap, then back after its buy, its exit-size sale, not traced. `far` holds
+ *  their results in farBlocks' order, as eth_simulateV1 gives them (resultOf). */
 export async function trace(url: string, guard: Request, block: number, token: Address, implementation: Address | null, far?: FarRuns): Promise<Trace & { far: Result[] | null }> {
   const blocks = blocksOf(guard);
   const fork = await forkAt(url, block);
@@ -281,7 +285,7 @@ export async function trace(url: string, guard: Request, block: number, token: A
   const { call, mine, reach } = runner(local, token, implementation);
   try {
     const start = await call<Hex>("evm_snapshot", []);
-    const guardSide = await mine(blocks, blocks, true, far ? BigInt(far.until) : -1n);
+    const guardSide = await mine(blocks, blocks, true, far ? [BigInt(far.first), BigInt(far.until)] : []);
     const [buy] = guardSide.sent;
     if (!buy) throw new Error("trace: no transaction in the guard-side request");
     const sender = blocks[0].calls[0].from;
@@ -304,23 +308,34 @@ export async function trace(url: string, guard: Request, block: number, token: A
       results = [];
       const all = blocksOf(far.far);
       const pairs = (bs: SimBlock[]) => bs.flatMap((b, i) => (i % 2 ? [] : [bs.slice(i, i + 2)])); // an approve, its swap
-      const [guardFar, probeFar] = [pairs(all.slice(0, all.length / 2)), pairs(all.slice(all.length / 2))]; // farBlocks' order
-      // The guard: back before its late approve (the state fetched so far kept), each far sale after a gap.
-      let mark = guardSide.paused;
-      for (const run of guardFar) {
+      // farBlocks' order: each side's far sales, then its exit-size sale
+      const [guardRuns, probeRuns] = [pairs(all.slice(0, all.length / 2)), pairs(all.slice(all.length / 2))];
+      const sent = async (run: Promise<{ sent: { hash: Hex }[] }>) => {
+        for (const { hash } of (await run).sent) results!.push(await resultOf(local, hash));
+      };
+      // The guard: back before its late approve (the state fetched so far kept), each far sale after a gap;
+      // then back before its first approve, its exit-size sale.
+      const [afterBuy, beforeLate] = guardSide.paused;
+      let mark = beforeLate;
+      for (const run of guardRuns.slice(0, -1)) {
         await call("evm_revert", [mark]);
         mark = await call<Hex>("evm_snapshot", []);
-        for (const { hash } of (await mine(run, blocks, true)).sent) results.push(await resultOf(local, hash));
+        await sent(mine(run, blocks, true));
       }
-      // The probe: back at `block`, its buy and first sale at their blocks, then each far sale from there.
+      await call("evm_revert", [afterBuy]);
+      await sent(mine(guardRuns.at(-1)!, blocks, true));
+      // The probe: back at `block`, its buy and first sale at their blocks, then each far sale from there;
+      // then back after its buy alone, its exit-size sale.
       const probe = blocksOf(far.probe);
       await call("evm_revert", [start]);
-      await mine(probe.filter((b) => b.calls.length && BigInt(b.blockOverrides.number) < BigInt(far.until)), probe, false);
-      for (const run of probeFar) {
+      const [probeBought] = (await mine(probe.filter((b) => b.calls.length && BigInt(b.blockOverrides.number) < BigInt(far.until)), probe, false, [BigInt(far.first)])).paused;
+      for (const run of probeRuns.slice(0, -1)) {
         mark = await call<Hex>("evm_snapshot", []);
-        for (const { hash } of (await mine(run, probe, false)).sent) results.push(await resultOf(local, hash));
+        await sent(mine(run, probe, false));
         await call("evm_revert", [mark]);
       }
+      await call("evm_revert", [probeBought]);
+      await sent(mine(probeRuns.at(-1)!, probe, false));
     }
     return { ...reach(), diff, far: results };
   } finally {

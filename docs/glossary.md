@@ -20,6 +20,7 @@ One line per term, in alphabetical order. Links go to the page that explains it.
 | **environment rule**   | a token whose transfers read what a simulation cannot reproduce is not allowed ([sentinel](sentinel.md#environment-rule))  |
 | **escrow**             | NEAR the guard holds for nobody yet: checks awaiting a verdict, signatures in progress                                     |
 | **evidence**           | the facts a verdict rests on, posted with it; the guard stores its sha256                                                  |
+| **exit-size sale**     | a sale of what an agent's exit sells, the quote minus the slippage bound (97 %), at every check ([sentinel](sentinel.md#the-agents-exit-size)) |
 | **exit quote**         | the sentinel's simulation of an agent's sale; it sets the sale's floor                                                     |
 | **far sale**           | the late sale again, 301 s and 900 s after the buy and at a delay drawn between, on a local fork whose clock moves ([sentinel](sentinel.md#the-far-sale)) |
 | **farm**               | someone who launches copies of one code, funds each pool, then pulls the liquidity                                         |
@@ -41,7 +42,7 @@ One line per term, in alphabetical order. Links go to the page that explains it.
 | **per-token cap**      | the most all agents together may buy of one token per rolling period, set by the owner ([contract](contract.md#token-limits)) |
 | **probe**              | a fresh address derived per check, from which the sentinel repeats the buy and sales                                       |
 | **proof file**         | `proofs/<id>.json`: the requests, the responses and the evidence of one check ([replay](replay.md#the-proof-file))         |
-| **quarantine**         | after a `block`, the token can be neither checked nor bought for the owner's period (30 min by default) |
+| **quarantine**         | after a `block` on the token's code, it can be neither checked nor bought for the owner's period (30 min by default) |
 | **quorum**             | how many sentinels must post the same `allow` or `warn` for it to count; any one blocks ([contract](contract.md#sentinel-quorum)) |
 | **reference block**    | the first Base block at least 4 s after a check's request on NEAR: the check simulates on it                               |
 | **relay**              | a program with no key that broadcasts a transaction NEAR signed; here only to anvil                                        |

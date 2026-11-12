@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { concat, decodeAbiParameters, encodeAbiParameters, encodeFunctionData, keccak256, pad, parseAbi, parseEther, parseTransaction, stringToHex, toHex, type Address, type Hex } from "viem";
 import tokens from "../evm/tokens.json";
 import { buildIndex, type Index } from "./index";
-import { CHECK_BLOCKS, localPreviews, mine, SETUP_FEES, USERS } from "./testkit";
+import { CHECK_BLOCKS, localPreviews, mine, nodeBefore, SETUP_FEES, SETUP_SLIPPAGE_BPS, USERS } from "./testkit";
 import {
   checkExit,
   checkToken,
@@ -373,6 +373,17 @@ describe("the check's sales are where and what a token cannot expect", () => {
     const ticket = { guard: "guard.test", id: 1, requested_ns: "0" };
     expect(deriveProbes(ticket, keccak256("0x01"), CADENCE).sale).not.toEqual(deriveProbes(ticket, keccak256("0x02"), CADENCE).sale); // the hash of a block not mined yet
   });
+  // After demo.sh the fork's 100 blocks before a reference block took about 200 s (its miner, a block a
+  // second of wall clock, is slower than that): 900 s was then 447 blocks, which land 898 s after the buy.
+  test("the far sales' fixed ends land at least 301 s and 900 s after the buy at any cadence, 2.01 s a block too (pure)", () => {
+    for (let seconds = 1; seconds <= 400; seconds++) {
+      const c = { blocks: 100, seconds };
+      const [lo, hi] = saleRanges(c).far.map((n) => secondsAfterBuy(c, n));
+      expect([lo >= 301, hi >= 900, lo < 301 + Math.max(1, seconds / 100), hi < 900 + Math.max(1, seconds / 100)]).toEqual([true, true, true, true]);
+    }
+    expect(saleRanges({ blocks: 100, seconds: 20 }).far).toEqual([1505, 4500]); // Base: unchanged
+    expect(saleRanges(CADENCE).far).toEqual([301, 900]); // the fork's regular clock: unchanged
+  });
   test("a simulated block has the time a real one would have at the cadence measured: at 100 blocks in 20 s, five share each second (pure)", () => {
     const head = { number: "0x64", timestamp: "0x3e8" } as unknown as Header; // block 100 at 1,000 s, the first of its second
     expect(Array.from({ length: 11 }, (_, k) => Number(timeOf(head, { blocks: 100, seconds: 20 }, 100n + BigInt(k)) - 1000n))).toEqual([0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2]);
@@ -401,6 +412,33 @@ describe("the check's sales are where and what a token cannot expect", () => {
     const amounts = [g[1], g[3]].map((c) => decodeAbiParameters([{ type: "address" }, { type: "uint256" }], `0x${c.data.slice(10)}`)[1]); // the two approves
     const bought = amounts[0] + amounts[1];
     expect(amounts[0]).toBe((bought * BigInt(r.evidence.sales.bps)) / 10_000n);
+  });
+});
+
+// Review of a274879: the check sold a drawn 13 % to 87 % of what the guard bought, then all the rest; an
+// agent's exit sells its holding, credited at the signed minimum (the quote minus the guard's slippage
+// bound): 97 % of its balance. A token refusing sales of 88 % to 99.99 % of a balance passed every check.
+describe("the agent's exit size", () => {
+  test("ExitSizeTrap, a sale of 88 % to 99.99 % of the balance refused: every drawn sale goes through, the exit-size sale refused: block, not listed", async () => {
+    const r = await check(tokens.exit_size);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toMatch(/^exit-size sale \(97 %\) refused \d+ s after the buy \(TransferHelper: TRANSFER_FROM_FAILED\)/);
+    expect(r.list_target).toBe(false); // the last sale, 900 s after the buy, goes through: a size refusal never lists
+    const drawn = r.evidence.calls.filter((c) => /(^|: )sale (first|late): /.test(c)); // the first and late sales, the later side's and the far ones, both sides
+    expect(drawn).toContain(`${FARS[2]}sale late: ok`);
+    expect(drawn.every((c) => c.endsWith(": ok"))).toBe(true);
+  });
+  test("it sells the quote minus the guard's slippage bound (the agent's holding), from the guard's whole balance, at the late sale's blocks, traced; the probe's twin likewise; USDC: allow", async () => {
+    const r = await check(tokens.usdc);
+    expect(r.verdict).toBe("allow");
+    expect(r.evidence.slippage_bps).toBe(SETUP_SLIPPAGE_BPS);
+    const far = (r.request[4].params[0] as { blockStateCalls: { blockOverrides: { number: Hex }; calls: { from: string; data: Hex }[] }[] }).blockStateCalls;
+    const [approve, swap] = far.slice(6, 8); // the guard's: after its three far sales
+    expect([approve, swap].map((b) => Number(BigInt(b.blockOverrides.number)) - r.evidence.block)).toEqual([r.evidence.sales.late, r.evidence.sales.late + 1]);
+    const sold = decodeAbiParameters([{ type: "address" }, { type: "uint256" }], `0x${approve.calls[0].data.slice(10)}`)[1];
+    expect(sold).toBe((BigInt(r.evidence.quote) * BigInt(10_000 - SETUP_SLIPPAGE_BPS)) / 10_000n);
+    expect(approve.calls[0].from.toLowerCase()).toBe(GUARD_EVM.toLowerCase());
+    for (const l of [`${GUARD}approve router exit`, `${GUARD}sale exit`, "approve router exit", "sale exit"]) expect(r.evidence.calls).toContain(`${l}: ok`);
   });
 });
 
@@ -455,9 +493,9 @@ describe("others trade the token's pool while the check waits", () => {
   };
   test("USDC: their trades re-executed after the buy, the resale verified on Base's later state, allow", async () => {
     const r = await traded(tokens.usdc);
+    expect(r.evidence.later!.unverified).toBeNull(); // first: a window of more than MAX_REPLAYED trades names itself here
     expect(r.evidence.later!.moved.length).toBeGreaterThan(0);
     expect(r.evidence.later!.replayed.length).toBeGreaterThan(0);
-    expect(r.evidence.later!.unverified).toBeNull();
     const again = r.evidence.calls.filter((c) => c.startsWith(`${LATER}${GUARD}sale`));
     expect(again).toContain(`${LATER}${GUARD}sale late: ok`);
     expect(again.every((c) => c.endsWith(": ok"))).toBe(true);
@@ -465,8 +503,8 @@ describe("others trade the token's pool while the check waits", () => {
   });
   test("a honeypot whose pool others buy from: their trades re-executed, its sale refused there too, block", async () => {
     const r = await traded(tokens.sell_blocked);
-    expect(r.evidence.later!.replayed.length).toBeGreaterThan(0);
     expect(r.evidence.later!.unverified).toBeNull();
+    expect(r.evidence.later!.replayed.length).toBeGreaterThan(0);
     expect(r.evidence.calls).toContain(`${LATER}${GUARD}sale late: revert`); // judged on the frozen side's refusal already
     expect(r.verdict).toBe("block");
     expect(r.list_target).toBe(true); // the probe's sale on the frozen side
@@ -606,7 +644,10 @@ describe("a sale closed for the guard alone, minutes after its buy", () => {
       return { ...p, sale: { ...p.sale, far: saleRanges(c).far[0] } };
     }, { index: INDEX, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(tokens.guard_later, GUARD_EVM) });
     expect(r.verdict).toBe("block");
-    expect(r.reasons).toContain("guard address only, not listed: sale refused 900 s after the buy (");
+    // the 900 s end at the cadence measured: 900 s on a regular fork, at least that after demo.sh's slower blocks
+    const end = secondsAfterBuy(r.evidence.cadence, saleRanges(r.evidence.cadence).far[1]);
+    expect(end).toBeGreaterThanOrEqual(900);
+    expect(r.reasons).toContain(`guard address only, not listed: sale refused ${end} s after the buy (`);
     expect(r.list_target).toBe(false);
   });
   test("J9GuardLater, four checks, each with its own draws: block at every one", async () => {
@@ -675,9 +716,9 @@ describe("dust is the pool's quote for the amount, not what the token delivers (
    *  the takebacks revert, the sales succeed without logs (their tax is not measurable: never listed). */
   const judged = async (quoted: bigint, got: bigint) => {
     const p = localPreviews({ guard: w.guard, target: token, amount: AMOUNT });
-    const txs = { buy: (await p.check(0n))[0], sales: [await p.sale(1n, 0n), await p.sale(1n, 0n)] as [Hex[], Hex[]] };
+    const txs = { buy: (await p.check(0n))[0], sales: [await p.sale(1n, 0n), await p.sale(1n, 0n)] as [Hex[], Hex[]], exit: await p.sale(1n, 0n) };
     const sales = { first: 10, bps: 5001, late: 40, far: 400 };
-    const full = got >= 10n ? { amounts: { guard: got, probe: got }, owner: null, sale: sales } : undefined; // under 10 units the check stops at the buy
+    const full = got >= 10n ? { amounts: { guard: got, probe: got }, owner: null, sale: sales, slippage_bps: p.slippage_bps } : undefined; // under 10 units the check stops at the buy
     const labels = labelsOf(plan(token, w, 100n, AMOUNT, txs, full));
     const results = labels.map((l): Result => {
       if (l === "buy quote") return okWith([], encodeAbiParameters([{ type: "uint256[]" }], [[AMOUNT, quoted]]));
@@ -686,7 +727,7 @@ describe("dust is the pool's quote for the amount, not what the token delivers (
       return l.includes("transferFrom") ? { status: "0x0", returnData: "0x" } : okWith();
     });
     const liquidity = { pair, supply: "1", supply_before: "1", created: null, candidates: 0, holders: null }; // old: no finding
-    return judge(labels, results, { block: 100, cadence: CADENCE, code_hash: `0x${"00".repeat(32)}`, implementation: null, liquidity, reputation: null, near: NO_NEAR, opcodes: [], touched: [], token_calls: [], token_balances: [], token_opcodes: [], sales, later: null }, w);
+    return judge(labels, results, { block: 100, cadence: CADENCE, code_hash: `0x${"00".repeat(32)}`, implementation: null, liquidity, reputation: null, near: NO_NEAR, opcodes: [], touched: [], token_calls: [], token_balances: [], token_opcodes: [], sales, slippage_bps: p.slippage_bps, later: null }, w);
   };
   test("a buy that delivers 500 units where the pool quotes 10^18: block, listed", async () => {
     const r = await judged(10n ** 18n, 500n);
@@ -739,6 +780,36 @@ describe("a resale not verified on Base's later state (pure)", () => {
   });
   test("verified, the sale refused there: block", () => {
     expect(of(null)).toEqual([{ level: "block", text: "sale refused 40 s after the buy on Base's state of block 120 (revert without reason)" }]);
+  });
+});
+
+// Review of a274879: a verdict draws on two nodes, the simulation's (EVM_RPC) and the logs' (INDEX_RPC),
+// which nothing tied together; and a young pool's LP holders were read from the simulation node, which
+// mainnet.base.org refuses (eth_getLogs): a fresh honest token got a block.
+describe("the logs node and the simulation node", () => {
+  /** A check of `token` simulated on `sim`, its logs (index window, own pool, LP holders) read on `logs`. */
+  const across = async (token: string, sim: string, logs: string) => {
+    const requested_ns = ((await headTime()) * 1_000_000_000n).toString();
+    await mine(RPC, CHECK_BLOCKS);
+    return checkToken(sim, token as Address, GUARD_EVM, probes, { requested_ns, index: INDEX, indexRpc: logs, near: async () => NO_NEAR, amount: AMOUNT, preview: await previews(token, GUARD_EVM) });
+  };
+  test("a logs node that answers another hash for the check's block (another chain, or a lie): no verdict, which the sentinel turns into a block, never an allow", async () => {
+    const liar = nodeBefore(RPC, { edit: (m, _, r) => (m === "eth_getBlockByNumber" && r ? { ...(r as object), hash: keccak256((r as { hash: Hex }).hash) } : r) });
+    try {
+      await expect(across(tokens.safe, RPC, liar.url)).rejects.toThrow(/answers another hash for block \d+ than the simulation node/);
+    } finally {
+      liar.stop();
+    }
+  });
+  test("a young pool's LP holders come from the logs node, the simulation node refusing eth_getLogs as mainnet.base.org does: warn, as on one node", async () => {
+    const sim = nodeBefore(RPC, { refuse: ["eth_getLogs"] });
+    try {
+      const r = await across(tokens.lp_held, sim.url, RPC);
+      expect(r.verdict).toBe("warn");
+      expect(r.reasons).toContain("100 % of the LP removable now");
+    } finally {
+      sim.stop();
+    }
   });
 });
 
@@ -964,15 +1035,16 @@ describe("proof", () => {
     // one per L1 epoch from the first simulated block's to the last one's (the fork's sequence number moves when
     // other tests emulate the sequencer, so the first block is not always in the base block's epoch)
     expect(new Set(guardSide.map((b) => b.blockOverrides.prevRandao)).size).toBe(Number(epochOf(block + late + 1n) - epochOf(block + 1n)) + 1);
-    // the far sales: the guard's late approve and swap 301 s, `far` blocks and 900 s after the buy, then the
-    // probe's, mined on a local fork at those numbers and times (a block a second here), past eth_simulateV1's 256
+    // the far sales: the guard's late approve and swap 301 s, `far` blocks and 900 s after the buy, then its
+    // exit-size sale at the late sale's blocks; then the probe's, mined on a local fork at those numbers and
+    // times (a block a second here), past eth_simulateV1's 256
     expect(r.request[4].method).toBe(FAR_METHOD);
     const far = (r.request[4].params[0] as { blockStateCalls: { blockOverrides: Record<string, string>; calls: { from: string; data: string }[] }[] }).blockStateCalls;
     const f = BigInt(r.evidence.sales.far);
-    const side = [301n, 302n, f, f + 1n, 900n, 901n];
+    const side = [301n, 302n, f, f + 1n, 900n, 901n, late, late + 1n];
     expect(far.map((b) => BigInt(b.blockOverrides.number) - block)).toEqual([...side, ...side]);
     expect(f).toBeGreaterThan(256n);
-    expect(far.map((b) => b.calls.map((c) => c.data.slice(0, 10)))).toEqual(Array(6).fill([["0x095ea7b3"], ["0x791ac947"]]).flat());
+    expect(far.map((b) => b.calls.map((c) => c.data.slice(0, 10)))).toEqual(Array(8).fill([["0x095ea7b3"], ["0x791ac947"]]).flat());
     expect(far[0].calls[0] as unknown).toEqual(guardSide[Number(late) - 1].calls[0]); // the late sale's very approve
   });
   test("carries a proxy's implementation (USDC)", async () => {

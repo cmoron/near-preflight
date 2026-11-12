@@ -20,6 +20,7 @@ Every fact a verdict rests on goes into the **evidence**, whose sha256 the guard
 - [Base's cadence](#bases-cadence)
 - [Sales drawn per check](#sales-drawn-per-check)
 - [The far sale](#the-far-sale)
+- [The agent's exit size](#the-agents-exit-size)
 - [Environment rule](#environment-rule)
 - [Verdicts and listing](#verdicts-and-listing)
 - [Removable liquidity](#removable-liquidity)
@@ -34,6 +35,7 @@ Every fact a verdict rests on goes into the **evidence**, whose sha256 the guard
 | -------------------- | -------------------------------------------------------------------------------- | --------------------------------------------- |
 | Buy, takeback, sales | `eth_simulateV1`: four requests, below                                           | see below                                     |
 | Far sales            | the late sale again 301 s and 900 s after the buy, and at a delay drawn between  | see below                                     |
+| Agent exit size      | a sale of the agent's holding (quote minus the slippage bound), at the late sale | see below                                     |
 | Cadence              | the timestamps of the reference block and of the 100th block before it           | none: it turns the rules' seconds into blocks |
 | Removable liquidity  | the Uniswap V2 WETH pair's LP supply now and 1 h back, by the blocks' timestamps | see below                                     |
 | Template reputation  | the index of V2 WETH pools by code template ([`app/index.ts`](../app/index.ts))  | see below                                     |
@@ -44,9 +46,15 @@ Every fact a verdict rests on goes into the **evidence**, whose sha256 the guard
 | The token's own code | the same replay: what its frames call, and the TIMESTAMP, NUMBER, SELFBALANCE they run | found: `warn`; a CREATE: `block`        |
 | Agent exit quote     | `eth_simulateV1`: the guard's own approve and swap, alone, 2 and 3 blocks ahead  | quote = ETH in                                |
 
-A check that fails (an RPC error, an index window not bound to the check) is retried; after 3 tries
-the sentinel posts a `block`: `simulation impossible after 3 tries : …`. One sentinel's block is
-enough to block the check; posted without the token's code, it quarantines nothing.
+A check that fails (an RPC error, an index window not bound to the check, a logs node on another chain)
+is retried; after 3 tries the sentinel posts a `block`: `simulation impossible after 3 tries : …`. One
+sentinel's block is enough to block the check; posted without the token's code, it quarantines nothing.
+
+A sentinel votes only on checks requested since it started (30 s of margin for the clocks): an older
+one is another run's, perhaps on another chain (the fork and Base share chain id 8453 and the demo
+guard); left undecided, it times out after 300 s and its agent takes its price back (`refund_check`). A
+vote the guard refuses because the check takes no more, or because this account left the set, makes the
+sentinel read the set and the quorum again; out of the set, it stops.
 
 ## The four requests
 
@@ -113,8 +121,9 @@ bytes NEAR will sign. An exit's own approve and swap are simulated again, as sig
 [exit quote](#exit-quotes).
 
 Past the four requests, the late sale runs three more times, minutes later, on a local fork:
-[the far sales](#the-far-sale). The later side runs on a local fork too, traced like the guard side
-([environment rule](#environment-rule)).
+[the far sales](#the-far-sale), and a sale of what an agent's exit sells runs there too:
+[the agent's exit size](#the-agents-exit-size). The later side runs on a local fork too, traced like the
+guard side ([environment rule](#environment-rule)).
 
 **Amounts come from logs**, never from a read between transactions: tokens bought from the token's
 `Transfer` logs; the ETH a sale pays from the ETH transfers `traceTransfers` logs; a sale's quote from
@@ -240,6 +249,7 @@ which Base's node accepts. The same code measures it.
 | Late sale  | 30 to 51 s after the buy (150 to 255 blocks on Base)       | the rest; the request ends there                           |
 | Later side | the first real block 16 to 24 s after the reference block  | the sales whose approve comes after it, again              |
 | Far sale   | 301 to 900 s after the buy (1,505 to 4,500 blocks on Base) | the late sale again on a local fork, as at 301 s and 900 s |
+| Exit size  | at the late sale, not drawn                                | the agent's holding: the quote minus the slippage bound    |
 
 The probes, the sales and the later side's wait are drawn by `deriveProbes` from:
 
@@ -273,7 +283,10 @@ move ([`app/environment.ts`](../app/environment.ts) `trace`):
 - **The probe.** Back at the reference block, in runs of its own: its buy and first sale at their blocks
   and times, then for each delay the empty blocks mined at once and its late approve and swap.
 
-Both ends are fixed. A `block` for the guard's address alone lists nothing and nothing remembers it, so a
+Both ends are fixed, and land at least 301 s and 900 s after the buy at any cadence: in blocks a cadence
+slower than a block a second rounds short (a fork whose 100 blocks took 201 s put "900 s" 898 s after the
+buy), so the count is raised until the time is reached; Base's 1,505 and 4,500 blocks do not move. A
+`block` for the guard's address alone lists nothing and nothing remembers it, so a
 drawn delay alone let an agent request checks until it fell before the trap: judge pass 9's J9GuardLater
 (`guard_later`) closes the guard's sales 8 minutes after its buy and got `allow` in 4 of 8 checks (2 of 8 here). Now
 every check meets it at 900 s: `guard address only, not listed: sale refused 900 s after the buy (…)`
@@ -289,11 +302,12 @@ against the pool's quote after the buy and the first sale, a pool paying out mor
 seconds: `sale refused 762 s after the buy (TransferHelper: TRANSFER_FROM_FAILED)`. The far sale at 900 s
 is the last sale for [listing](#verdicts-and-listing).
 
-In the proof, the fifth request (`local_fork_mine`, never sent to a node) lists twelve far blocks: the
-guard's approve and swap at 301 s, at the drawn delay and at 900 s, then the probe's; the fifth
-response, their results; `evidence.calls` ends with their labels (`far 301 s: guard: sale late`,
-`far: guard: sale late`, `far 900 s: guard: sale late`). Replay rebuilds that request from the guard
-and probe sides, mines it again on its own fork and compares every result.
+In the proof, the fifth request (`local_fork_mine`, never sent to a node) lists sixteen blocks: the
+guard's approve and swap at 301 s, at the drawn delay and at 900 s, then its
+[exit-size sale](#the-agents-exit-size), then the probe's; the fifth response, their results;
+`evidence.calls` ends with their labels (`far 301 s: guard: sale late`, `far: guard: sale late`,
+`far 900 s: guard: sale late`, `guard: sale exit`). Replay rebuilds that request from the guard and probe
+sides, mines it again on its own fork and compares every result.
 
 **Cost**, measured on 2026-11-12, read only, blocks already mined (no wait), one check at a time:
 the later side's trace and the two fixed far sales added about 0.4 s a check on the local copy of Base
@@ -314,6 +328,32 @@ neither others' trades of the pool nor WETH, L1Block or the base fee. A token ke
 state together (refusing from 5 minutes on only once WETH moved) passes there; the later side sees 16 to
 24 s of real Base. The horizon is 900 s: a sale closed from 15 minutes on passes them, and is left to
 the [allow-list](#environment-rule) for the token's own code.
+
+## The agent's exit size
+
+An agent's exit sells its holding: the guard credits a buy at its signed minimum, the quote minus its
+slippage bound (`max_slippage_bps`, 3 % in the demo), so 97 % of what the guard received. No drawn sale
+sells that share: the first sells 13 % to 87 %, the late and far sales all the rest. ExitSizeTrap
+(`exit_size`) refuses a sale of 88 % to 99.99 % of a balance: every drawn sale went through, `allow`;
+now `exit-size sale (97 %) refused N s after the buy (…)`, a `block` that lists nothing
+(`bun test -t "ExitSizeTrap"`).
+
+- **What.** The guard's approve and swap of exactly that share of what its buy received (the sentinel
+  reads the bound from the guard's `evm_config`, the contract's own), from its whole balance, after its
+  buy alone, at the late sale's blocks; the probe's twin, its own share. Judged like the other sales.
+- **Where.** On the trace's local fork, beside the far sales, traced like the guard side: what the
+  token's code reaches on that sale joins the [environment rule](#environment-rule). The fifth request
+  holds it after each side's far sales (`guard: approve router exit`, `guard: sale exit`), and
+  `evidence.slippage_bps` the bound; replay mines it again, `--check` compares the bound with the guard's.
+- **Not on the later side, nor at the far delays.** Time and Base's state are the allow-list's: a token
+  refusing that size only later reads a clock on that sale (TIMESTAMP, NUMBER, its pool), a `warn`; one
+  keyed on WETH or the factory is a `block`. A size keyed on its own storage that others' trades move is
+  what the later side cannot show for any sale ([below](#what-a-check-cannot-show)). Either would cost an
+  `eth_simulateV1` or a trace more on Base mainnet.
+- **Cost**, measured on 2026-11-12, one check at a time, blocks already mined, with the tie between the
+  two nodes ([template reputation](#template-reputation)): on the local copy of Base, USDC 1.59 to 1.91 s
+  before, 1.75 to 1.91 s after; the healthy demo token 0.98 to 1.19 s, 1.08 to 1.38 s. On Base mainnet,
+  USDC read only, 25.0 and 26.1 s before, 26.7 and 27.6 s after: about 1.5 s a check.
 
 ## Environment rule
 
@@ -504,8 +544,8 @@ The evidence carries `list_target`; replay recomputes it and `--check` compares 
 
 If at least 90 % of today's LP supply already existed an hour ago (at the first block of the last hour,
 by the blocks' timestamps), the liquidity is old and its holders are not read. Otherwise the holders come
-from the pair's `Transfer` logs (on Base, at most 4 `eth_getLogs` of 5,000 blocks, then `balanceOf` and
-`eth_getCode` per holder, at most 20).
+from the pair's `Transfer` logs (on Base, at most 4 `eth_getLogs` of 5,000 blocks on `INDEX_RPC`, then
+`balanceOf` and `eth_getCode` per holder, at most 20).
 
 At least half the LP removable (an EOA, a contract, or several summed; only 0x0 and 0xdead count as
 burned) is a `warn`, and so are holders that cannot all be read.
@@ -545,10 +585,19 @@ Replay reports a `MISMATCH … is not bound to block …`, and rebuilds the whol
   build it and about 10 to find its start, 3 s on publicnode (2026-11-12).
 - **On the fork** it starts at block `INDEX_FROM`, the fork's first (`demo.sh` sets it): about 300 blocks
   spaced over 2.4 h (`evm/fork.sh` mines 10 blocks 800 s apart).
-- **The node** is `INDEX_RPC`, `EVM_RPC` by default. It must serve `eth_getLogs`: `mainnet.base.org`
-  answers `request limit reached`. `check-mainnet.sh` reads `https://base-rpc.publicnode.com` for the
-  index and `mainnet.base.org` for the rest. A node that refuses logs fails the check, so a `block`
-  whose reason names `INDEX_RPC`.
+- **The node** is `INDEX_RPC`, `EVM_RPC` by default: it serves every log a check reads, the index's,
+  the token's own pool's and its LP holders'; state comes from `EVM_RPC`. It must serve `eth_getLogs`:
+  `mainnet.base.org` answers `request limit reached`. A node that refuses logs fails the check, so a
+  `block` whose reason names `INDEX_RPC`.
+- **Tied to the simulation's.** The logs node must give the check's block and the index window's first
+  the hashes `EVM_RPC` gives them: a hash commits to every block before it. Otherwise the check fails
+  (`the logs node … answers another hash for block …`), and replay reports a `MISMATCH`.
+- **Each sentinel its own.** `check-mainnet.sh` gives the first `mainnet.base.org` (simulation) and
+  `base.public.blockpi.network` (logs), the second `base-rpc.publicnode.com` for both (`EVM_RPC_2`,
+  `INDEX_RPC_2`): two providers for each need, none read by both sentinels. Measured read only on
+  2026-11-12: `base.drpc.org` and blockpi serve every call a check sends but answered the trace's anvil
+  with HTTP 429; drpc and 1rpc refuse 5,000-block log ranges, 1rpc block receipts. On the local fork both
+  read the fork, the only node holding the demo tokens.
 - `INDEX_FROM=none` runs without an index: every buy verdict is then at least `warn`.
 
 ### Measured on real Base
@@ -623,8 +672,8 @@ Do safe tokens get `allow`? Measured on 2026-11-12, read only, with the index on
 - **AIXBT** reads another contract during a transfer: a `block`, as before.
 - In no check did others trade the pool during the wait.
 
-`./check-mainnet.sh` then ran USDC through the guard: check #22, `allow` from both sentinels, replayed
-(`app/fixtures/usdc-base-mainnet.json`).
+`./check-mainnet.sh` then ran USDC through the guard: check #28, `allow` from both sentinels, each on its
+own nodes, replayed (`app/fixtures/usdc-base-mainnet.json`).
 
 ## Exit quotes
 
@@ -649,12 +698,12 @@ A simulation cannot prove that a token will be sellable later. Still open:
   keyed on time and on state Base moves together passes them ([why](#the-far-sale)).
 - A sale size or delay the check did not draw: a sale refused only below some share, or only during a
   window that reopens before 900 s and misses the drawn delays. Each check draws the first and late
-  sales, the far sale between 301 and 900 s, and the later side's block anew; the guard quarantines the
-  token after any block and takes one check per token at a time
-  ([token limits](contract.md#token-limits)): one draw per quarantine, 30 min by default, not none. What a re-draw can escape is bounded: a
-  refusal in force at 301 s or at 900 s is met at every check, and the late and far sales always sell
-  the whole rest. An agent's exit sells its holding (the signed minimum, 97 % of the quote), when it
-  chooses.
+  sales, the far sale between 301 and 900 s, and the later side's block anew; the guard takes one check
+  per token at a time, and quarantines the token after a `block` that rests on its code, 30 min by
+  default, not after a `warn`, a disagreement or a check that could not run
+  ([token limits](contract.md#token-limits)). What a re-draw can escape is bounded: a refusal in force at
+  301 s or at 900 s is met at every check, the late and far sales always sell the whole rest, and the
+  [exit-size sale](#the-agents-exit-size) what an agent's exit sells; the agent exits when it chooses.
 - State that did not move between the reference block and the later block (16 to 24 s): the token's
   own pool or storage when nobody touched them, a balance nobody moved. A token reading WETH or the
   factory is a `block` whatever moved; one keyed on its own pool is not.
@@ -670,9 +719,10 @@ A simulation cannot prove that a token will be sellable later. Still open:
 
 - A holder of most of the supply: it sells into the pool with no trap in the code. The check reads who
   holds the LP, never who holds the token.
-- The node: each sentinel reads one Base endpoint (`EVM_RPC`) and believes it. The guard takes two
-  sentinels' identical votes for an `allow` ([quorum](contract.md#sentinel-quorum)), so one lying node
-  no longer allows alone, when the two read different nodes: in the demo both read the same one.
+- The node: each sentinel believes the Base nodes it reads (`EVM_RPC`, `INDEX_RPC`). The guard takes
+  two sentinels' identical votes for an `allow` ([quorum](contract.md#sentinel-quorum)), so one lying
+  node no longer allows alone when the two read different nodes: on Base `check-mainnet.sh` gives them
+  three providers, none read by both; on the local fork both read the fork.
 
 When the guard's address cannot pay for its transactions at the check, its balance is set to exactly
 what they spend.

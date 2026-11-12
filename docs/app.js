@@ -157,6 +157,10 @@ const tally = (k) => {
 // The guard stores at most 280 characters of reasons: a cut one ends with an ellipsis, not mid-word.
 const reasonsOf = (k) => (k.reasons && k.reasons.length >= 280 ? k.reasons + '…' : k.reasons);
 const firstReason = (k) => (k.verdict ? (k.reasons ? reasonsOf(k).split(' ; ')[0] : '-') : 'waiting for the sentinels' + (votesOf(k).length ? ' (' + votesOf(k).length + ' voted)' : ''));
+// A block that judged nothing: a sentinel's node failed three times (app/sentinel.ts), or the simulation came
+// after the buy's swap deadline (the router's EXPIRED). Said as such, its reason after it.
+const FAIL_CLOSED = 'blocked because the check could not be completed — the guard fails closed';
+const failClosed = (k) => k.verdict === 'block' && /^(simulation impossible after |simulated buy failed: UniswapV2Router: EXPIRED)/.test(k.reasons || '');
 
 async function mapBatches(items, fn) {
   const out = [];
@@ -182,7 +186,7 @@ function checkItem({ id, check: k }, open) {
     ['Requested', when(k.requested_ns)],
     ['Judged', k.verdict ? when(k.judged_ns) + ' (' + (secs(k.judged_ns) - secs(k.requested_ns)) + ' s later)' : 'not yet'],
     ['Votes', votesOf(k).length ? el('span', { class: 'stack' }, ...(k.verdict ? [tally(k) + ':'] : []), ...votesOf(k).map((v) => el('span', { class: 'vote' }, badge(v.verdict), ' ', acct(v.sentinel), el('small', {}, ' evidence ', mono(v.evidence_sha256))))) : 'none yet'],
-    ['Reasons', reasonsOf(k) || '-'],
+    ['Reasons', ...(failClosed(k) ? [FAIL_CLOSED + ': '] : []), reasonsOf(k) || '-'],
     ['Quote', sale ? eth(k.quote) + ' for the sale' : k.quote + ' token units for the buy'],
     k.verdict === 'warn' && ['Owner approval', k.approved ? 'approved' : 'not approved'],
     k.verdict === 'block' && ['Asked to list the token', k.list_target ? 'yes' : 'no'],
@@ -198,7 +202,7 @@ function checkItem({ id, check: k }, open) {
     el('span', { class: 'id' }, '#' + id),
     el('span', { class: 'kind' }, token(k.target), sale ? el('small', {}, ' sale') : null),
     lamps(verdictOf(k), signedOf(k)),
-    el('span', { class: 'why' }, firstReason(k), extra ? el('small', {}, ' (+' + extra + ' more)') : null));
+    el('span', { class: 'why' }, ...(failClosed(k) ? [FAIL_CLOSED, el('small', {}, ' (' + firstReason(k) + ')')] : [firstReason(k)]), extra ? el('small', {}, ' (+' + extra + ' more)') : null));
   const d = el('details', { 'data-id': String(id) }, summary, body);
   d.open = open.has(String(id));
   return el('li', {}, d);

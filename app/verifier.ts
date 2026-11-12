@@ -162,13 +162,16 @@ export type Report = {
     later: Later | null;
     /** When both sales land and how much the first one sells, derived with the probes (deriveProbes). */
     sales: Sale;
+    /** The guard's slippage bound (evm_config.max_slippage_bps): an agent's holding is a buy's quote minus
+     *  it, so the exit-size sale sells that share of the tokens bought (exitShare). */
+    slippage_bps: number;
     /** The `list_target` posted with the verdict (judge): replay recomputes it, the guard stores it. */
     list_target: boolean;
   };
   /** Full requests and responses, to replay the simulation at the same blocks: the guard side, the
    *  probe side, the synthetic calls (quote, owner(), takebacks) and the later side, four requests sharing
-   *  no state, then the far sales' blocks (FAR_METHOD, mined on a local fork) and their results (the
-   *  later side and the far sales absent when the check stopped at the buy). */
+   *  no state, then the far sales' and the exit-size sales' blocks (FAR_METHOD, mined on a local fork) and
+   *  their results (the later side and the far sales absent when the check stopped at the buy). */
   request: Request[];
   response: Result[][];
 };
@@ -328,8 +331,9 @@ export async function topUp(url: string, head: Header, who: Address, need: bigin
 
 /** The five requests of a check, in this order; they share no state. The later side is empty until the
  *  full proof, and runs on its own base block (laterSide). The far sale is empty until then too, and runs
- *  on a local fork (farBlocks, app/environment.ts trace), never on the node. */
-export type Sides = { guard: Block[]; probe: Block[]; synthetic: Block[]; later: Block[]; far: Block[] };
+ *  on a local fork (farBlocks, app/environment.ts trace), never on the node. `exit`: the exit-size sale of
+ *  the guard, then of the probe (plan), which farBlocks puts in the far request. */
+export type Sides = { guard: Block[]; probe: Block[]; synthetic: Block[]; later: Block[]; far: Block[]; exit: Block[] };
 export const SIDES = ["guard", "probe", "synthetic", "later", "far"] as const;
 /** The sides simulated on the reference block. */
 export const FROZEN = ["guard", "probe", "synthetic"] as const;
@@ -351,8 +355,9 @@ export const GUARD = "guard: ";
 export type Amounts = { guard: bigint; probe: bigint };
 /** The guard's own transactions a check simulates, unsigned as the contract builds them: its buy of
  *  the check's amount (preview_check) and, for the full proof, its two sales (preview_sale: approve of
- *  the exact amount then swapExactTokensForETH back to its address; a share, then the rest). */
-export type GuardTxs = { buy: Hex; sales?: [Hex[], Hex[]] };
+ *  the exact amount then swapExactTokensForETH back to its address; a share, then the rest) and the sale
+ *  of what an agent's exit sells (exitShare). */
+export type GuardTxs = { buy: Hex; sales?: [Hex[], Hex[]]; exit?: Hex[] };
 /** The two sales of a check, derived like the probes from the ticket and the block hash (deriveProbes),
  *  so a token cannot expect them: the first swap `first` blocks after the buy, of `bps` / 10,000 of the
  *  tokens bought (13 % to 87 %, never a whole percent); the rest swapped `late` blocks after the buy, and
@@ -383,12 +388,22 @@ export const FAR_S = [301, 900] as const;
 /** The blocks after the buy each sale may land in at cadence `c`: FIRST_S, LATE_S and FAR_S in blocks,
  *  the first at least 2 (its approve after the buy's block), the late one at most LATE_BLOCKS - 1 (the
  *  buy is in the 1st block after the proof's). A cadence faster than 0.2 s caps the late sale there; the
- *  first then stays 2 blocks before it (deriveProbes). */
+ *  first then stays 2 blocks before it (deriveProbes). The far ends land at least FAR_S after the buy
+ *  (farBlocksIn). */
 export const saleRanges = (c: Cadence) => ({
   first: [Math.max(2, blocksIn(c, FIRST_S[0])), blocksIn(c, FIRST_S[1])] as const,
   late: [Math.min(blocksIn(c, LATE_S[0]), Number(LATE_BLOCKS) - 1), Math.min(blocksIn(c, LATE_S[1]), Number(LATE_BLOCKS) - 1)] as const,
-  far: [blocksIn(c, FAR_S[0]), blocksIn(c, FAR_S[1])] as const,
+  far: [farBlocksIn(c, FAR_S[0]), farBlocksIn(c, FAR_S[1])] as const,
 });
+/** blocksIn(c, s), raised until the block that many after the buy comes at least `s` after it
+ *  (secondsAfterBuy): at more than a second a block, both are floored and the block fell up to that many
+ *  seconds short (a fork whose 100 blocks took 201 s put "900 s" 898 s after the buy). Base (0.2 s) and a
+ *  regular fork (1 s) keep blocksIn's. */
+const farBlocksIn = (c: Cadence, s: number) => {
+  let n = blocksIn(c, s);
+  while (secondsAfterBuy(c, n) < s) n++;
+  return n;
+};
 /** Seconds between the buy's block and the block `n` after it, at cadence `c` (timeOf): what a reason
  *  says, since a block is no fixed time (0.2 s on Base, 1 s on the local fork). */
 export const secondsAfterBuy = (c: Cadence, n: number) => Math.floor(((n + 1) * c.seconds) / c.blocks) - Math.floor(c.seconds / c.blocks);
@@ -400,6 +415,12 @@ export const saleAmounts = (amount: bigint, bps: number): [bigint, bigint] => {
 };
 /** Suffixes of the two sales' labels. */
 export const SALES = [" first", " late"] as const;
+/** What an agent's exit sells of `bought` tokens: its holding, which the guard credits at the buy's signed
+ *  minimum, the quote minus `slippageBps` (src/lib.rs floor, rounded down alike). 97 % at the demo's 3 %;
+ *  no drawn sale sells it (13 % to 87 %, then the rest). */
+export const exitShare = (bought: bigint, slippageBps: number) => (bought * BigInt(10_000 - slippageBps)) / 10_000n;
+/** Suffix of the exit-size sale's labels. */
+export const EXIT = " exit";
 /** The addresses a check simulates: the guard's EVM address and the probes derived for it. */
 export type Who = { guard: Address; buyer: Address; stranger: Address };
 
@@ -487,14 +508,14 @@ export function laterBlocks(guardSide: Block[], block: bigint, sale: Sale, real:
  *  is empty: laterBlocks fills it once its real block is known. Without `full` (the 1st simulation, for
  *  the amounts bought and owner()): the buys, the quote and owner() only.
  *  Shared with app/replay.ts, which rebuilds the expected requests this way. */
-export function plan(token: Address, who: Who, block: bigint, amount: bigint, txs: GuardTxs, full?: { amounts: Amounts; owner: Address | null; sale: Sale }): Sides {
+export function plan(token: Address, who: Who, block: bigint, amount: bigint, txs: GuardTxs, full?: { amounts: Amounts; owner: Address | null; sale: Sale; slippage_bps: number }): Sides {
   const { guard, buyer, stranger } = who;
   const at = (n: bigint, calls: Call[]): Block => ({ number: block + n, calls });
   const guardBuy = guardTx(`${GUARD}buy`, guard, txs.buy).call;
   const probeBuy = asProbe(guardBuy, "buy", buyer);
   const reads = [call("buy quote", buyer, ROUTER, router, "getAmountsOut", [amount, [WETH, token]]), call("owner()", buyer, token, erc20, "owner", [])];
-  if (!full) return { guard: [at(1n, [guardBuy])], probe: [at(1n, [probeBuy])], synthetic: [at(1n, reads)], later: [], far: [] };
-  if (!txs.sales) throw new Error("the full proof needs the guard's two sales");
+  if (!full) return { guard: [at(1n, [guardBuy])], probe: [at(1n, [probeBuy])], synthetic: [at(1n, reads)], later: [], far: [], exit: [] };
+  if (!txs.sales || !txs.exit) throw new Error("the full proof needs the guard's two sales and its exit-size sale");
   const { amounts, owner } = full;
   const sale = (p: string, seller: Address, i: 0 | 1): Call[] => {
     const [approve, swap] = txs.sales![i].map((t, j) => guardTx(`${GUARD}${j ? "sale" : "approve router"}${SALES[i]}`, guard, t).call);
@@ -513,6 +534,14 @@ export function plan(token: Address, who: Who, block: bigint, amount: bigint, tx
     }
     return Array.from({ length: Number(swaps[1]) }, (_, i) => at(BigInt(i) + 1n, filled.get(BigInt(i) + 1n) ?? []));
   };
+  // The exit-size sale: from the whole balance the buy left, at the late sale's blocks (its approve, then
+  // its swap); run on the far sales' fork after that side's buy alone (app/environment.ts trace).
+  const exitSale = (p: string, seller: Address): Block[] => {
+    const [approve, swap] = txs.exit!.map((t, j) => guardTx(`${GUARD}${j ? "sale" : "approve router"}${EXIT}`, guard, t).call);
+    const x = exitShare(amounts.probe, full.slippage_bps);
+    const calls = p === GUARD ? [approve, swap] : [asProbe(approve, `approve router${EXIT}`, seller, x), asProbe(swap, `sale${EXIT}`, seller, x)];
+    return calls.map((c, i) => at(BigInt(full.sale.late + i), [c]));
+  };
   const takebacks = (p: string, holder: Address) => [
     ...(owner ? [call(`${p}transferFrom by owner()`, owner, token, erc20, "transferFrom", [holder, owner, 1n])] : []),
     call(`${p}transferFrom by a stranger`, stranger, token, erc20, "transferFrom", [holder, stranger, 1n]),
@@ -523,6 +552,7 @@ export function plan(token: Address, who: Who, block: bigint, amount: bigint, tx
     synthetic: [at(1n, [...reads, { ...guardBuy, label: `${GUARD}buy before takebacks` }, { ...probeBuy, label: "buy before takebacks" }, ...takebacks(GUARD, guard), ...takebacks("", buyer)])],
     later: [],
     far: [],
+    exit: [...exitSale(GUARD, guard), ...exitSale("", buyer)],
   };
 }
 
@@ -537,15 +567,17 @@ export const farDelays = (c: Cadence, sale: Sale) => [saleRanges(c).far[0], sale
  *  sent to a node, whose eth_simulateV1 refuses a block more than 256 past its base block. */
 export const FAR_METHOD = "local_fork_mine";
 /** The far sales' blocks: the late sale's approve and swap of the guard side at each of farDelays, then
- *  of the probe side, each approve the block before its swap, relabelled (FARS). Each pair runs in a run
- *  of its own on the fork, after that side's buy and first sale (trace). */
+ *  its exit-size sale (s.exit); then the same of the probe side; each approve the block before its swap,
+ *  the far ones relabelled (FARS). Each pair runs in a run of its own on the fork, a far one after that
+ *  side's buy and first sale, the exit-size one after its buy alone (trace). */
 export function farBlocks(s: Sides, block: bigint, sale: Sale, c: Cadence): Block[] {
   const [approve, swap] = [block + BigInt(sale.late), block + BigInt(sale.late) + 1n];
-  return [s.guard, s.probe].flatMap((side) =>
-    farDelays(c, sale).flatMap((far, k) =>
+  return [s.guard, s.probe].flatMap((side, j) => [
+    ...farDelays(c, sale).flatMap((far, k) =>
       [approve, swap].map((n, i) => ({ number: block + BigInt(far) + BigInt(i), calls: side.find((b) => b.number === n)!.calls.map((x) => ({ ...x, label: `${FARS[k]}${x.label}` })) })),
     ),
-  );
+    ...s.exit.slice(2 * j, 2 * j + 2),
+  ]);
 }
 /** The far sale's request as the fork mines it: its blocks at the cadence measured (the time and number
  *  a real block would have), the reference block's base fee and coinbase, under FAR_METHOD. */
@@ -622,8 +654,9 @@ const isOld = (supply: bigint, before: bigint) => before * 10_000n >= supply * O
 
 /** Who can remove the liquidity of `token`'s V2 WETH pair at `head`, from public-RPC reads only:
  *  eth_call, eth_getCode, and eth_getLogs over the window (from the first block LIQUIDITY_S before it,
- *  found from cadence `c`'s guess) only, never below the pair's creation. */
-export async function liquidityFacts(url: string, token: Address, head: Stamp, c: Cadence): Promise<Liquidity> {
+ *  found from cadence `c`'s guess) only, never below the pair's creation. The logs come from `logs`, a
+ *  node that serves them (mainnet.base.org does not), the rest from `url`. */
+export async function liquidityFacts(url: string, token: Address, head: Stamp, c: Cadence, logs = url): Promise<Liquidity> {
   const block = BigInt(head.number);
   const found = (await read(url, FACTORY, "getPair", [token, WETH], block)) as Address;
   if (BigInt(found) === 0n) return null;
@@ -647,8 +680,8 @@ export async function liquidityFacts(url: string, token: Address, head: Stamp, c
   const seen = new Set<Address>(BURN_ADDRESSES as Address[]);
   for (let s = start; s <= block; s += LOG_CHUNK) {
     const end = s + LOG_CHUNK - 1n < block ? s + LOG_CHUNK - 1n : block;
-    const logs = await rpc<{ topics: Hex[] }[]>(url, "eth_getLogs", [{ address: pair, fromBlock: toHex(s), toBlock: toHex(end), topics: [TRANSFER_TOPIC] }]);
-    for (const l of logs) seen.add(`0x${l.topics[2].slice(26)}` as Address);
+    const found = await rpc<{ topics: Hex[] }[]>(logs, "eth_getLogs", [{ address: pair, fromBlock: toHex(s), toBlock: toHex(end), topics: [TRANSFER_TOPIC] }]);
+    for (const l of found) seen.add(`0x${l.topics[2].slice(26)}` as Address);
   }
   const created = pairOld ? null : Number(start);
   const candidates = [...seen].sort();
@@ -701,8 +734,9 @@ export type Listing = { key: string; reporter: string; evidence_sha256: string }
 export type NearFacts = { listed: Listing[]; previous: { id: number; code_hash: Hex; implementation: Address | null } | null };
 /** The guard's own transactions for a check, read from the guard (unsigned EIP-1559 hex): `check` is
  *  preview_check(id, quote), what buy or sell_quoted would sign with that quote; `sale` is
- *  preview_sale(token, amount, deadline), an exit's approve and swap. Tests pass a local builder. */
-export type Previews = { check: (quote: bigint) => Promise<Hex[]>; sale: (amount: bigint, deadline: bigint) => Promise<Hex[]> };
+ *  preview_sale(token, amount, deadline), an exit's approve and swap; `slippage_bps` its slippage bound
+ *  (evm_config.max_slippage_bps), which sets an agent's holding (exitShare). Tests pass a local builder. */
+export type Previews = { check: (quote: bigint) => Promise<Hex[]>; sale: (amount: bigint, deadline: bigint) => Promise<Hex[]>; slippage_bps: number };
 /** What the sentinel knows beside the EVM chain: the check's request time on NEAR (`requested_ns`, which
  *  fixes the reference block), the template index it builds up to a block (app/index.ts), a reader of the
  *  guard's blocklist entry and last code for a target, the amount the agent asked to buy (request_check),
@@ -710,7 +744,8 @@ export type Previews = { check: (quote: bigint) => Promise<Hex[]>; sale: (amount
 export type Context = {
   requested_ns: string;
   index: ((block: number) => Promise<Index>) | null;
-  /** The node the index reads logs from, for the target's own pool too (ownFunding); `url` by default. */
+  /** The node that serves the logs a check reads (INDEX_RPC): the index's, the target's own pool's
+   *  (ownFunding) and its LP holders' (liquidityFacts); `url` by default. Tied to `url` (sameChain). */
   indexRpc?: string;
   near: (target: Address) => Promise<NearFacts>;
   amount: bigint;
@@ -754,7 +789,8 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const code = await rpc<Hex>(url, "eth_getCode", [token, toHex(block)]);
   const implementation = await implementationAt(url, token, block);
   const opcodes = await opcodesOf(url, code, implementation, block);
-  const liquidity = await liquidityFacts(url, token, head, cadence);
+  const logs = ctx.indexRpc ?? url;
+  const liquidity = await liquidityFacts(url, token, head, cadence, logs);
   const template = templateOf(code);
   const own = liquidity?.pair ?? null;
   // An index whose window is not bound to this block judges nothing: the check fails (the sentinel then
@@ -762,10 +798,13 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const index = ctx.index ? await ctx.index(Number(block)) : null;
   const window = index?.chain_id === chainId ? windowProblem(head, await stampOf(url, toHex(index.from)), index.to) : null;
   if (window) throw new Error(window);
-  const reputation = index?.chain_id === chainId ? reputationOf(index, template, beforeBlock(index, own, await ownFunding(ctx.indexRpc ?? url, index, own)), cadence) : null;
+  // The logs read on another node are this chain's: the same block hashes at the window's ends (its end is
+  // this block; the liquidity window lies within). Otherwise no verdict either.
+  await sameChain(url, logs, [Number(block), ...(index ? [index.from] : [])]);
+  const reputation = index?.chain_id === chainId ? reputationOf(index, template, beforeBlock(index, own, await ownFunding(logs, index, own, url)), cadence) : null;
   const near = await ctx.near(token);
   const amount = ctx.amount;
-  const proof = { chain_id: chainId, block, cadence, code_hash: keccak256(code), implementation, liquidity, template, reputation, near, amount_wei: amount.toString(), opcodes, sales: sale };
+  const proof = { chain_id: chainId, block, cadence, code_hash: keccak256(code), implementation, liquidity, template, reputation, near, amount_wei: amount.toString(), opcodes, sales: sale, slippage_bps: ctx.preview.slippage_bps };
 
   // 1st simulation: the buys alone, the guard's with no minimum (quote 0), for the amounts bought; the
   // quote and owner() apart. Without a pool the check stops at the buy with a warn, and nothing is traced.
@@ -784,15 +823,17 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const deadline = timeOf(head, cadence, block + LATE_BLOCKS) + 10_000n;
   const [share, rest] = saleAmounts(st.amounts.guard, sale.bps);
   const sales: [Hex[], Hex[]] = [await ctx.preview.sale(share, deadline), await ctx.preview.sale(rest, deadline)];
-  const fees = sameFees([buy, ...sales.flat()]);
-  const sides = plan(token, who, block, amount, { buy, sales }, { amounts: st.amounts, owner: st.owner, sale });
+  const exit = await ctx.preview.sale(exitShare(st.amounts.guard, ctx.preview.slippage_bps), deadline);
+  const fees = sameFees([buy, ...sales.flat(), ...exit]);
+  const sides = plan(token, who, block, amount, { buy, sales, exit }, { amounts: st.amounts, owner: st.owner, sale, slippage_bps: ctx.preview.slippage_bps });
   const sim = await simulate(url, head, cadence, sides, fees, guard, st.owner);
   // The guard side replayed on a local fork: the addresses it touches, the token's calls, the buy's
-  // state change; on the same fork, the far sales of each side; then the sales again on the first real
-  // block `later` seconds on, with the buy's change applied, simulated and traced like the guard side.
+  // state change; on the same fork, the far sales and the exit-size sale of each side; then the sales
+  // again on the first real block `later` seconds on, with the buy's change applied, simulated and traced
+  // like the guard side.
   sides.far = farBlocks(sides, block, sale, cadence);
   const far = farRequest(head, cadence, sides.far, fees);
-  const t = await trace(url, sim.request[0], Number(block), token, implementation, { probe: sim.request[1], far, until: Number(block) + sale.late });
+  const t = await trace(url, sim.request[0], Number(block), token, implementation, { probe: sim.request[1], far, until: Number(block) + sale.late, first: Number(block) + sale.first });
   const real = await laterBlock(url, head, later, sale);
   sides.later = laterBlocks(sides.guard, block, sale, BigInt(real.number));
   const l = await laterSide(url, real, head, cadence, sides.later, t.diff, fees, guard, token, liquidity.pair, implementation);
@@ -801,6 +842,17 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const { request: _, ...found } = l;
   const facts = { ...proof, touched: seen.touched, token_calls: seen.calls, token_balances: seen.balances, token_opcodes: seen.opcodes, later: { block: Number(real.number), ...found } };
   return report(facts, both, labelsOf(sides), [keccak256(buy)], { token, ...who });
+}
+
+/** Throws unless the node `logs` gives each of `blocks` the hash the simulation node `url` gives it: a
+ *  logs node on another chain or fork, behind, or lying about the window. One hash commits to every block
+ *  before it, so the check's own block ties all the logs read up to it. Nothing to tie on one node. */
+export async function sameChain(url: string, logs: string, blocks: number[]): Promise<void> {
+  if (logs === url) return;
+  for (const n of new Set(blocks)) {
+    const [a, b] = await Promise.all([url, logs].map((u) => rpc<{ hash: Hex } | null>(u, "eth_getBlockByNumber", [toHex(n), false])));
+    if (!a || !b || a.hash !== b.hash) throw new Error(`the logs node ${new URL(logs).host} answers another hash for block ${n} than the simulation node ${new URL(url).host} (${b?.hash ?? "none"}, not ${a?.hash ?? "none"})`);
+  }
 }
 
 /** envOpcodes of the target's code and of its implementation's, at the block. */
@@ -866,7 +918,7 @@ export function buyStages(f: Record<string, Result>, w: Parties) {
  *  the ETH that reached the seller (traceTransfers logs) against the pool's quote before its approve
  *  (last Sync), and blocked when the pool paid out more WETH than the seller received. The far sales (the
  *  late one again, after the buy and the first sale, FARS) are judged the same way, when they ran. */
-function sideFindings(r: Record<string, Result>, p: string, w: Parties, pair: Address | null, stop: boolean, sales: Sale, c: Cadence): Finding[] {
+function sideFindings(r: Record<string, Result>, p: string, w: Parties, pair: Address | null, stop: boolean, sales: Sale, c: Cadence, slippageBps: number): Finding[] {
   const who = p === GUARD ? w.guard : w.buyer;
   const { findings, amount, owner, quoted } = buyStage(r, w.token, who, p);
   // A buy that failed blocks and never lists (the agent's amount can make it fail); one that received
@@ -896,28 +948,31 @@ function sideFindings(r: Record<string, Result>, p: string, w: Parties, pair: Ad
   const [first, late] = [step(p, SALES[0]), step(p, SALES[1])];
   // the far sales that ran, each delay once (the drawn one may be an end)
   const fars = FARS.map((f, k) => ({ step: step(`${f}${p}`, SALES[1]), n: farDelays(c, sales)[k] })).filter((f, k, all) => f.step[1] && all.findIndex((g) => g.n === f.n) === k);
+  // the exit-size sale, from the whole balance at the late sale's blocks, when it ran
+  const exit = step(p, EXIT);
   const plays = [
-    { step: first, before: [buy], x: sold[0], n: sales.first },
-    { step: late, before: [buy, ...first], x: sold[1], n: sales.late },
-    ...fars.map((f) => ({ step: f.step, before: [buy, ...first], x: sold[1], n: f.n })),
+    { step: first, before: [buy], x: sold[0], n: sales.first, what: "sale" },
+    { step: late, before: [buy, ...first], x: sold[1], n: sales.late, what: "sale" },
+    ...(exit[1] ? [{ step: exit, before: [buy], x: exitShare(amount, slippageBps), n: sales.late, what: `exit-size sale (${(10_000 - slippageBps) / 100} %)` }] : []),
+    ...fars.map((f) => ({ step: f.step, before: [buy, ...first], x: sold[1], n: f.n, what: "sale" })),
   ];
   // A sale the pool quotes at less than DUST wei can fail or look taxed by rounding alone: not listed.
   // Nor is a refusal the last sale (the far one at 900 s, or the late one when none ran) does not share:
   // one that clears with time (an honest cooldown) blocks this check, and listing it would let any agent
   // repeat checks until one draws it.
   const last = plays.at(-1)!.step[1];
-  for (const { step, before, x, n } of plays) {
+  for (const { step, before, x, n, what } of plays) {
     const sale = step[1];
     const when = afterBuy(c, n);
     const quote = pair ? saleQuote(before, pair, w.token, x) : 0n;
     if (!ok(sale)) {
-      findings.push({ level: "block", text: `sale refused ${when} (${revertReason(sale)})`, list: listable && quote >= DUST && !ok(last) });
+      findings.push({ level: "block", text: `${what} refused ${when} (${revertReason(sale)})`, list: listable && quote >= DUST && !ok(last) });
       continue;
     }
     const got = moves(step, ETH_LOGS, who, "to");
-    taxed(got, quote, `on the sale ${when}`);
+    taxed(got, quote, `on the ${what} ${when}`);
     // Not listed: a fee swap the buy's own fees can trigger (amount-dependent) does it too.
-    if (pair && moves(step, WETH, pair, "from") > got) findings.push({ level: "block", text: `the pool paid out more WETH than the seller received ${when}` });
+    if (pair && moves(step, WETH, pair, "from") > got) findings.push({ level: "block", text: `the pool paid out more WETH than the seller received${what === "sale" ? "" : ` on the ${what}`} ${when}` });
   }
   return findings;
 }
@@ -976,7 +1031,7 @@ export function judge(labels: string[], results: Result[], facts: Facts, w: Part
   const r = byLabel(labels, results);
   const { stop } = buyStages(r, w);
   const pair = facts.liquidity?.pair ?? null;
-  const findings = sideFindings(r, "", w, pair, stop, facts.sales, facts.cadence);
+  const findings = sideFindings(r, "", w, pair, stop, facts.sales, facts.cadence, facts.slippage_bps);
   // Only a block on the probe side lists the token: the probes are fresh addresses derived from a
   // block hash, so their findings are the token's own behaviour. The guard's address is public and a
   // third party can change its state (send it tokens, get it frozen): a failure there blocks this
@@ -984,7 +1039,7 @@ export function judge(labels: string[], results: Result[], facts: Facts, w: Part
   // The amount is the agent's: a buy that fails, and what the pool quotes as dust, block without listing.
   const list_target = findings.some((f) => f.level === "block" && f.list);
   const seen = new Set(findings.map((f) => f.text));
-  for (const f of sideFindings(r, GUARD, w, pair, stop, facts.sales, facts.cadence)) if (!seen.has(f.text)) findings.push({ ...f, text: `guard address only, not listed: ${f.text}` });
+  for (const f of sideFindings(r, GUARD, w, pair, stop, facts.sales, facts.cadence, facts.slippage_bps)) if (!seen.has(f.text)) findings.push({ ...f, text: `guard address only, not listed: ${f.text}` });
   findings.push(...laterFindings(r, w, facts.sales, facts.later, pair, facts.cadence));
   findings.push(...liquidityFindings(facts.liquidity, facts.block), ...environmentFindings(facts, w));
   findings.unshift(...nearFindings(facts.near, facts.code_hash, facts.implementation), ...reputationFindings(facts.reputation));
@@ -1008,7 +1063,7 @@ export function quoteOf(labels: string[], results: Result[], w: Parties): bigint
 export const byLabel = (labels: string[], results: Result[]) => Object.fromEntries(labels.map((l, i) => [l, results[i]]));
 
 /** Facts beside the simulation that the verdict rests on, all in the evidence. */
-export type Facts = Pick<Report["evidence"], "block" | "cadence" | "code_hash" | "implementation" | "liquidity" | "reputation" | "near" | "opcodes" | "touched" | "token_calls" | "token_balances" | "token_opcodes" | "sales" | "later">;
+export type Facts = Pick<Report["evidence"], "block" | "cadence" | "code_hash" | "implementation" | "liquidity" | "reputation" | "near" | "opcodes" | "touched" | "token_calls" | "token_balances" | "token_opcodes" | "sales" | "slippage_bps" | "later">;
 
 function report(
   proof: Omit<Facts, "block"> & { chain_id: number; block: bigint; template: Hex; amount_wei: string },
@@ -1041,6 +1096,7 @@ function report(
     token_balances: proof.token_balances,
     token_opcodes: proof.token_opcodes,
     sales: proof.sales,
+    slippage_bps: proof.slippage_bps,
     later: proof.later,
     list_target,
   };
@@ -1113,12 +1169,14 @@ export async function checkExit(url: string, token: Address, guard: Address, amo
 }
 
 /** File proofs/<id>.json: `evidence` is the exact string posted to post_verdict, whose
- *  sha256 the contract stores; app/replay.ts rereads it as is. */
-export type ProofFile = Omit<Report, "evidence" | "list_target"> & { id: number; target: string; evidence: string };
+ *  sha256 the contract stores; app/replay.ts rereads it as is. `nodes`: the hosts of the nodes the
+ *  sentinel read (simulation, logs), outside the evidence: sentinels on different nodes post the same
+ *  evidence string. Never their path, which may hold a provider's key. */
+export type ProofFile = Omit<Report, "evidence" | "list_target"> & { id: number; target: string; evidence: string; nodes?: { simulation: string; logs: string } };
 
 /** The proof file of check #id: the report with its evidence serialized once, as posted on chain. */
-export function toProof(id: number, target: string, r: Report | ExitReport): ProofFile {
-  return { id, target, verdict: r.verdict, reasons: r.reasons, evidence: JSON.stringify(r.evidence), request: r.request, response: r.response };
+export function toProof(id: number, target: string, r: Report | ExitReport, nodes?: { simulation: string; logs: string }): ProofFile {
+  return { id, target, verdict: r.verdict, reasons: r.reasons, evidence: JSON.stringify(r.evidence), ...(nodes ? { nodes } : {}), request: r.request, response: r.response };
 }
 
 /** `special()` of a demo token: for guard_frozen, the guard EVM address that evm/fork.sh made it freeze. */

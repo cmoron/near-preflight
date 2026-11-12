@@ -124,8 +124,7 @@ async function lift(token: Address): Promise<void> {
 }
 
 /** Before a moment checks `token`: the owner removes what an earlier run left on it, a listing or a
- *  quarantine (a run interrupted before its verdicts leaves checks the sentinels judge during this one,
- *  after the setup). Nothing to do on a first run. */
+ *  quarantine. Nothing to do on a first run. */
 async function ready(token: Address): Promise<void> {
   if (await view<Entry | null>("get_entry", { token })) {
     console.log(`[demo] ${token} is listed by an earlier run's check: the owner removes the entry`);
@@ -137,24 +136,24 @@ async function ready(token: Address): Promise<void> {
   }
 }
 
-/** request_check on `token`. A run interrupted before its verdicts leaves checks that the sentinels judge
- *  first in this run: one of them can list or quarantine the trap again after setup, or still hold the
- *  token's one pending check. The owner then unlists or lifts it again; a pending check is waited for. */
+/** request_check on `token`. A run interrupted before its verdicts can leave the token's one pending
+ *  check, which this run's sentinels do not judge (app/sentinel.ts step: another run's): it is waited out,
+ *  at most 300 s. A listing or quarantine found then is removed again. */
 async function requestUnlisted(token: Address): Promise<number> {
   for (let tries = 1; ; tries++) {
     try {
       return await requestCheck(token, WEI);
     } catch (e) {
       const why = reason(e);
-      if (tries === 6) throw e;
+      if (tries === 24) throw e; // 23 waits of 15 s: past the 300 s a pending check holds its token
       if (why.includes("target is on the shared blocklist")) {
-        console.log(`[demo] ${token} was listed again, by a check an earlier run left pending: the owner removes the entry`);
+        console.log(`[demo] ${token} was listed since the setup: the owner removes the entry`);
         await unlist(token);
       } else if (why.includes("target is quarantined")) {
-        console.log(`[demo] ${token} was quarantined again, by a check an earlier run left pending: the owner lifts it`);
+        console.log(`[demo] ${token} was quarantined since the setup: the owner lifts it`);
         await lift(token);
       } else if (why.includes("already awaiting its verdict")) {
-        console.log(`[demo] ${token} has a check an earlier run left pending: waiting for its verdict`);
+        console.log(`[demo] ${token} has a check an earlier run left pending, which this run's sentinels do not judge: waiting for its 300 s to pass`);
         await Bun.sleep(15_000);
       } else throw e;
     }

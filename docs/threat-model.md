@@ -49,6 +49,7 @@ A trap can try to sell only when it detects a simulation, or only at the moment 
 | Sells only after an approve of 2^256 - 1, or a buy of exactly 0.01 ETH (`approve_max_only`, `buy_001_only`)                | 🔴 listed: the check runs the exact bytes the guard signs                                                         | `bun test -t "Trap2"`                                 |
 | Sells only in the block right after the buy (`next_block_key`)                                                             | 🔴 listed: the first sale lands 2 to 25 s after the buy (10 to 125 blocks on Base)                                | `bun test -t "NextBlockKey"`                          |
 | Sells only half or all of the balance (`amount_trap`)                                                                      | 🔴 listed: the first sale sells 13 % to 87 %                                                                      | `bun test -t "AmountTrap"`                            |
+| Refuses a sale of 88 % to 99.99 % of the balance, what an agent's exit sells (`exit_size`)                                | 🔴 not listed: `exit-size sale (97 %) refused N s after the buy (…)`: every check also sells the agent's holding | `bun test -t "ExitSizeTrap"`                          |
 | Sells only at the check's late block, or only at its far block                                                             | 🔴 the late sale is drawn 30 to 51 s after the buy, a far sale 301 to 900 s, beside the far sales at 301 s and 900 s; `replay --check` refuses a schedule the sentinel chose | `bun test -t "drawn in seconds"`, `-t "late sale chosen"`, `-t "far sale drawn"` |
 | Tells a simulated block by its timestamp against its number                                                                | 🔴 not a tell: simulated blocks get the times real ones would have at the cadence measured, five a second on Base | `bun test -t "five share each second"`                |
 
@@ -129,7 +130,7 @@ The guard's Base address is public: anyone can send it tokens or get a token to 
 
 ### A lying sentinel
 
-A sentinel is one NEAR key and one Base node, with no TEE (trusted execution environment); its key can
+A sentinel is one NEAR key and its Base nodes (simulation, logs), with no TEE (trusted execution environment); its key can
 only vote on checks. The guard takes votes from the sentinels its owner names: an `allow` or a `warn`
 needs the quorum's identical votes, and any one sentinel blocks ([quorum](contract.md#sentinel-quorum)).
 
@@ -157,9 +158,11 @@ Both sentinels lying together get what one got before the quorum. What replay th
 
 The owner replaces a compromised key with `set_sentinels`; votes it already posted stay.
 
-**In the demo both sentinels run on one machine**, under one operator, and read the same Base node
-unless `EVM_RPC_2` names another: two keys, not two parties. A real deployment separates the machine,
-the RPC provider and the operator of each sentinel; only then is one lying node or one stolen key alone.
+**In the demo both sentinels run on one machine**, under one operator: two keys, not two parties. On
+Base, `./check-mainnet.sh` gives each its own nodes (`EVM_RPC`, `INDEX_RPC`; `EVM_RPC_2`, `INDEX_RPC_2`
+for the second), three providers, none read by both; on the local fork both read the fork, the only node holding the demo
+tokens. A real deployment also separates the machine and the operator of each sentinel; only then is one
+lying node or one stolen key alone.
 
 ### Honest tokens
 
@@ -169,7 +172,7 @@ the RPC provider and the operator of each sentinel; only then is one lying node 
 | USDC on the fork, its pool traded by others while the check waits | 🟢 `allow`: their trades re-executed after the buy, the resale verified      | `bun test -t "their trades re-executed"`   |
 | An honest 30-block cooldown (`cooldown_60`) | 🟠 `warn` naming NUMBER, which its code reads; 🔴 not listed when the first sale is drawn within 30 blocks (about 1 check in 6 on Base, every check on the fork) | `bun test -t "Cooldown60"`                 |
 | An honest one-block hold (`hold_one_block`) | 🟠 `warn` naming NUMBER and TIMESTAMP; its resale goes through, the owner approves           | `bun test -t "holding block"`              |
-| USDC on Base mainnet, read only             | 🟢 `allow` from both sentinels (check #22): reputation not applied, its pool predates the index window; nothing signed. When its pool trades during the wait, those trades are re-executed after the buy, or a `warn` says the resale was not verified | `./check-mainnet.sh`                       |
+| USDC on Base mainnet, read only             | 🟢 `allow` from both sentinels, each on its own nodes (check #28): reputation not applied, its pool predates the index window; nothing signed. When its pool trades during the wait, those trades are re-executed after the buy, or a `warn` says the resale was not verified | `./check-mainnet.sh`                       |
 
 A refused sale lists the token only if the far sale at 900 s is refused too: a refusal that clears with
 time blocks that check alone, or any agent could repeat checks until one lists an honest token. The
@@ -183,8 +186,9 @@ listed.
   the agent buys within 120 s, up to the owner's per-token cap. Replay shows a forged simulation, a block
   or draw they chose, or an index window not bound to the check, only afterwards, and only from the proof
   files (a sentinel may withhold its own) and a node that still serves both blocks' state.
-- **One Base node for all.** Each sentinel believes the endpoint it reads. In the demo both read the
-  same one: a node that lies or lags gives both the same wrong verdict.
+- **Nodes that lie alike.** Each sentinel believes the nodes it reads. `./check-mainnet.sh` gives each
+  its own simulation and logs nodes, three providers, none read by both, each logs node tied to its
+  simulation node by block hash; on the local fork both read the fork. Nodes that lie alike give both the same wrong verdict.
 - **One sentinel blocking.** A stolen key blocks every buy and quarantines the tokens it votes on,
   until the owner replaces it; a sentinel whose node fails blocks the checks it cannot simulate, without
   quarantine. An exit is never blocked.
@@ -207,10 +211,12 @@ listed.
   Base moves together passes them; the later side sees 16 to 24 s of real Base.
 - **Sizes and delays the check did not draw.** A sale refused only below some share, or only during a
   window that reopens before 900 s and misses the drawn delays, passes. A refusal in force at 301 s or
-  at 900 s is met at every check. An agent's exit sells its holding when it chooses.
-- **Asking again, later.** A block quarantines its token for every agent and one check per token
-  runs at a time, so a re-draw costs a quarantine, 30 min by default: an agent that waits may still ask
-  again, with new draws ([token limits](contract.md#token-limits)).
+  at 900 s is met at every check, and so is one of the share an agent's exit sells (97 %), at the late
+  sale's time; an agent exits when it chooses.
+- **Asking again, later.** One check per token runs at a time, and a `block` that rests on the token's
+  code quarantines it for every agent, 30 min by default: a re-draw after such a block costs that wait.
+  A `warn`, a disagreement between sentinels or a check that could not run quarantines nothing. An
+  agent may still ask again, with new draws ([token limits](contract.md#token-limits)).
 - **State that does not move within the later side's window.** A token keyed on its own pool or storage
   passes when nobody touched them during those 16 to 24 s, and fails once someone does. Others' trades of
   the pool are re-executed after the buy, without the transactions before them in their block; when that
@@ -305,6 +311,9 @@ Each now has a test.
 | Design review: a check that samples sales does not converge, each pass found the delay, size or state it missed | an allow-list for the token's own code on the guard's transactions: it calls only its implementation and the precompiles and runs no TIMESTAMP, NUMBER or SELFBALANCE, or the verdict is at most `warn` |
 | A token keyed on its own pool (its reserves, or `sync()` then `getReserves()` for the time) had no finding | its own code reaching its pool or the router is a `warn` naming it |
 | A gap of empty blocks left to the local fork's clock could end past the next block's time on a slow node: the check failed | a gap starts at the time of the block before it |
-| An agent could ask again until a draw missed a trap, N checks at once were N draws, and one trap could take every armed budget | a quarantine after any block, one check per token, a cap per token for all agents ([token limits](contract.md#token-limits)) |
+| An agent could ask again until a draw missed a trap, N checks at once were N draws, and one trap could take every armed budget | a quarantine after a block on the token's code, one check per token, a cap per token for all agents ([token limits](contract.md#token-limits)) |
 | One sentinel key, or the one node it read, was enough for an `allow` on a trap                    | a quorum of sentinels: identical votes for an `allow` or a `warn`, any one blocks, listing takes the quorum |
 | The sentinel alone could `report` any token to the blocklist                                      | a sentinel is no reporter: its votes list with the quorum                                                 |
+| No sale was the size an agent's exit sells (its holding, 97 % of the balance): a token refusing 88 % to 99.99 % passed every check | every check also sells exactly that share, the guard's slippage bound read from the guard; replay recomputes it |
+| Both sentinels read one Base node, and the logs (index, LP holders) a node nothing tied to the simulation's | each its own nodes on Base, three providers, none read by both; each logs node must give the check's block and the index window's start the simulation node's hashes |
+| A restarted sentinel voted on old checks, fork checks too from a mainnet run                       | a sentinel votes only on checks requested since it started; a vote refused for the set or the quorum makes it read them again |

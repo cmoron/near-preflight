@@ -50,13 +50,14 @@ export RPC_TIMEOUT_MS=60000
 bun app/testkit.ts live &
 MINER=$!
 # Each sentinel builds the template index from the fork's first block up to each check's block. Two of
-# them, each its own account and key (.env.sentinel2, written by setup): an allow needs both votes. The
-# second reads another Base node when EVM_RPC_2 names one; on the fork both read the fork.
+# them, each its own account and key (.env.sentinel2, written by setup): an allow needs both votes. Both
+# read the fork, the one node holding the demo tokens (check-mainnet.sh gives each its own nodes).
 export INDEX_FROM=$(($(jq .fork_block evm/tokens.json) + 1))
+unset INDEX_RPC
 bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts &
 SENTINELS=($!)
 if [[ -f .env.sentinel2 ]]; then
-  env ${EVM_RPC_2:+EVM_RPC=$EVM_RPC_2} bun --env-file=.env --env-file=.env.sentinel2 app/sentinel.ts &
+  bun --env-file=.env --env-file=.env.sentinel2 app/sentinel.ts &
   SENTINELS+=($!)
 fi
 trap 'kill "${SENTINELS[@]}" $MINER' EXIT
