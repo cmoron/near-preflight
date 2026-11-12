@@ -466,9 +466,9 @@
           ><code>git clone https://github.com/cmoron/near-preflight &amp;&amp; cd near-preflight &amp;&amp; bun install
 export GUARD=<span id="cmd-guard">guard.goblin-guard-69369.testnet</span>   <span class="c"># the demo guard on NEAR testnet, read only</span>
 
-<span class="c"># Check #21 (USDC on Base mainnet): resent, traced on a local fork, re-judged, compared with NEAR</span>
-bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
-<span class="c">#   REPLAY OK: verdict warn confirmed, same as on chain</span>
+<span class="c"># Check #22 (USDC on Base mainnet): resent, traced on a local fork, its template index rebuilt, re-judged, compared with NEAR</span>
+INDEX_RPC=https://base-rpc.publicnode.com bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
+<span class="c">#   REPLAY OK: verdict allow confirmed, same as on chain</span>
 
 <span class="c"># The model's decision behind check #1: signature, Intel and NVIDIA attestation, the guard's record</span>
 bun app/attest.ts app/fixtures/decision.json --check 1

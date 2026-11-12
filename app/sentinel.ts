@@ -1,7 +1,7 @@
 // Sentinel role: reads the guard's verdict requests, simulates the buy on the EVM chain,
 // posts verdict, reasons and proof digest with its function-call key (post_verdict only).
 // It also reads the guard's shared blocklist and the code seen at the target's last verdict, builds the
-// template index from block INDEX_FROM up to each check's reference block (app/index.ts), and quotes
+// template index up to each check's reference block (app/index.ts, indexer), and quotes
 // agents' exits (request_exit) by simulating the
 // sale from the guard's EVM address. The guard side runs the guard's own transactions, read from the
 // guard (preview_check, preview_sale): same calldata, value, nonce, gas and fees as it signs. The
@@ -13,10 +13,33 @@
 // the reference block, itself the first block 4 s after the request.
 // The guard takes votes: an allow or a warn needs the quorum of its sentinels to post the same one, any
 // one of them blocks. Each sentinel is this program with its own account, key and, ideally, Base node.
-// Usage: [INDEX_FROM=<block>] bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts   (EVM_RPC: the node)
+// Usage: [INDEX_RPC=<rpc>] [INDEX_FROM=<block>|none] bun --env-file=.env --env-file=.env.sentinel app/sentinel.ts   (EVM_RPC: the node)
 import { formatEther, type Address, type Hex } from "viem";
+import { buildIndex, indexSha256, INDEX_SPAN_S, windowStart, type Index } from "./index";
 import type { Check, Entry, Sentinels } from "./near";
 import type { NearFacts, Previews } from "./verifier";
+
+/** The template index this sentinel judges with, from its environment: built for each check up to its
+ *  reference block, on INDEX_RPC (EVM_RPC by default; it must serve eth_getLogs). It starts at block
+ *  INDEX_FROM when set (the fork), otherwise at the last block 2 h before the check's (windowStart: real
+ *  Base, the same window for every sentinel). INDEX_FROM=none: no index, so every buy verdict is at least
+ *  warn. `log` gets each build's window, request count, time and sha256. */
+export function indexer(e: Record<string, string | undefined>, log: (s: string) => void = () => {}): { rpc: string; build: (block: number) => Promise<Index> } | null {
+  if (e.INDEX_FROM === "none") return null;
+  const rpc = e.INDEX_RPC || e.EVM_RPC;
+  if (!rpc) throw new Error("INDEX_RPC or EVM_RPC must name a node for the template index");
+  const fixed = e.INDEX_FROM ? Number(e.INDEX_FROM) : null;
+  const build = async (block: number) => {
+    const started = Date.now();
+    let requests = 0;
+    const from = fixed ?? (await windowStart(rpc, block));
+    const index = await buildIndex(rpc, from, block, async () => void requests++);
+    const pools = Object.values(index.templates).flat().length;
+    log(`template index of blocks ${from}..${block} on ${rpc}: ${pools} WETH pools, built in ${requests} requests, ${((Date.now() - started) / 1000).toFixed(1)} s in all, sha256 ${indexSha256(index).slice(0, 10)}...`);
+    return index;
+  };
+  return { rpc, build };
+}
 
 /** What to do with the request read at block height `readAt`, its id being <= last_check_id read at
  *  height `lastAt`. Absent at a height >= lastAt: it existed at lastAt and no longer does, so it was
@@ -35,7 +58,6 @@ if (import.meta.main) {
   // near.ts installs a global fetch and reads NEAR_RPC at import: loaded here only, not by the tests.
   const { account, call, env, reason, view, viewAt } = await import("./near");
   const { checkExit, checkToken, deriveProbes, toProof } = await import("./verifier");
-  const { buildIndex, INDEX_SPAN_S } = await import("./index");
   const { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH } = await import("./derive");
   const { mkdir, rm } = await import("node:fs/promises");
 
@@ -58,9 +80,9 @@ if (import.meta.main) {
   const GUARD_EVM = deriveEvmAddress(await fetchMasterPublicKey(), env("GUARD"), GUARD_PATH);
   await mkdir("proofs", { recursive: true });
   // The index must end at each check's reference block (windowProblem): it is built for each check.
-  const from = process.env.INDEX_FROM ? Number(process.env.INDEX_FROM) : null;
-  const index = from === null ? null : (block: number) => buildIndex(EVM, from, block);
-  log(from === null ? "no template index (INDEX_FROM unset): reputation unknown, so every buy verdict is at least warn" : `template index from block ${from} to each check's block (at least ${INDEX_SPAN_S / 3600} h)`);
+  const index = indexer(process.env, log);
+  const from = process.env.INDEX_FROM ? `block ${process.env.INDEX_FROM}` : `the last block ${INDEX_SPAN_S / 3600} h before it`;
+  log(index ? `template index on ${index.rpc}, for each check from ${from} to its block` : "no template index (INDEX_FROM=none): reputation unknown, so every buy verdict is at least warn");
 
   /** The guard's blocklist entry on the target, and the code of its last verdict. */
   const nearFacts = async (target: Address): Promise<NearFacts> => {
@@ -98,7 +120,7 @@ if (import.meta.main) {
     log(`#${id} : ${check.agent} wants to buy ${formatEther(BigInt(check.amount_wei))} ETH of ${target}: the guard's own buy and sales simulated, liquidity, template reputation, blocklist...`);
     // Probes derived from on-chain data, not chosen here: replay --check recomputes them.
     const ticket = { guard: env("GUARD"), id, requested_ns: check.requested_ns };
-    const r = await checkToken(EVM, target, GUARD_EVM, (head, cadence) => deriveProbes(ticket, head.hash, cadence), { requested_ns: check.requested_ns, index, near: nearFacts, amount: BigInt(check.amount_wei), preview });
+    const r = await checkToken(EVM, target, GUARD_EVM, (head, cadence) => deriveProbes(ticket, head.hash, cadence), { requested_ns: check.requested_ns, index: index?.build ?? null, indexRpc: index?.rpc, near: nearFacts, amount: BigInt(check.amount_wei), preview });
     const proof = toProof(id, target, r);
     await Bun.write(proofPath(id), JSON.stringify(proof, null, 2));
     const code = { code_hash: r.evidence.code_hash, implementation: r.evidence.implementation };

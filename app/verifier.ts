@@ -413,7 +413,7 @@ const WAIT_MS = 120_000;
 export type Stamp = { number: Hex; timestamp: Hex };
 export const stampOf = (url: string, tag: string) => rpc<Stamp>(url, "eth_getBlockByNumber", [tag, false]);
 /** Waits until the node's latest block satisfies `done`. */
-async function until(url: string, done: (h: Stamp) => boolean, what: string): Promise<Stamp> {
+export async function until(url: string, done: (h: Stamp) => boolean, what: string): Promise<Stamp> {
   for (const end = Date.now() + WAIT_MS; ; await Bun.sleep(POLL_MS)) {
     const h = await stampOf(url, "latest");
     if (done(h)) return h;
@@ -707,7 +707,15 @@ export type Previews = { check: (quote: bigint) => Promise<Hex[]>; sale: (amount
  *  fixes the reference block), the template index it builds up to a block (app/index.ts), a reader of the
  *  guard's blocklist entry and last code for a target, the amount the agent asked to buy (request_check),
  *  and the guard's previews of what it would sign. */
-export type Context = { requested_ns: string; index: ((block: number) => Promise<Index>) | null; near: (target: Address) => Promise<NearFacts>; amount: bigint; preview: Previews };
+export type Context = {
+  requested_ns: string;
+  index: ((block: number) => Promise<Index>) | null;
+  /** The node the index reads logs from, for the target's own pool too (ownFunding); `url` by default. */
+  indexRpc?: string;
+  near: (target: Address) => Promise<NearFacts>;
+  amount: bigint;
+  preview: Previews;
+};
 
 /** The fee fields shared by every preview of a check; a disagreement is a broken guard, never simulated. */
 function sameFees(txs: Hex[]): Fees {
@@ -754,7 +762,7 @@ export async function checkToken(url: string, token: Address, guard: Address, pr
   const index = ctx.index ? await ctx.index(Number(block)) : null;
   const window = index?.chain_id === chainId ? windowProblem(head, await stampOf(url, toHex(index.from)), index.to) : null;
   if (window) throw new Error(window);
-  const reputation = index?.chain_id === chainId ? reputationOf(index, template, beforeBlock(index, own, await ownFunding(url, index, own)), cadence) : null;
+  const reputation = index?.chain_id === chainId ? reputationOf(index, template, beforeBlock(index, own, await ownFunding(ctx.indexRpc ?? url, index, own)), cadence) : null;
   const near = await ctx.near(token);
   const amount = ctx.amount;
   const proof = { chain_id: chainId, block, cadence, code_hash: keccak256(code), implementation, liquidity, template, reputation, near, amount_wei: amount.toString(), opcodes, sales: sale };

@@ -16,16 +16,16 @@ The agent holds no key for Base, the chain it buys on: the contract builds the t
 
 ## One purchase
 
-<p align="center"><img src="docs/assets/flow.svg" alt="One purchase, read left to right. Outside near-preflight, dashed: the AI agent (untrusted, no key for Base), NEAR Chain Signatures and the Base blockchain. Inside the green near-preflight frame: the guard contract on NEAR, the sentinel and the proof anyone can replay. 1: the agent asks the guard. 2: the sentinel simulates the buy and the resale on Base. 3: it stores the verdict on the guard. 4: Chain Signatures signs the swap the guard built. Then anyone can broadcast the signed swap to Base, no key needed." width="830"></p>
+<p align="center"><img src="docs/assets/flow.svg" alt="One purchase, read left to right. Outside near-preflight, dashed: the AI agent (untrusted, no key for Base), NEAR Chain Signatures and the Base blockchain. Inside the green near-preflight frame: the guard contract on NEAR, two sentinels and the proof anyone can replay. 1: the agent asks the guard to check a token and an amount. 2: each sentinel simulates the buy and the resale on Base. 3: each posts its vote to the guard; a verdict takes both votes. 4: Chain Signatures signs the swap the guard built. Then anyone can broadcast the signed swap to Base, no key needed." width="830"></p>
 
 1. **Asked.** The AI agent asks the guard to check a token and an amount. It is untrusted: a prompt injection may be steering it.
 2. **Simulated.** Each sentinel reads the request and simulates on Base the buy the guard would sign, then the resale.
-3. **Verdict stored.** Two sentinels each post `allow`, `warn` or `block`, with the sha256 of their evidence: an `allow` takes both, one `block` is enough.
+3. **Verdict stored.** Two sentinels each vote `allow`, `warn` or `block`, with the sha256 of their evidence: `allow` and `warn` take both votes, one `block` is enough.
 4. **Signed by NEAR.** On a fresh `allow` the agent buys, naming no route or recipient: the guard builds the simulated swap and Chain Signatures signs it.
 
 Anyone can then broadcast the signed swap, no key needed; the code calls that broadcaster the **relay**. In the demo it goes to a local fork of Base.
 
-The green frame is near-preflight: the **guard** is the NEAR contract, a **sentinel** an off-chain program the guard's owner appoints, whose NEAR key can only vote on checks. **Chain Signatures**, NEAR's threshold signing network, signs for the guard's Base address.
+The green frame is near-preflight: the **guard** is the NEAR contract, the **sentinels** are off-chain programs the guard's owner appoints (two in the demo), each with a NEAR key that can only vote on checks. **Chain Signatures**, NEAR's threshold signing network, signs for the guard's Base address.
 
 Do not trust it blindly: anyone can [replay](docs/replay.md) a verdict, and the [threat model](docs/threat-model.md#a-lying-sentinel) says what a lying sentinel can still do.
 
@@ -47,9 +47,9 @@ First, the [status page](https://cmoron.github.io/near-preflight/journal.html) l
 git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun install
 export GUARD=guard.goblin-guard-69369.testnet   # the demo guard on NEAR testnet, read only
 
-# Check #21 (USDC on Base mainnet): resent, traced and its far sales mined on a local fork, re-judged, compared with NEAR
-bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
-#   REPLAY OK: verdict warn confirmed, same as on chain
+# Check #22 (USDC on Base mainnet): resent, traced and its far sales mined on a local fork, its template index rebuilt, re-judged, compared with NEAR
+INDEX_RPC=https://base-rpc.publicnode.com bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
+#   REPLAY OK: verdict allow confirmed, same as on chain
 
 # The model's decision behind check #1: signature, Intel and NVIDIA attestation, the guard's record
 bun app/attest.ts app/fixtures/decision.json --check 1
@@ -60,22 +60,22 @@ echo GUARD=$GUARD > .env && evm/fork.sh   # then, in another terminal:
 bun test --timeout 30000                  #   333 pass, 0 fail
 ```
 
-USDC gets `warn` on mainnet because no template index covers mainnet (an unknown reputation is never a pass).
+`INDEX_RPC` serves the logs the template index is rebuilt from; `mainnet.base.org` refuses them.
 
 ## What it stops
 
-| Attack                                                                     | Verdict                                   | Details                                                          |
-| -------------------------------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------- |
-| A token you can buy but never sell                                         | 🔴 block, listed                          | [honeypot](docs/threat-model.md#sale-refused-after-the-buy)      |
-| The token's owner takes tokens back without approval                       | 🔴 block, listed                          | [takeback](docs/threat-model.md#the-owner-takes-tokens-back)     |
-| A clean copy of code whose earlier pools were drained                      | 🔴 block                                  | [farm](docs/threat-model.md#template-farm)                       |
-| A token that sells only in a simulation, or at the delay a check would try | 🔴 block, listed                          | [tells](docs/threat-model.md#telling-the-check-from-a-real-sale) |
-| A token keyed on WETH or the factory, or that fails on a later Base block  | 🔴 block                                  | [state](docs/threat-model.md#state-base-moves-every-block)       |
-| Code that reads values no simulation can match (base fee, coinbase…)       | 🟠 warn; 🔴 block once the base fee moved | [opcodes](docs/threat-model.md#values-no-simulation-can-match)   |
-| A token whose own code reads the time or its pool, to change after the check | 🟠 warn, the owner decides              | [own code](docs/threat-model.md#what-the-tokens-own-code-did)    |
-| A prompt-injected agent changes the route, recipient or minimum output     | 🔴 ignored: NEAR signs what was simulated | [bypasses](docs/threat-model.md#agent-bypasses)                  |
-| One stolen sentinel key, or a Base node only one sentinel reads, says `allow` on a trap | 🔴 no allow: it takes both sentinels | [quorum](docs/threat-model.md#a-lying-sentinel)                  |
-| An honest token (USDC on the fork)                                         | 🟢 allow, NEAR signs the swap             | [honest](docs/threat-model.md#honest-tokens)                     |
+| Attack                                                                                  | Verdict                                   | Details                                                          |
+| --------------------------------------------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------- |
+| A token you can buy but never sell                                                      | 🔴 block, listed                          | [honeypot](docs/threat-model.md#sale-refused-after-the-buy)      |
+| The token's owner takes tokens back without approval                                    | 🔴 block, listed                          | [takeback](docs/threat-model.md#the-owner-takes-tokens-back)     |
+| A clean copy of code whose earlier pools were drained                                   | 🔴 block                                  | [farm](docs/threat-model.md#template-farm)                       |
+| A token that sells only in a simulation, or at the delay a check would try              | 🔴 block, listed                          | [tells](docs/threat-model.md#telling-the-check-from-a-real-sale) |
+| A token keyed on WETH or the factory, or that fails on a later Base block               | 🔴 block                                  | [state](docs/threat-model.md#state-base-moves-every-block)       |
+| Code that reads values no simulation can match (base fee, coinbase…)                    | 🟠 warn; 🔴 block once the base fee moved | [opcodes](docs/threat-model.md#values-no-simulation-can-match)   |
+| A token whose own code reads the time or its pool, to change after the check            | 🟠 warn, the owner decides                | [own code](docs/threat-model.md#what-the-tokens-own-code-did)    |
+| A prompt-injected agent changes the route, recipient or minimum output                  | 🔴 ignored: NEAR signs what was simulated | [bypasses](docs/threat-model.md#agent-bypasses)                  |
+| One stolen sentinel key, or a Base node only one sentinel reads, says `allow` on a trap | 🔴 no allow: it takes both sentinels      | [quorum](docs/threat-model.md#a-lying-sentinel)                  |
+| An honest token: USDC on the fork, or read only on Base mainnet                         | 🟢 allow; on the fork NEAR signs the swap | [honest](docs/threat-model.md#honest-tokens)                     |
 
 **Listed**: put on the guard's shared blocklist, refused to every agent. Each link gives the exact reason and the test that shows it.
 
@@ -106,7 +106,7 @@ Every limit, with its reason: [threat model](docs/threat-model.md#what-it-does-n
 5. `./demo.sh` exits 0 in 3 to 5 min (each check waits about 25 s for Base blocks): a poisoned message pushes the agent to a trap (blocked), a farm copy (blocked), USDC (allowed, signed by NEAR, broadcast to the fork), then the agent's bypasses (refused).
 6. It prints this run's `replay --check` and `attest --check` commands; each exits 0.
 7. Optional: `NEAR_AI_API_KEY` in `.env.llm` runs the live model; `./demo.sh --full` adds an exit, an approved `warn`, a second agent and the emergency stop.
-8. `./check-mainnet.sh` exits 0: USDC simulated on Base mainnet, read only, then replayed.
+8. `./check-mainnet.sh` exits 0: USDC simulated on Base mainnet, read only, `allow`, then replayed; nothing is signed.
 
 Expected output of each step and the deployment facts: [reproduce](docs/reproduce.md).
 

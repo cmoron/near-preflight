@@ -28,14 +28,15 @@ No NEAR account, no key: `GUARD` only names the contract to read.
 ```sh
 git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun install
 export GUARD=guard.goblin-guard-69369.testnet
-bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
-#   39 OK lines, then: REPLAY OK: verdict warn confirmed, same as on chain
+INDEX_RPC=https://base-rpc.publicnode.com bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
+#   41 OK lines, then: REPLAY OK: verdict allow confirmed, same as on chain
 bun app/attest.ts app/fixtures/decision.json --check 1
 #   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)
 ```
 
-- `replay` resends check #21 (USDC on Base mainnet) to `mainnet.base.org`, traces it on throwaway anvil
-  forks, mines its far sales there again, rejudges it and compares everything with the guard
+- `replay` resends check #22 (USDC on Base mainnet) to `mainnet.base.org`, traces it on throwaway anvil
+  forks, mines its far sales there again, rebuilds its template index from `INDEX_RPC` (a node that
+  serves logs), rejudges it and compares everything with the guard
   ([what it checks](replay.md#what-replay-recomputes)).
 - `attest` verifies the model's decision behind check #1; it calls Intel and NVIDIA
   ([what it checks](replay.md#what-attest-verifies)).
@@ -89,20 +90,28 @@ The journal reads any guard: `https://cmoron.github.io/near-preflight/journal.ht
 
 ## Real Base
 
-`./check-mainnet.sh` exits 0 in about a minute (68 s here, with both sentinels; longer when its pool trades during the wait). The armer arms; each sentinel simulates USDC on Base
-mainnet (`mainnet.base.org`, read only, nothing broadcast), traces it on an anvil forked from it, waits
-for the later side's block and posts its vote; then the first sentinel's proof is replayed with `--check`.
+`./check-mainnet.sh` exits 0 in about a minute and a half (81 s here, with both sentinels; longer when
+its pool trades during the wait). The armer arms; each sentinel simulates USDC on Base mainnet
+(`mainnet.base.org`, read only, nothing broadcast), traces it on an anvil forked from it, builds the
+template index over the 2 h before the check's block, waits for the later side's block and posts its
+vote. Then the armer disarms the agent, and the first sentinel's proof is replayed with `--check`.
 
-The verdict is `warn`: there is no template index for mainnet. When USDC/WETH traded during the wait,
-the trades are re-executed after the buy, or a second reason says the resale was not verified (4 of 7
-such windows, [sentinel](sentinel.md#others-trades-during-the-wait)). On an earlier guard, check #70's
-pool traded and its trade was re-executed. Check #21's proof ships as `app/fixtures/usdc-base-mainnet.json`
-(nobody traded its pool during its wait; its far sales ran 301 s, 312 s and 900 s after the buy). Both
-sentinels posted that very evidence string: the one file is the proof of both votes.
+- **The index** reads `INDEX_RPC`, `https://base-rpc.publicnode.com` by default: `mainnet.base.org`
+  refuses `eth_getLogs`. Here each sentinel built the same one (blocks 56,606,606 to 56,642,602, same
+  sha256) in 54 requests, 3 to 3.5 s.
+- **The verdict is `allow`**, from both sentinels: USDC's pool held 0.5 ETH before the window, so
+  reputation is "not applied", a note. When USDC/WETH trades during the wait, the trades are re-executed
+  after the buy, or a second reason says the resale was not verified, a `warn`
+  ([sentinel](sentinel.md#others-trades-during-the-wait)).
+- **Nothing is signed.** The script never calls `buy`, and it disarms the agent once the verdict is in:
+  `buy` needs an armed budget, so the guard signs no swap for that `allow`. The guard's Base address
+  holds no ETH on mainnet.
+- **The proof.** Check #22's ships as `app/fixtures/usdc-base-mainnet.json` (nobody traded its pool
+  during its wait; its far sales ran 301 s, 572 s and 900 s after the buy). Both sentinels posted that
+  very evidence string: the one file is the proof of both votes.
 
-To build an index, use a node that serves `eth_getLogs` (`mainnet.base.org` does not):
-`bun app/index.ts <rpc> <from> <to> <out.json> --pace-ms 1000`. The measurements are in
-[sentinel](sentinel.md#measured-on-real-base).
+To build an index by hand: `bun app/index.ts <rpc> <from> <to> <out.json> --pace-ms 1000`. The
+measurements are in [sentinel](sentinel.md#measured-on-real-base).
 
 ## Troubleshooting
 

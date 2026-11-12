@@ -5,8 +5,9 @@
 // on, the far sale mined again on a local fork. With --check, everything is also compared with the guard
 // on NEAR (GUARD), and what the sentinel must not choose (the reference block, the probes, the sales, the
 // later side's block) is derived again from on-chain data. Replay comes after the fact: it shows a lie, it cannot prevent the buy it allowed.
-// It needs a node that still serves the state of both blocks. docs/replay.md lists each line.
-// Usage: bun app/replay.ts <proof.json> [rpc] [--check]   (exit code 0 only if every line holds)
+// It needs a node that still serves the state of both blocks, and one that serves eth_getLogs to rebuild
+// the template index (INDEX_RPC, the same node by default). docs/replay.md lists each line.
+// Usage: [INDEX_RPC=<rpc>] bun app/replay.ts <proof.json> [rpc] [--check]   (exit code 0 only if every line holds)
 import { decodeFunctionData, encodeFunctionData, keccak256, parseAbi, parseTransaction, serializeTransaction, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
 import { ENV_OPCODES, TOKEN_OPCODES, trace, traceLater, type Reach, type Trace } from "./environment";
 import { laterSide, MAX_REPLAYED } from "./later";
@@ -525,6 +526,8 @@ type Opts = {
   chain?: (id: number) => Promise<OnChain>;
   entry?: (token: string) => Promise<OnChainEntry>;
   guard?: GuardInfo;
+  /** The node the template index is rebuilt from (eth_getLogs); `url` by default. */
+  indexRpc?: string;
 };
 
 /** Replays one proof against the node at `url`: one Line per fact, OK, MISMATCH, ERROR or SKIPPED
@@ -660,11 +663,14 @@ export async function replay(
     try {
       const window = windowProblem(await stampOf(url, toHex(e.block)), await stampOf(url, toHex(r.from)), r.to);
       add(!window, window ?? `template index window ${r.from}..${r.to} bound to block ${e.block}: it starts at least ${INDEX_SPAN_S / 3600} h before it and ends at it`);
-      const index = await buildIndex(url, r.from, r.to);
+      const logs = opts.indexRpc ?? url;
+      let requests = 0;
+      const index = await buildIndex(logs, r.from, r.to, async () => void requests++);
       const sha = indexSha256(index);
-      add(sha === r.index_sha256, sha === r.index_sha256 ? `template index of blocks ${r.from}..${r.to} rebuilt from the node: same sha256 ${sha.slice(0, 10)}...` : `template index of blocks ${r.from}..${r.to} rebuilt with sha256 ${sha}, evidence says ${r.index_sha256}`);
+      const where = logs === url ? "the node" : logs;
+      add(sha === r.index_sha256, sha === r.index_sha256 ? `template index of blocks ${r.from}..${r.to} rebuilt from ${where}: same sha256 ${sha.slice(0, 10)}... (${requests} requests)` : `template index of blocks ${r.from}..${r.to} rebuilt from ${where} with sha256 ${sha}, evidence says ${r.index_sha256}`);
       const own = e.liquidity?.pair ?? null;
-      const want = JSON.stringify(reputationOf(index, e.template as Hex, beforeBlock(index, own, await ownFunding(url, index, own)), e.cadence));
+      const want = JSON.stringify(reputationOf(index, e.template as Hex, beforeBlock(index, own, await ownFunding(logs, index, own)), e.cadence));
       add(want === JSON.stringify(r), want === JSON.stringify(r) ? `template reputation recomputed identically (${r.drained} of ${r.pools} earlier pools drained)` : `template reputation differs: evidence ${JSON.stringify(r)} vs rebuilt ${want}`);
     } catch (err) {
       fail("checking the template index window or rebuilding the index", err);
@@ -895,11 +901,11 @@ if (import.meta.main) {
   const check = args.includes("--check");
   const [file, url = process.env.EVM_RPC ?? "http://127.0.0.1:8545"] = args.filter((a) => a !== "--check");
   if (!file) {
-    console.error("usage: bun app/replay.ts <proof.json> [rpc] [--check]");
+    console.error("usage: [INDEX_RPC=<rpc>] bun app/replay.ts <proof.json> [rpc] [--check]");
     process.exit(2);
   }
   const proof = (await Bun.file(file).json()) as Proof;
-  const lines = await replay(proof, url, { check });
+  const lines = await replay(proof, url, { check, indexRpc: process.env.INDEX_RPC || undefined });
   for (const l of lines) console.log(l.line);
   console.log(summary(lines, check, proof.verdict));
   process.exit(lines.every((l) => l.ok) ? 0 : 1);

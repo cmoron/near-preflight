@@ -9,7 +9,7 @@
 // a template whose earlier pools were almost all drained shortly after their funding.
 // Usage: bun app/index.ts <rpc> <from block> <to block> <out.json> [--pace-ms N]
 import { hexToBytes, keccak256, parseEther, sha256, stringToHex, toHex, type Address, type Hex } from "viem";
-import { blocksIn, FACTORY, LOG_CHUNK, rpc, short, WETH, type Cadence, type Finding, type Stamp } from "./verifier";
+import { blocksIn, CADENCE_BLOCKS, FACTORY, firstSince, LOG_CHUNK, rpc, short, stampOf, until, WETH, type Cadence, type Finding, type Stamp } from "./verifier";
 
 /** At least this many earlier pools of the template: fewer is an anecdote, not a pattern. */
 const MIN_POOLS = 3;
@@ -93,12 +93,16 @@ const addWeth = (net: bigint, l: Log, wethIs0: boolean) => {
   const weth = BigInt(`0x${wethIs0 ? l.data.slice(2, 66) : l.data.slice(66, 130)}`);
   return l.topics[0] === MINT ? net + weth : net > weth ? net - weth : 0n;
 };
-/** eth_getLogs over [from, to] in LOG_CHUNK windows. */
-async function logsIn(call: <T>(method: string, params: unknown[]) => Promise<T>, filter: Record<string, unknown>, from: number, to: number): Promise<Log[]> {
+/** eth_getLogs over [from, to] in LOG_CHUNK windows, on the node at `url`. A node that does not serve
+ *  them (mainnet.base.org answers `request limit reached`) fails with what the index needs. */
+async function logsIn(url: string, call: <T>(method: string, params: unknown[]) => Promise<T>, filter: Record<string, unknown>, from: number, to: number): Promise<Log[]> {
   const out: Log[] = [];
   for (let start = BigInt(from); start <= BigInt(to); start += LOG_CHUNK) {
     const end = start + LOG_CHUNK - 1n < BigInt(to) ? start + LOG_CHUNK - 1n : BigInt(to);
-    out.push(...(await call<Log[]>("eth_getLogs", [{ ...filter, fromBlock: toHex(start), toBlock: toHex(end) }])));
+    const logs = await call<Log[]>("eth_getLogs", [{ ...filter, fromBlock: toHex(start), toBlock: toHex(end) }]).catch((e: unknown) => {
+      throw new Error(`eth_getLogs failed on ${url} (${e instanceof Error ? e.message : e}): the template index needs a node that serves logs over ${LOG_CHUNK} blocks, such as https://base-rpc.publicnode.com; name it in INDEX_RPC`);
+    });
+    out.push(...logs);
   }
   return out;
 }
@@ -107,7 +111,7 @@ async function logsIn(call: <T>(method: string, params: unknown[]) => Promise<T>
  *  runs before every request (the CLI waits there to stay polite with public RPCs). */
 export async function buildIndex(url: string, from: number, to: number, pace: () => Promise<void> = async () => {}): Promise<Index> {
   const call = async <T>(method: string, params: unknown[]) => (await pace(), rpc<T>(url, method, params));
-  const logs = (filter: Record<string, unknown>, first = from) => logsIn(call, filter, first, to);
+  const logs = (filter: Record<string, unknown>, first = from) => logsIn(url, call, filter, first, to);
   const chain_id = Number(await call<Hex>("eth_chainId", []));
   const weth = WETH.toLowerCase() as Address;
   const pools: Pool[] = [];
@@ -164,6 +168,17 @@ export function windowProblem(ref: Stamp, from: Stamp, to: number): string | nul
   return `template index window ${BigInt(from.number)}..${to} is not bound to block ${BigInt(ref.number)}: it must start at least ${INDEX_SPAN_S / 3600} h before it and end at it`;
 }
 
+/** The narrowest window windowProblem accepts for a check at block `ref`: it starts at the last block at
+ *  least INDEX_SPAN_S before it, by their timestamps (2 h of Base: about 36,000 blocks). Every sentinel
+ *  reading the same chain gets the same one, and so the same index. Waits for `ref` on a node behind. */
+export async function windowStart(url: string, ref: number): Promise<number> {
+  await until(url, (h) => BigInt(h.number) >= BigInt(ref), `block ${ref} on ${url}`);
+  const [r, back] = await Promise.all([stampOf(url, toHex(ref)), stampOf(url, toHex(ref - CADENCE_BLOCKS))]);
+  const at = BigInt(r.timestamp) - BigInt(INDEX_SPAN_S) + 1n; // the start is the block before the first one this late
+  const guess = ref - blocksIn({ blocks: CADENCE_BLOCKS, seconds: Number(BigInt(r.timestamp) - BigInt(back.timestamp)) }, INDEX_SPAN_S - 1);
+  return Number(await firstSince(url, at, BigInt(ref), BigInt(guess))) - 1;
+}
+
 /** Template reputation judges a target only against pools funded before its own (`ownPair`, its V2
  *  WETH pair), so copies funded and drained after it cannot poison it. In the index, its pool counts
  *  from its funding block, or from the window's end (`to + 1`: every pool of the index is earlier) when
@@ -191,7 +206,7 @@ export async function ownFunding(url: string, index: Index, ownPair: Address | n
     if (BigInt(`0x${reserves.slice(wethIs0 ? 2 : 66, wethIs0 ? 66 : 130)}`) >= MIN_POOL_WETH) return null;
   }
   let net = 0n;
-  for (const l of await logsIn(call, { address: ownPair, topics: [[MINT, BURN]] }, index.from, index.to)) {
+  for (const l of await logsIn(url, call, { address: ownPair, topics: [[MINT, BURN]] }, index.from, index.to)) {
     net = addWeth(net, l, wethIs0);
     if (net >= MIN_POOL_WETH) return Number(BigInt(l.blockNumber));
   }

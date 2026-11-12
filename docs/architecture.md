@@ -148,7 +148,7 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 | NEAR, guard storage | checks (verdict, reasons, evidence sha256, quote, amount, tx hashes, `list_target`, signed tx), credits, budgets, arming log, blocklist, holdings, reserved nonces, code at the last verdict |
 | NEAR, events        | every action, including the full evidence string in `verdict_posted`                                                                                                                         |
 | Base                | the tokens and ETH at the guard's derived address, the pools                                                                                                                                 |
-| Sentinel's machine  | `proofs/<id>.json` (requests and responses); the template index, built for each check from block `INDEX_FROM`                                                                                |
+| Sentinel's machine  | `proofs/<id>.json` (requests and responses); the template index, built for each check over the 2 h before its block (from `INDEX_FROM` on the fork)                                         |
 | Agent's machine     | decision packages in `proofs/llm/`                                                                                                                                                           |
 | This repository     | two proofs in `app/fixtures/`, the fork's token addresses in `evm/tokens.json`                                                                                                               |
 

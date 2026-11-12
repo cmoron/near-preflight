@@ -169,7 +169,7 @@ the RPC provider and the operator of each sentinel; only then is one lying node 
 | USDC on the fork, its pool traded by others while the check waits | 🟢 `allow`: their trades re-executed after the buy, the resale verified      | `bun test -t "their trades re-executed"`   |
 | An honest 30-block cooldown (`cooldown_60`) | 🟠 `warn` naming NUMBER, which its code reads; 🔴 not listed when the first sale is drawn within 30 blocks (about 1 check in 6 on Base, every check on the fork) | `bun test -t "Cooldown60"`                 |
 | An honest one-block hold (`hold_one_block`) | 🟠 `warn` naming NUMBER and TIMESTAMP; its resale goes through, the owner approves           | `bun test -t "holding block"`              |
-| USDC on Base mainnet                        | 🟠 `warn`: no template index covers mainnet; its pool's trades during the check re-executed (an earlier guard's check #70), or, when that cannot be built, a second reason: resale not verified | `./check-mainnet.sh`                       |
+| USDC on Base mainnet, read only             | 🟢 `allow` from both sentinels (check #22): reputation not applied, its pool predates the index window; nothing signed. When its pool trades during the wait, those trades are re-executed after the buy, or a `warn` says the resale was not verified | `./check-mainnet.sh`                       |
 
 A refused sale lists the token only if the far sale at 900 s is refused too: a refusal that clears with
 time blocks that check alone, or any agent could repeat checks until one lists an honest token. The

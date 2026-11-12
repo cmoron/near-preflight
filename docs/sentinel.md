@@ -24,6 +24,7 @@ Every fact a verdict rests on goes into the **evidence**, whose sha256 the guard
 - [Verdicts and listing](#verdicts-and-listing)
 - [Removable liquidity](#removable-liquidity)
 - [Template reputation](#template-reputation)
+- [Well-known tokens on real Base](#well-known-tokens-on-real-base)
 - [Exit quotes](#exit-quotes)
 - [What a check cannot show](#what-a-check-cannot-show)
 
@@ -424,8 +425,8 @@ Decisions, each on purpose:
 
 - No flagged opcode in USDC (proxy and implementation), WETH, USDbC, DAI, cbETH, AERO, DEGEN, BRETT,
   TOSHI, VIRTUAL, cbBTC, nor the Uniswap V2 router.
-- The full check of USDC, DAI, AERO, DEGEN, BRETT, TOSHI, VIRTUAL and cbBTC found no environment
-  finding; each got `warn` only for its unknown reputation.
+- The full check of 21 well-known tokens, the index on: 18 `allow`
+  ([table](#well-known-tokens-on-real-base)).
 
 **The allow-list measured before it changed a verdict** (2026-11-12, read only, a buy of 0.00001 ETH
 each): 21 tokens whose Uniswap V2 WETH pool held at least 0.001 WETH.
@@ -437,8 +438,8 @@ each): 21 tokens whose Uniswap V2 WETH pool held at least 0.001 WETH.
 | BENJI                                                                                                        | `warn`  | `warn`  | its code ran NUMBER (and holds ORIGIN) |
 | AIXBT                                                                                                        | `block` | `block` | nothing (it reads another contract) |
 
-- No verdict changed. Each `warn` is the unknown reputation (no index on `mainnet.base.org`); with an
-  index, 18 of the 21 would have no finding at all, before and after.
+- No verdict changed. Each `warn` was the unknown reputation (that run had no index); with the index,
+  18 of the 21 get `allow` ([measured](#well-known-tokens-on-real-base)).
 - Their own code called an implementation only (USDC, cbBTC, cbETH, USDbC, WELL) or nothing.
 - BENJI is the one token the rules add a reason to: `token reads NUMBER during a transfer`.
 
@@ -536,14 +537,19 @@ block, by their timestamps, and end at that very block: a window cannot miss a f
 drop its newest ones. 2 h: the farm measured below opened 29 pools in 2.4 h and drained them 13 to 48 min
 after funding, so 2 h hold several of its drained pools.
 
-The sentinel builds the index for each check, from block `INDEX_FROM` to the reference block, and
-judges with no other. Replay reports a `MISMATCH … is not bound to block …`, and rebuilds the whole
-index to compare its sha256.
+The sentinel builds the index for each check, up to the reference block, and judges with no other.
+Replay reports a `MISMATCH … is not bound to block …`, and rebuilds the whole index to compare its sha256.
 
-On the fork the index runs from the fork's first block, about 300 blocks spaced over 2.4 h
-(`evm/fork.sh` mines 10 blocks 800 s apart). On Base, 2 h are 36,000 blocks: 37 requests, 2.1 s
-(measured below). It needs a node that serves `eth_getLogs`; `mainnet.base.org` answers `request limit
-reached`, so `check-mainnet.sh`, which uses it, runs without an index (a `warn`).
+- **On Base** the window starts at the last block 2 h before the reference block, by their timestamps.
+  Every sentinel gets the same window, so the same sha256. About 36,000 blocks: 49 to 54 requests to
+  build it and about 10 to find its start, 3 s on publicnode (2026-11-12).
+- **On the fork** it starts at block `INDEX_FROM`, the fork's first (`demo.sh` sets it): about 300 blocks
+  spaced over 2.4 h (`evm/fork.sh` mines 10 blocks 800 s apart).
+- **The node** is `INDEX_RPC`, `EVM_RPC` by default. It must serve `eth_getLogs`: `mainnet.base.org`
+  answers `request limit reached`. `check-mainnet.sh` reads `https://base-rpc.publicnode.com` for the
+  index and `mainnet.base.org` for the rest. A node that refuses logs fails the check, so a `block`
+  whose reason names `INDEX_RPC`.
+- `INDEX_FROM=none` runs without an index: every buy verdict is then at least `warn`.
 
 ### Measured on real Base
 
@@ -571,6 +577,54 @@ second: 37 requests in 39.8 s (2.1 s unpaced), sha256 `0x91751f85…f3ff`. 17 po
 
 The index lists the pools' token and pair addresses; none is published here. A pruned node refuses the
 old state; an archive node does not.
+
+## Well-known tokens on real Base
+
+Do safe tokens get `allow`? Measured on 2026-11-12, read only, with the index on: 18 of 21.
+
+- **Method.** The check a sentinel runs (`checkToken`), called directly, not through the guard: a buy of
+  0.00001 ETH from the guard's Base address, simulated on `mainnet.base.org`. The index is built by the
+  sentinel's own code on `https://base-rpc.publicnode.com`.
+- **Block.** One reference block for all, 56,639,492 (21:17:54 UTC). Index: blocks 56,603,496 to
+  56,639,492 (exactly 2 h), 27 pools, sha256 `0x465f1b9a…`, 49 requests, 2.8 s. About 24 s a token.
+- **Tokens.** The 21 of the [allow-list measurement](#environment-rule): a Uniswap V2 WETH pool holding
+  at least 0.001 WETH.
+
+| Token   | Verdict | Reasons                                                                  |
+| ------- | ------- | ------------------------------------------------------------------------ |
+| DAI     | `allow` | none                                                                     |
+| AERO    | `allow` | none                                                                     |
+| VIRTUAL | `allow` | reputation not applied                                                   |
+| KEYCAT  | `allow` | reputation not applied                                                   |
+| USDT    | `allow` | none                                                                     |
+| USDC    | `allow` | reputation not applied                                                   |
+| DEGEN   | `allow` | none                                                                     |
+| BRETT   | `allow` | none                                                                     |
+| TOSHI   | `allow` | none                                                                     |
+| cbBTC   | `allow` | reputation not applied                                                   |
+| cbETH   | `allow` | none                                                                     |
+| USDbC   | `allow` | none                                                                     |
+| WELL    | `allow` | none                                                                     |
+| MOCHI   | `allow` | none                                                                     |
+| MIGGLES | `allow` | reputation not applied                                                   |
+| ZORA    | `allow` | none                                                                     |
+| BOOMER  | `allow` | reputation not applied                                                   |
+| mfer    | `allow` | reputation not applied                                                   |
+| SKI     | `warn`  | code reads ORIGIN; reputation not applied                                |
+| BENJI   | `warn`  | code reads ORIGIN; token reads NUMBER during a transfer; reputation not applied |
+| AIXBT   | `block` | reads `0x082c..5d94` during a transfer: state no simulation reproduces   |
+
+- **None**: the simulation found nothing, and the reputation was checked and clean. Their V2 pool held
+  under 0.5 ETH before the window and was not funded in it, so every pool of the index counted: none
+  shares their template.
+- **Reputation not applied**: their pool held 0.5 ETH before the window. An `allow`-level note.
+- **SKI, BENJI**: ORIGIN is a value no simulation can match; BENJI's code ran NUMBER on a transfer.
+  The owner decides.
+- **AIXBT** reads another contract during a transfer: a `block`, as before.
+- In no check did others trade the pool during the wait.
+
+`./check-mainnet.sh` then ran USDC through the guard: check #22, `allow` from both sentinels, replayed
+(`app/fixtures/usdc-base-mainnet.json`).
 
 ## Exit quotes
 

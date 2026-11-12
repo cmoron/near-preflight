@@ -38,8 +38,8 @@ quote's evidence has `kind: "exit"` and fewer fields.
 Where it lives: each sentinel's evidence string is on NEAR, in its `verdict_posted` event, and its
 sha256 in the check's `votes`. Each sentinel writes its own proof file: `proofs/<id>.json` for the first
 one the guard names, `proofs/<id>.s2.json` for the second. The requests and responses are not: the sentinel publishes the proof file. Two ship in
-[`app/fixtures/`](../app/fixtures/) (`usdc-base-mainnet.json` is check #21 of the demo guard: its far sales
-301 s, 312 s and 900 s after the buy, which replay mines again on a local fork; both sentinels posted
+[`app/fixtures/`](../app/fixtures/) (`usdc-base-mainnet.json` is check #22 of the demo guard, an `allow`: its far sales
+301 s, 572 s and 900 s after the buy, which replay mines again on a local fork; both sentinels posted
 that same evidence string).
 
 ## What `replay` recomputes
@@ -47,6 +47,9 @@ that same evidence string).
 ```sh
 bun app/replay.ts <proof.json> [rpc] [--check]     # rpc defaults to EVM_RPC, then http://127.0.0.1:8545
 ```
+
+The template index is rebuilt from `INDEX_RPC`, the rpc by default: it needs `eth_getLogs`, which
+`mainnet.base.org` refuses. Without it the index line is an `ERROR` that names `INDEX_RPC`.
 
 Without `--check`, from the file and the node only:
 
@@ -71,7 +74,7 @@ Without `--check`, from the file and the node only:
   byte from the node's state there;
 - the quote, the hash of the guard's simulated buy, the liquidity facts;
 - the template index window: bound to the check's block (it starts at least 2 h before it, by their
-  timestamps, and ends at it), then the whole index rebuilt from the node, same sha256;
+  timestamps, and ends at it), then the whole index rebuilt from `INDEX_RPC`, same sha256;
 - the target's code hash, template, proxy implementation and environment opcodes.
 
 With `--check`, against the guard on NEAR (`GUARD` names it):
@@ -89,8 +92,8 @@ With `--check`, against the guard on NEAR (`GUARD` names it):
 - the guard side was simulated from the guard's derived Base address;
 - the blocklist entries and the code at the last check, as the evidence cites them, are on the guard.
 
-Example, from a fresh clone ([reproduce](reproduce.md#without-an-account)): check #21 replays with 39 `OK`
-lines and `REPLAY OK: verdict warn confirmed, same as on chain`.
+Example, from a fresh clone ([reproduce](reproduce.md#without-an-account)): check #22 replays with 41 `OK`
+lines and `REPLAY OK: verdict allow confirmed, same as on chain`.
 
 ## What replay cannot do
 

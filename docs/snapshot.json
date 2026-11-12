@@ -1,8 +1,8 @@
 {
  "guard": "guard.goblin-guard-69369.testnet",
- "taken_at": "2026-11-12T20:53:19.605Z",
- "block_height": 277414931,
- "last_check_id": 21,
+ "taken_at": "2026-11-12T21:34:42.243Z",
+ "block_height": 277419124,
+ "last_check_id": 22,
  "checks": {
   "1": {
    "agent": "agent.goblin-guard-69369.testnet",
@@ -761,6 +761,43 @@
      "evidence_sha256": "29d81c5f9d56b603dee4da3efbc918d2448607ed64abad1dac56fadf74629c75"
     }
    ]
+  },
+  "22": {
+   "agent": "agent.goblin-guard-69369.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794518891504852436",
+   "verdict": "allow",
+   "judged_ns": "1794518935461461092",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 56606606..56642602)",
+   "evidence_sha256": "de06ec05711fbaafeaf7d33a65e22fc6593df2d3befec54000d0271bbfd7fbf0",
+   "amount_wei": "10000000000000",
+   "quote": "20100",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "0435a932219a73ad13f0a7a02ec2facd2677e3b5947b5cdc293c18a6bb226a53"
+   ],
+   "list_target": false,
+   "votes": [
+    {
+     "sentinel": "sentinel.goblin-guard-69369.testnet",
+     "verdict": "allow",
+     "evidence_sha256": "de06ec05711fbaafeaf7d33a65e22fc6593df2d3befec54000d0271bbfd7fbf0"
+    },
+    {
+     "sentinel": "sentinel2.goblin-guard-69369.testnet",
+     "verdict": "allow",
+     "evidence_sha256": "de06ec05711fbaafeaf7d33a65e22fc6593df2d3befec54000d0271bbfd7fbf0"
+    }
+   ]
   }
  },
  "entries": [
@@ -782,7 +819,7 @@
  },
  "signing_since": null,
  "escrow": "0",
- "credits_total": "815630000000000000000000",
+ "credits_total": "790630000000000000000000",
  "bounds": {
   "max_budget": "500000000000000000000000",
   "max_duration_s": 3600,

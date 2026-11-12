@@ -1,9 +1,11 @@
 // The sentinel's decision on a request read: never skip a request merely absent from a lagging node;
 // and its node calls through a public node's rate limit.
 import { describe, expect, test } from "bun:test";
+import { toHex } from "viem";
+import { INDEX_SPAN_S, windowProblem } from "./index";
 import type { Check } from "./near";
-import { step } from "./sentinel";
-import { patientFetch, rpc } from "./verifier";
+import { indexer, step } from "./sentinel";
+import { patientFetch, rpc, stampOf } from "./verifier";
 
 const check = (verdict: Check["verdict"]): Check => ({
   agent: "agent.test",
@@ -73,4 +75,66 @@ describe("rpc: a public node's rate limit", () => {
       node.stop(true);
     }
   }, 20_000);
+});
+
+// The mainnet check judged every token without a template index (a warn); a sentinel on real Base now
+// builds it for each check over the 2 h before the check's block, on a node that serves logs (INDEX_RPC).
+describe("the sentinel's template index, from its environment", () => {
+  /** A Base-like node: five blocks a second, `head` mined so far, no pools; `logs: false` refuses eth_getLogs
+   *  as mainnet.base.org does. */
+  const fakeBase = (head: { n: number }, logs = true) => {
+    const block = (n: number) => (n > head.n ? null : { number: toHex(n), timestamp: toHex(1_800_000_000 + Math.floor(n / 5)) });
+    return Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const { method, params } = (await req.json()) as { method: string; params: unknown[] };
+        if (method === "eth_getLogs" && !logs) return Response.json({ jsonrpc: "2.0", id: 1, error: { code: -32011, message: "request limit reached" } });
+        const result =
+          method === "eth_chainId" ? "0x2105"
+          : method === "eth_getBlockByNumber" ? block(params[0] === "latest" ? head.n : Number(params[0]))
+          : method === "eth_getLogs" ? []
+          : "0x";
+        return Response.json({ jsonrpc: "2.0", id: 1, result });
+      },
+    });
+  };
+  test("no INDEX_FROM: from the last block 2 h before the check's, on INDEX_RPC, once that node has the block", async () => {
+    const head = { n: 39_999 }; // the index node is one block behind the check's
+    const node = fakeBase(head);
+    const url = `http://127.0.0.1:${node.port}`;
+    const lines: string[] = [];
+    try {
+      const ix = indexer({ EVM_RPC: "http://127.0.0.1:1", INDEX_RPC: url }, (l) => lines.push(l))!;
+      expect(ix.rpc).toBe(url);
+      setTimeout(() => (head.n = 40_000), 700);
+      const index = await ix.build(40_000);
+      expect([index.from, index.to]).toEqual([4_004, 40_000]); // 36,000 blocks is 7,200 s: the 5th block of that second
+      const [ref, from, next] = await Promise.all([40_000, index.from, index.from + 1].map((n) => stampOf(url, toHex(n))));
+      expect(windowProblem(ref, from, index.to)).toBeNull();
+      expect(BigInt(next.timestamp)).toBeGreaterThan(BigInt(ref.timestamp) - BigInt(INDEX_SPAN_S)); // the narrowest window accepted
+      expect(lines[0]).toMatch(/^template index of blocks 4004\.\.40000 on .*: 0 WETH pools, built in \d+ requests/);
+    } finally {
+      node.stop(true);
+    }
+  }, 20_000);
+  test("INDEX_FROM=<block> fixes the start (the fork); INDEX_FROM=none: no index; INDEX_RPC defaults to EVM_RPC", async () => {
+    const node = fakeBase({ n: 40_000 });
+    const url = `http://127.0.0.1:${node.port}`;
+    try {
+      const ix = indexer({ EVM_RPC: url, INDEX_FROM: "100" })!;
+      expect(ix.rpc).toBe(url);
+      expect((await ix.build(40_000)).from).toBe(100);
+      expect(indexer({ EVM_RPC: url, INDEX_FROM: "none" })).toBeNull();
+    } finally {
+      node.stop(true);
+    }
+  });
+  test("a node that refuses eth_getLogs: the error names what the index needs", async () => {
+    const node = fakeBase({ n: 40_000 }, false);
+    try {
+      await expect(indexer({ EVM_RPC: `http://127.0.0.1:${node.port}` })!.build(40_000)).rejects.toThrow(/request limit reached\): the template index needs a node that serves logs .* INDEX_RPC/);
+    } finally {
+      node.stop(true);
+    }
+  });
 });
