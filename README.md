@@ -27,7 +27,7 @@ Deployed on testnet: `guard.goblin-guard-17060.testnet` (`src/lib.rs`, near-sdk 
    ```
 
 3. `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard and creates `agent.`, `agent2.`, `sentinel.` and `armer.` (the armer, a key apart from the agent's, opens the agent's armed budget: what it may spend before a deadline), each with a function-call key limited to the guard.
-4. `evm/fork.sh` in another terminal starts an anvil fork of Base with the demo tokens (including the traps and USDC code copies from earlier reviews); the sentinel and replay also run throwaway anvil forks. Then `bun test` -> `226 pass` and `bunx tsc --noEmit` -> exit 0.
+4. `evm/fork.sh` in another terminal starts an anvil fork of Base with the demo tokens (including the traps and USDC code copies from earlier reviews); the sentinel and replay also run throwaway anvil forks. Then `bun test` -> `235 pass` and `bunx tsc --noEmit` -> exit 0.
 5. `./demo.sh` -> exit 0 in 75 to 115 s, four moments:
    1. A poisoned inbox message pushes the agent to a trap: the sentinel answers `BLOCK (sale refused in the next block ...)` and the contract refuses the buy (`verdict does not allow the purchase`).
    2. A farm token whose simulation is clean: `BLOCK (template 0x9c69..94c8: 5 of 5 earlier pools drained ...)`.

@@ -111,8 +111,11 @@ sequence number advanced) or a base fee move.
 Verdicts: a revert, a takeback or a tax of 50 % or more is a `block`; a tax from 10 % is a `warn`; no V2 pair
 is a `warn`. A sale's tax is measured on the ETH the seller receives, and a pool that pays out more WETH than
 the seller receives is a `block` (a token that sells for itself during the sale; honest tokens that swap
-their fees during a sale fall here too). A `block` found on the probe side lists the token on the guard. A
-failure on the guard's side only (its address is public: anyone can send it tokens or get a token to freeze
+their fees during a sale fall here too). A `block` lists the token on the guard only for what the probe
+shows after a buy that succeeded and received at least 1,000 token units: a takeback, a sale refused or a
+tax of 50 % on a buy or sale the pool quotes at 1,000 base units or more; a buy that fails or receives
+nothing, a dust sale and a pool that pays out more block that check and list nothing, since the agent picks
+the amount. A failure on the guard's side only (its address is public: anyone can send it tokens or get a token to freeze
 it) blocks that check but lists nothing, and its reason starts with `guard address only, not listed`.
 
 **Removable liquidity.** If at least 90 % of today's LP supply already existed 1,800 blocks ago, the
@@ -344,8 +347,8 @@ there); a pruned node refuses old state, an archive node does not.
   token can no longer read and be allowed. The check's sales are previews (no floor, a fixed deadline): an exit's own
   bytes are simulated only by its exit quote, after the buy, and an exit of another amount too. When the
   guard's address cannot pay for its transactions at the check, its balance is set to exactly what they
-  spend. A token whose public state a third party can move (a pool emptied of tokens, for instance) can still
-  fail the probe's buy and get listed; the owner unlists.
+  spend. A token that refuses or taxes only some sale sizes (a per-sale limit, a fee swap the buy triggers)
+  can still get listed by a check of that size; the owner unlists.
 - **Verdicts tied to a nonce.** A verdict buys only the transaction simulated, at the guard's nonce then: a
   signature for another check, or a gas or fee change, between the verdict and the buy refuses that buy, and
   the agent pays a new check. Several busy agents race for the one nonce sequence.
@@ -422,4 +425,5 @@ passes) found, then how it was closed. Each has a test.
 - A verdict from before an emergency stop still bought after `unfreeze` and a new arming within its 120 s: the stop voids every check requested before it, for a buy and for a quoted exit.
 - An agent whose budget was spent or expired could not sell, only the owner could: a sale never needs buying budget, the exit quote and its gas come from the agent's credit.
 - A refund was accepted before any replacement was signed, so a late signature could still be mined after it, and a replacement could void a buy that was signed and charged: a refund needs a replacement signed at that nonce, and only a reserved nonce can be replaced.
+- Any armed agent could get an honest token listed for the price of a check by picking an amount whose buy fails (USDC at 10,000 wei, the demo model's choice) or whose sale the pool pays 0 for: only a finding of the token after a buy that succeeded, measured on at least 1,000 units, lists it; the wrapper refuses dust below 1 % of the per-buy limit.
 - A callback that ran out of gas would have held the signing slot forever: the owner releases it after 600 s, its transactions reserved as unsettled, and a late callback names its request, so it cannot settle the next job.

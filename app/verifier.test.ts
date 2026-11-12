@@ -4,7 +4,7 @@ import { concat, decodeAbiParameters, encodeFunctionData, keccak256, pad, parseA
 import tokens from "../evm/tokens.json";
 import { buildIndex, type Index } from "./index";
 import { localPreviews, SETUP_FEES } from "./testkit";
-import { checkExit, checkToken, ETH_LOGS, judgeExit, liquidityFindings, ROUTER, rpc, specialOf, WETH, type Fees, type Holder, type Liquidity, type NearFacts } from "./verifier";
+import { checkExit, checkToken, ETH_LOGS, FACTORY, judgeExit, liquidityFindings, ROUTER, rpc, specialOf, WETH, type Fees, type Holder, type Liquidity, type NearFacts } from "./verifier";
 
 const TRANSFER = keccak256(stringToHex("Transfer(address,address,uint256)"));
 
@@ -24,8 +24,8 @@ const headTime = async () => BigInt((await rpc<{ timestamp: Hex }>(RPC, "eth_get
 /** What the guard would sign for a check of `token` by `guard`, requested now. */
 const previews = async (token: string, guard: Address, fees: Fees = SETUP_FEES, amount = AMOUNT) =>
   localPreviews({ guard, target: token as Address, amount, requestedS: await headTime(), fees });
-const check = async (token: string, guard: Address = GUARD_EVM, index: Index | null = INDEX, near: NearFacts = NO_NEAR, fees: Fees = SETUP_FEES) =>
-  checkToken(RPC, token as Address, guard, () => ({ buyer: rand(), stranger: rand() }), { index, near: async () => near, amount: AMOUNT, preview: await previews(token, guard, fees) });
+const check = async (token: string, guard: Address = GUARD_EVM, index: Index | null = INDEX, near: NearFacts = NO_NEAR, fees: Fees = SETUP_FEES, amount = AMOUNT) =>
+  checkToken(RPC, token as Address, guard, () => ({ buyer: rand(), stranger: rand() }), { index, near: async () => near, amount, preview: await previews(token, guard, fees, amount) });
 
 describe("sentinel verdict", () => {
   test("USDC, healthy witness already on Base: allow", async () => expect((await check(tokens.usdc)).verdict).toBe("allow"));
@@ -42,27 +42,32 @@ describe("sentinel verdict", () => {
     const r = await check(tokens.owner_reclaim);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("transferFrom");
+    expect(r.list_target).toBe(true);
   });
   test("sale closed from the buy: block", async () => {
     const r = await check(tokens.sell_blocked);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("next block");
+    expect(r.list_target).toBe(true);
   });
   test("sale closed 5 minutes after the buy: block on the sale 256 blocks (512 s) later", async () => {
     const r = await check(tokens.sell_blocked_later);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("256 blocks (512 s) after the buy");
     expect(r.reasons).not.toContain("next block");
+    expect(r.list_target).toBe(true);
   });
   test("90 % tax on the sale: block", async () => {
     const r = await check(tokens.sell_tax);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("90 % tax");
+    expect(r.list_target).toBe(true);
   });
   test("90 % tax only on the late sale: block", async () => {
     const r = await check(tokens.sell_tax_later);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("256 blocks (512 s) after the buy");
+    expect(r.list_target).toBe(true);
   });
   test("a token that freezes only the guard's public EVM address: block, but not listed (it rests on the guard's own state)", async () => {
     const r = await check(tokens.guard_frozen);
@@ -88,6 +93,7 @@ describe("sentinel verdict", () => {
     const r = await check(tokens.sim_detector);
     expect(r.verdict).toBe("block");
     expect(r.reasons).toContain("sale refused in the next block"); // the router masks the token's reason
+    expect(r.list_target).toBe(true);
   });
 });
 
@@ -198,6 +204,43 @@ describe("a sale's tax is what the seller receives", () => {
     expect(r.reasons).toMatch(/\d+ % tax on the sale in the next block/);
     expect(r.reasons).toContain("the pool paid out more WETH than the seller received");
     expect(r.list_target).toBe(true);
+  });
+});
+
+// The agent picks its check's amount (request_check): an outcome that amount decides blocks that check
+// and lists nothing, or any armed agent could get an honest token listed for the price of a check.
+describe("what the agent's amount decides never lists the token", () => {
+  const abi = parseAbi(["function getPair(address,address) view returns (address)", "function balanceOf(address) view returns (uint256)"]);
+  const read = (to: string, functionName: "getPair" | "balanceOf", args: unknown[]) =>
+    rpc<Hex>(RPC, "eth_call", [{ to, data: encodeFunctionData({ abi, functionName, args } as Parameters<typeof encodeFunctionData>[0]) }, "latest"]);
+  /** The WETH in `token`'s Uniswap V2 pool. */
+  const reserve = async (token: string) => BigInt(await read(WETH, "balanceOf", [`0x${(await read(FACTORY, "getPair", [token, WETH])).slice(-40)}`]));
+  const at = (token: string, amount: bigint) => check(token, GUARD_EVM, INDEX, NO_NEAR, SETUP_FEES, amount);
+  for (const [name, token] of [["USDC", tokens.usdc], ["the healthy demo token", tokens.safe]] as const) {
+    test(`${name}, dust (1 wei, 10,000 wei): not listed`, async () => {
+      for (const amount of [1n, 10_000n]) expect((await at(token, amount)).list_target).toBe(false);
+    });
+    test(`${name}, twice its pool's WETH: not listed`, async () => {
+      expect((await at(token, 2n * (await reserve(token)))).list_target).toBe(false);
+    });
+    test(`${name}, 2^112 wei (more than a V2 pair holds): block, the buy fails, not listed`, async () => {
+      const r = await at(token, 2n ** 112n);
+      expect(r.verdict).toBe("block");
+      expect(r.reasons).toContain("simulated buy failed");
+      expect(r.list_target).toBe(false);
+    });
+  }
+  test("USDC, 10,000 wei: block, the pair refuses a buy that would pay out 0, not listed", async () => {
+    const r = await at(tokens.usdc, 10_000n);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toContain("simulated buy failed");
+    expect(r.list_target).toBe(false);
+  });
+  test("the healthy demo token, 1 wei: block, the pool would pay 0 wei for its sale, not listed", async () => {
+    const r = await at(tokens.safe, 1n);
+    expect(r.verdict).toBe("block");
+    expect(r.reasons).toContain("sale refused in the next block");
+    expect(r.list_target).toBe(false);
   });
 });
 

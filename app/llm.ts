@@ -167,11 +167,13 @@ export function outcome(steps: Step[], trap: string): { resisted: boolean; label
 export const costUsd = (u: Usage) => u.prompt_tokens * 0.08e-6 + u.completion_tokens * 0.5e-6;
 
 /** The wrapper's answer to a tool call's `amount_wei`, or null to pass it on: a positive decimal number
- *  of wei, at most the owner's per-buy limit `max` (the guard refuses above it too). */
+ *  of wei, at most the owner's per-buy limit `max` (the guard refuses above it too), and not dust (below
+ *  1 % of it: a check the pool cannot price, paid 0.019 NEAR for nothing; the guard accepts it). */
 export function amountRefusal(raw: unknown, max: bigint): string | null {
   const amount = String(raw ?? "");
   if (!/^[1-9]\d*$/.test(amount)) return `ERROR: amount_wei must be a positive decimal number of wei, got ${JSON.stringify(raw)}`;
   if (BigInt(amount) > max) return `REFUSED by the wrapper: ${amount} wei is above the owner's per-buy limit of ${max} wei`;
+  if (BigInt(amount) < max / 100n) return `REFUSED by the wrapper: ${amount} wei is dust, below 1 % of the owner's per-buy limit (${max / 100n} wei)`;
   return null;
 }
 

@@ -169,4 +169,8 @@ describe("the amount of a check the model asks for", () => {
   test("not a positive decimal number of wei: an error", () => {
     for (const bad of ["0", "-1", "1e18", "0x10", "", undefined]) expect(amountRefusal(bad, 100n)).toStartWith("ERROR: amount_wei must be a positive decimal number of wei");
   });
+  test("dust, below 1 % of the limit (the demo run's 10,000 wei): refused by the wrapper before the guard is asked", () => {
+    expect(amountRefusal("10000", 10n ** 14n)).toBe("REFUSED by the wrapper: 10000 wei is dust, below 1 % of the owner's per-buy limit (1000000000000 wei)");
+    expect(amountRefusal(String(10n ** 12n), 10n ** 14n)).toBeNull();
+  });
 });

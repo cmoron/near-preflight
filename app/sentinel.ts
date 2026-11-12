@@ -79,7 +79,8 @@ if (import.meta.main) {
     const proof = toProof(id, target, r);
     await Bun.write(`proofs/${id}.json`, JSON.stringify(proof, null, 2));
     const code = { code_hash: r.evidence.code_hash, implementation: r.evidence.implementation };
-    // list_target: the guard lists the token only on a block from the probe side of its simulation (judge).
+    // list_target: the guard lists the token only on a block the probe side shows after a buy that
+    // succeeded, never on what the agent's amount decides (judge).
     const { tx } = await call(sentinel, "post_verdict", { id, verdict: r.verdict, reasons: r.reasons, evidence: proof.evidence, quote: r.evidence.quote, code, list_target: r.list_target, tx_hashes: unprefixed(r.evidence.tx_hashes) });
     const failed = r.evidence.calls.filter((c) => c.endsWith("revert")).length;
     log(`#${id} : ${r.verdict.toUpperCase()} (${r.reasons}), ${r.evidence.calls.length} simulated calls (${failed} reverted, takeback probes included), quote ${r.evidence.quote} for ${r.evidence.amount_wei} wei, guard tx ${r.evidence.tx_hashes[0].slice(0, 10)}..., block ${r.evidence.block}, proof proofs/${id}.json  ${tx}`);

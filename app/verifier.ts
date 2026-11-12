@@ -47,6 +47,9 @@ const IMPL_SLOTS = [
 ];
 const TAX_WARN = 0.1; // loss beyond the pool's quote: warn at 10 %, block at 50 %
 const TAX_BLOCK = 0.5;
+/** Below this many base units (tokens a buy received, wei the pool quotes for a sale or tokens for a
+ *  buy), rounding alone can make a finding: it then depends on the amount the agent chose, never lists. */
+const DUST = 1000n;
 /** Liquidity window, 1 h of 2 s Base blocks. Liquidity is "old" when at least OLD_BPS of today's LP
  *  supply already existed WINDOW_BLOCKS ago (totalSupply read at both blocks: two eth_call, no logs),
  *  whatever the age of the pair contract and the depth of the pool. Otherwise the LP holders are read
@@ -98,12 +101,14 @@ export type Fees = { gas: bigint; maxFeePerGas: bigint; maxPriorityFeePerGas: bi
 /** A log as eth_simulateV1 returns it (other fields ignored). */
 export type Log = { address: Address; topics: Hex[]; data: Hex };
 export type Result = { status: Hex; returnData: Hex; logs?: Log[]; error?: { message?: string; data?: Hex } };
-export type Finding = { level: Verdict; text: string };
+/** `list`: a property of the token shown after a buy that succeeded, which nothing the agent chose
+ *  decides (judge lists the token on such a block). */
+export type Finding = { level: Verdict; text: string; list?: boolean };
 export type Report = {
   verdict: Verdict;
   reasons: string;
-  /** post_verdict's `list_target`: a block resting on the token's own simulation or liquidity, which
-   *  the guard turns into a `token:` listing (judge). */
+  /** post_verdict's `list_target`: a block the probe side shows after a buy that succeeded, which the
+   *  agent's amount does not decide (judge); the guard then lists the token. */
   list_target: boolean;
   /** Digest posted on chain (<= 8000 characters). */
   evidence: {
@@ -585,31 +590,37 @@ export function buyStages(f: Record<string, Result>, w: Parties) {
 function sideFindings(r: Record<string, Result>, p: string, w: Parties, pair: Address | null, stop: boolean): Finding[] {
   const who = p === GUARD ? w.guard : w.buyer;
   const { findings, amount, owner } = buyStage(r, w.token, who, p);
-  if (stop) return findings;
+  if (stop) return findings; // a buy that failed or received nothing: block, never listed
+  const bought = amount >= DUST;
   if (owner && moved(r[`${p}transferFrom by owner()`])) {
-    findings.push({ level: "block", text: `owner() ${owner} takes tokens back by transferFrom without approval` });
+    findings.push({ level: "block", text: `owner() ${owner} takes tokens back by transferFrom without approval`, list: bought });
   }
   if (moved(r[`${p}transferFrom by a stranger`])) {
-    findings.push({ level: "block", text: "anyone can take tokens back by transferFrom without approval" });
+    findings.push({ level: "block", text: "anyone can take tokens back by transferFrom without approval", list: bought });
   }
   const quoted = (res: Result) => (ok(res) ? (uint(router, "getAmountsOut", res) as bigint[])[1] : 0n);
   // Without a quote, the tax cannot be measured: total loss assumed, hence block (fail closed).
   const loss = (got: bigint, expected: bigint) => (expected > 0n ? 1 - Number(got) / Number(expected) : 1);
-  const taxed = (tax: number, when: string) => {
+  // Listed only when measured on at least DUST units, against the pool's quote for that same amount.
+  const taxed = (got: bigint, expected: bigint, when: string) => {
+    const tax = loss(got, expected);
     const text = tax >= 1 ? `tax not measurable ${when} (pool quote failed)` : `${Math.round(tax * 100)} % tax ${when}`;
-    if (tax >= TAX_BLOCK) findings.push({ level: "block", text });
+    if (tax >= TAX_BLOCK) findings.push({ level: "block", text, list: bought && expected >= DUST });
     else if (tax >= TAX_WARN) findings.push({ level: "warn", text });
   };
-  taxed(loss(amount, quoted(r["buy quote"])), "on the buy");
+  taxed(amount, quoted(r["buy quote"]), "on the buy");
   // Per sale: when it is refused, when it is taxed (reason texts).
   const when = [["in the next block after the buy", "in the next block"], [LATE, LATE]];
   const steps = SALES.map((s) => [r[`${p}approve router${s}`], r[`${p}sale${s}`]]);
   SALES.forEach((s, i) => {
     const sale = r[`${p}sale${s}`];
-    if (!ok(sale)) return findings.push({ level: "block", text: `sale refused ${when[i][0]} (${revertReason(sale)})` });
     const before = [r[`${p}buy`], ...steps.slice(0, i).flat()];
+    const quote = pair ? saleQuote(before, pair, w.token, saleAmounts(amount)[i]) : 0n;
+    // A sale the pool quotes at less than DUST wei can fail or look taxed by rounding alone: not listed.
+    if (!ok(sale)) return findings.push({ level: "block", text: `sale refused ${when[i][0]} (${revertReason(sale)})`, list: bought && quote >= DUST });
     const got = moves(steps[i], ETH_LOGS, who, "to");
-    taxed(loss(got, pair ? saleQuote(before, pair, w.token, saleAmounts(amount)[i]) : 0n), `on the sale ${when[i][1]}`);
+    taxed(got, quote, `on the sale ${when[i][1]}`);
+    // Not listed: a fee swap the buy's own fees can trigger (amount-dependent) does it too.
     if (pair && moves(steps[i], WETH, pair, "from") > got) findings.push({ level: "block", text: `the pool paid out more WETH than the seller received ${when[i][1]}` });
   });
   return findings;
@@ -627,7 +638,8 @@ export function judge(labels: string[], results: Result[], facts: Facts, w: Part
   // block hash, so their findings are the token's own behaviour. The guard's address is public and a
   // third party can change its state (send it tokens, get it frozen): a failure there blocks this
   // check but lists nothing. Template reputation can be poisoned by copies; it never lists either.
-  const list_target = findings.some((f) => f.level === "block");
+  // The amount is the agent's: a buy that fails or receives nothing, and dust, block without listing.
+  const list_target = findings.some((f) => f.level === "block" && f.list);
   const seen = new Set(findings.map((f) => f.text));
   for (const f of sideFindings(r, GUARD, w, pair, stop)) if (!seen.has(f.text)) findings.push({ ...f, text: `guard address only, not listed: ${f.text}` });
   findings.push(...liquidityFindings(facts.liquidity, facts.block), ...environmentFindings(facts, w));
