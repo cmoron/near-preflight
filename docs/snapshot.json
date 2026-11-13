@@ -1,8 +1,8 @@
 {
  "guard": "guard.goblin-guard-17826.testnet",
- "taken_at": "2026-11-13T00:09:01.373Z",
- "block_height": 277434872,
- "last_check_id": 23,
+ "taken_at": "2026-11-13T01:05:58.766Z",
+ "block_height": 277440652,
+ "last_check_id": 27,
  "checks": {
   "1": {
    "agent": "agent.goblin-guard-17826.testnet",
@@ -956,6 +956,174 @@
      "quote": null
     }
    ]
+  },
+  "24": {
+   "agent": "agent.goblin-guard-17826.testnet",
+   "target": "0xDb457FC3607cc9796f4cB9dEc29900175787d5fE",
+   "requested_ns": "1794531697477277468",
+   "verdict": "block",
+   "judged_ns": "1794531725263266640",
+   "reasons": "sale refused 9 s after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 33 s after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; exit-size sale (97 %) refused 33 s after the buy (TransferHelper: TRANSFER_FROM_FAILED) ; sale refused 302 s after the buy (TransferHel",
+   "evidence_sha256": "a3d6885486f8bead154c00455f359fcd23d5b483d891fc2548e6d9a31c592cfb",
+   "amount_wei": "10000000000000",
+   "quote": "996998011985964099",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x7079177d9df632ffdc359ce819fdd533c998fc8ffa6d4c5afb7682dfb6133129",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": "7199bf4d2992b34417f68623c80a79188ce6b91a8609daf1c90f57f9f82e3b69",
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "cab9dd7aba7f9c3759b21a57af91b54993e77c6a6992370889c1d4bfbadd6280"
+   ],
+   "list_target": true,
+   "votes": [
+    {
+     "sentinel": "sentinel.goblin-guard-17826.testnet",
+     "verdict": "block",
+     "evidence_sha256": "a3d6885486f8bead154c00455f359fcd23d5b483d891fc2548e6d9a31c592cfb",
+     "quote": null
+    },
+    {
+     "sentinel": "sentinel2.goblin-guard-17826.testnet",
+     "verdict": "block",
+     "evidence_sha256": "a3d6885486f8bead154c00455f359fcd23d5b483d891fc2548e6d9a31c592cfb",
+     "quote": null
+    },
+    {
+     "sentinel": "sentinel3.goblin-guard-17826.testnet",
+     "verdict": "block",
+     "evidence_sha256": "a3d6885486f8bead154c00455f359fcd23d5b483d891fc2548e6d9a31c592cfb",
+     "quote": null
+    }
+   ]
+  },
+  "25": {
+   "agent": "agent.goblin-guard-17826.testnet",
+   "target": "0x7c2E05Ba070475A804762d1903e690aA5D02b8Cc",
+   "requested_ns": "1794531750020629316",
+   "verdict": "block",
+   "judged_ns": "1794531804014551682",
+   "reasons": "template 0x9c69..94c8: 5 of 5 earlier pools drained, median 2 blocks after funding",
+   "evidence_sha256": "3a7d7d63c8cf8f3ee1e56a4a0ee0135b60e6486c631ee4a39154aa19ad59bf59",
+   "amount_wei": "10000000000000",
+   "quote": "9969900600091017092",
+   "settled": false,
+   "approved": false,
+   "signed_tx": null,
+   "code": {
+    "code_hash": "0x5290834b2ffabea133d16c9820423533968ff9e7286a802933facab5cce710b6",
+    "implementation": null
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "4a6e8d7cce019d587f250c393790a9ac60737898dc5db38c9ed0e28a5d719bcb"
+   ],
+   "list_target": false,
+   "votes": [
+    {
+     "sentinel": "sentinel3.goblin-guard-17826.testnet",
+     "verdict": "block",
+     "evidence_sha256": "3a7d7d63c8cf8f3ee1e56a4a0ee0135b60e6486c631ee4a39154aa19ad59bf59",
+     "quote": null
+    },
+    {
+     "sentinel": "sentinel2.goblin-guard-17826.testnet",
+     "verdict": "block",
+     "evidence_sha256": "3a7d7d63c8cf8f3ee1e56a4a0ee0135b60e6486c631ee4a39154aa19ad59bf59",
+     "quote": null
+    },
+    {
+     "sentinel": "sentinel.goblin-guard-17826.testnet",
+     "verdict": "block",
+     "evidence_sha256": "3a7d7d63c8cf8f3ee1e56a4a0ee0135b60e6486c631ee4a39154aa19ad59bf59",
+     "quote": null
+    }
+   ]
+  },
+  "26": {
+   "agent": "agent.goblin-guard-17826.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794531805556589659",
+   "verdict": "allow",
+   "judged_ns": "1794531832191522842",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55837176)",
+   "evidence_sha256": "10188bf2deb0bf02c4fcf80bc991cd1a03fb47579050b0c7b1797e642739ba2b",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBQuDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAy+gnXcl2GyvamngqngZutG4EnyQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9mMJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwICg+lBOqsM5zQwfOsLlYtixkkMjoeT32k/WO3yvNUgL/bmgCkuz3INBmBOr99Wi7SFdNhbia0UIwL9wZWJuoyhzwU8=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "4364109e24826823b64863657cc7d745fc2659e962ea818b879becc6b133d096"
+   ],
+   "list_target": false,
+   "votes": [
+    {
+     "sentinel": "sentinel2.goblin-guard-17826.testnet",
+     "verdict": "allow",
+     "evidence_sha256": "10188bf2deb0bf02c4fcf80bc991cd1a03fb47579050b0c7b1797e642739ba2b",
+     "quote": null
+    },
+    {
+     "sentinel": "sentinel3.goblin-guard-17826.testnet",
+     "verdict": "allow",
+     "evidence_sha256": "10188bf2deb0bf02c4fcf80bc991cd1a03fb47579050b0c7b1797e642739ba2b",
+     "quote": null
+    }
+   ]
+  },
+  "27": {
+   "agent": "agent.goblin-guard-17826.testnet",
+   "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+   "requested_ns": "1794531847940375512",
+   "verdict": "allow",
+   "judged_ns": "1794531944567529244",
+   "reasons": "buy, takeback probes and sales simulated without anomaly ; template reputation not applied: the token's own pool was funded before the index window (blocks 55836673..55837217)",
+   "evidence_sha256": "b43e7c59ae0d429ca906f426e4610e09930d800b1705a93d3d424244cb2d8217",
+   "amount_wei": "10000000000000",
+   "quote": "20435",
+   "settled": true,
+   "approved": false,
+   "signed_tx": "AvkBV4IhBQyDD0JAhAL68ICDA9CQlEdSul28I/RNh4Jidr9v1rHDcq0khgkYTnKgALjktvnelQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE1tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAy+gnXcl2GyvamngqngZutG4EnyQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABq9mMzAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAABCAAAAAAAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAAIM1ifzW7bbgj0x8MtT3G1S9oCkTwAGgKp3d8HlFcEnJyT/HH8WVBi9NZM4h4q3uT2KCC07xmcOgUFxHmNIr+eukdBRyv/w9NfhUp7Pex/VpcNbNUv8+RUs=",
+   "code": {
+    "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+    "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779"
+   },
+   "exit_amount": null,
+   "decision_sha256": null,
+   "buy_decision_sha256": null,
+   "tx_hashes": [
+    "37140d07e6d1441b8d22916f8eed69ce691ef50fff3c7f14d432b1a54996d1aa"
+   ],
+   "list_target": false,
+   "votes": [
+    {
+     "sentinel": "sentinel.goblin-guard-17826.testnet",
+     "verdict": "allow",
+     "evidence_sha256": "b43e7c59ae0d429ca906f426e4610e09930d800b1705a93d3d424244cb2d8217",
+     "quote": null
+    },
+    {
+     "sentinel": "sentinel3.goblin-guard-17826.testnet",
+     "verdict": "allow",
+     "evidence_sha256": "b43e7c59ae0d429ca906f426e4610e09930d800b1705a93d3d424244cb2d8217",
+     "quote": null
+    }
+   ]
   }
  },
  "entries": [
@@ -963,9 +1131,9 @@
    "0xdb457fc3607cc9796f4cb9dec29900175787d5fe",
    {
     "reporter": "sentinel2.goblin-guard-17826.testnet",
-    "at_ns": "1794527241311918452",
-    "evidence_sha256": "25e1b2f7b5d8334354877c24cc8a9cd9cf882df764b120b55c04444d10976cb5",
-    "note": "verdict #14"
+    "at_ns": "1794531725263266640",
+    "evidence_sha256": "a3d6885486f8bead154c00455f359fcd23d5b483d891fc2548e6d9a31c592cfb",
+    "note": "verdict #24"
    }
   ]
  ],
@@ -977,7 +1145,7 @@
  },
  "signing_since": null,
  "escrow": "0",
- "credits_total": "768130000000000000000000",
+ "credits_total": "623130000000000000000000",
  "bounds": {
   "max_budget": "500000000000000000000000",
   "max_duration_s": 3600,
