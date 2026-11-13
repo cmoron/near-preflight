@@ -57,6 +57,7 @@ The guard's owner appoints the sentinels, which are off-chain programs. Anyone c
 - **The traps are real.** On Base on 2026-11-11, 24 of the 29 token/WETH pools opened on Uniswap V2 in 2.4 h were drained a median 13 min after funding; all 29 tokens shared one code template ([measurement](docs/sentinel.md#measured-on-real-base)).
 - **Measured on 96 real Base launches.** 81 ended badly within 24 h. 73 were blocked before the buy (one scam farm, recognised by its code's history); the other 8 got `warn`. None got `allow`. Of the 11 that survived, 8 got `warn` and 3 `block`; the last 4, of unclear outcome, got `block` ([corpus](docs/corpus.md)).
 - **What that shows.** It stops repeat farms and traps written in a token's code (the latter shown on our own trap tokens). It does not tell an honest new launch from one whose liquidity will be pulled: both get `warn`, and the owner decides.
+- **What a fresh launch gets.** A pool under an hour old whose liquidity is not burned gets `warn` at best, which the owner approves or not within 120 s of the verdict. `allow` is for tokens with history, such as USDC.
 
 ## Verify it yourself
 
