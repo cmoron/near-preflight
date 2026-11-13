@@ -84,6 +84,8 @@ bun test --timeout 30000     # terminal 2: 355 pass, 0 fail (5 to 7 min)
 
 `INDEX_RPC` serves the logs the template index is rebuilt from; `mainnet.base.org` refuses them.
 
+These commands read public Base nodes. If one answers `429`, wait a minute and run the command again; `FORK_URL=<a Base archive node> evm/fork.sh` starts the fork from another node.
+
 ## What it stops
 
 | Attack                                                                                  | Verdict                                   | Details                                                          |
