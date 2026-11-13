@@ -51,7 +51,7 @@ Ask before each of these. Never do them on your own.
    It deploys `guard.<you>.testnet`, creates `agent.`, `agent2.`, `sentinel.`, `sentinel2.`, `sentinel3.`
    and `armer.`, gives each a function-call key limited to the guard, sets the bounds and deposits
    1.5 NEAR of credit for the agent. Last line:
-   `.env, .env.agent, .env.agent2, .env.sentinel, .env.sentinel2, .env.sentinel3, .env.armer written; agent credit: 1500000000000000000000000 yoctoNEAR`
+   `.env, .env.agent, .env.agent2, .env.sentinel, .env.sentinel2, .env.sentinel3, .env.armer written; agent credit: 1499100000000000000000000 yoctoNEAR`
    Check: `near contract call-function as-read-only guard.<you>.testnet sentinels json-args {} network-config testnet now`
    returns three accounts and `"quorum": 2`.
 4. **Fork and sentinels.** Terminal 1: `evm/fork.sh`, until
@@ -66,7 +66,8 @@ Ask before each of these. Never do them on your own.
    A sentinel votes only on checks requested after it started.
 5. **Arm** (the human chooses the budget): `bun --env-file=.env --env-file=.env.armer app/arm.ts 0.4 900`
    arms 0.4 NEAR for 900 s. Bounds set by setup: 0.5 NEAR per arming, 3,600 s, 5 NEAR per 7 days.
-   Check: the view `budget_left` with `{"account":"agent.<you>.testnet"}` is not `"0"`.
+   Check: `near contract call-function as-read-only guard.<you>.testnet budget_left json-args '{"account":"agent.<you>.testnet"}' network-config testnet now`
+   returns `"400000000000000000000000"`. A read in the first seconds after arming may still say `"0"`: read again.
 6. **Smoke test.** `./demo.sh` runs the whole path in about 7 min and exits 0 ([reproduce](reproduce.md#full-demo)).
    It starts its own sentinels: stop those of step 4 first.
 
@@ -104,7 +105,22 @@ deposit 0, amounts as decimal strings:
 | 6   | views `get_check({id})`, then `exit_ready({id})`        | none     | until `verdict` is `"allow"` and `exit_ready` is `true` (60 s at most)                          |
 | 7   | `sell_quoted({id})` returns approve and swap, signed    | 150 TGas | within 120 s of the quote. Then `app/relay.ts exit <nonce>`                                     |
 
-`sellAll(buyId)` in `app/agent.ts` does 5 to 7. Both `request_check` and `buy` take an optional
+`sellAll(buyId)` in `app/agent.ts` does 5 to 7. `sell.ts`, beside `buy.ts`, sells what check `<id>` bought:
+
+```ts
+import { sellAll } from "./app/agent";
+const { id, nonce, signed } = await sellAll(Number(process.argv[2]));
+console.log(
+  `#${id}: ${signed.length ? `signed by NEAR, relay with: bun --env-file=.env app/relay.ts exit ${nonce}` : "no sale"}`,
+);
+```
+
+```sh
+bun --env-file=.env --env-file=.env.agent sell.ts <id>
+bun --env-file=.env app/relay.ts exit <nonce>   # the nonce sell.ts prints: approve then swap, both receipt status 1
+```
+
+Both `request_check` and `buy` take an optional
 `decision_sha256`. A check and a buy of 0.00001 ETH cost 0.0475 NEAR of budget and credit; an exit
 0.05 NEAR of credit. The agent picks only the token and the amount: never route, recipient or floor.
 

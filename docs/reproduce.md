@@ -73,7 +73,7 @@ What happens where:
 
 1. **Build and test the contract.** `cargo test` gives `354 passed`; then `bun install`.
 2. **Get a testnet account** holding about 8 NEAR (setup moves 7.6 NEAR). The faucet gives 10:
-   `near account create-account sponsor-by-faucet-service <you>.testnet autogenerate-new-keypair save-to-keychain network-config testnet create`.
+   `near account create-account sponsor-by-faucet-service <you>.testnet autogenerate-new-keypair save-to-legacy-keychain network-config testnet create`.
    If it fails, see [troubleshooting](#troubleshooting).
 3. **Deploy.** `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard
    and creates `agent.`, `agent2.`, `sentinel.`, `sentinel2.`, `sentinel3.` and `armer.`, each with a
@@ -142,7 +142,7 @@ measurements are in [sentinel](sentinel.md#measured-on-real-base).
 | Symptom                                          | Cause and fix                                                                                                                                                                                                                              |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Faucet: `429 Too Many Requests`                  | it rate-limits by IP. A failed call leaves `~/.near-credentials/testnet/<you>.testnet.json` and the folder `<you>.testnet/` beside it: delete both before retrying.                                                                        |
-| No faucet at all                                 | create the account from any account holding 7.5 NEAR: `near account create-account fund-myself <you>.testnet '7.5 NEAR' autogenerate-new-keypair save-to-keychain sign-as <funded>.testnet network-config testnet sign-with-keychain send` |
+| No faucet at all                                 | create the account from any account holding 7.5 NEAR: `near account create-account fund-myself <you>.testnet '7.5 NEAR' autogenerate-new-keypair save-to-legacy-keychain sign-as <funded>.testnet network-config testnet sign-with-legacy-keychain send` |
 | A role or `replay --check` fails on `429 Rate limits exceeded` | the NEAR RPC limits your IP. Every role, `replay --check` and `attest --check` wait out a 429 (1 s, doubling up to 64 s: about 2 min) and send the same request again; past that, wait a few minutes or read another endpoint: `NEAR_RPC=https://rpc.testnet.near.org bun app/replay.ts … --check` |
 | `Not enough allowance for access key`            | the role's gas allowance is spent: replace its key ([contract](contract.md#roles-and-keys))                                                                                                                                                |
 | `port 8545 already serves a node: stop it first` | another anvil runs: stop it before `evm/fork.sh`                                                                                                                                                                                           |
