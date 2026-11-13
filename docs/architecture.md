@@ -48,7 +48,7 @@ flowchart LR
 | -------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------ |
 | **guard**            | NEAR contract                              | holds credits and budgets, stores checks and verdicts, builds every Base transaction |
 | **Chain Signatures** | NEAR's threshold signing network (the MPC) | signs for the guard's derived Base address whatever the guard asks                   |
-| **sentinel**         | off-chain; two in the demo, on one machine | simulates each check on a Base node, posts its vote and its evidence's sha256        |
+| **sentinel**         | off-chain; three in the demo, on one machine | simulates each check on a Base node, posts its vote and its evidence's sha256        |
 | **agent**            | off-chain                                  | the model decides; its wrapper calls the guard with the agent's key                  |
 | **armer**            | off-chain                                  | opens the agent's armed budget within the owner's bounds                             |
 | **owner**            | a human                                    | sets bounds and roles, stops, approves a `warn`, recovers                            |

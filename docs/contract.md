@@ -199,7 +199,9 @@ vote can be asked for. Every sentinel may vote until the exit is sent to signing
   sentinel's 2.5 s poll and about 2 s for the vote's inclusion on NEAR: an honest quote was in within
   6 s, and later than 15 s only while the public NEAR RPC rate-limited the sentinels
   ([measured](latency.md));
-- 60 s after the request, with **one** vote: no sentinel down ever refuses an exit.
+- 60 s after the request, with **one** vote: no sentinel down ever refuses an exit. A lone `allow`
+  quote then stands even when the two other sentinels voted `block` (their simulation failed): a
+  `block` is no quote.
 
 With two sentinels, both needed, that is both quotes or the 60 s. The quote's 120 s run from the
 first quote.
@@ -207,7 +209,9 @@ first quote.
 **What one stolen key can still do**, until the owner replaces it:
 
 - on a buy check less than 300 s old: block it, before or after the others' `allow` (within 180 s,
-  until the buy is sent to signing), and quarantine its token. No `allow`, no `warn`, no listing;
+  until the buy is sent to signing), and quarantine its token. No `allow`, no `warn`, no listing.
+  A `block` arriving once the buy is at the signing network is refused: it neither quarantines nor
+  lists;
 - on an exit, three sentinels all answering: nothing. The sale waits for the three quotes and the
   median stands; a `block` or no vote from that key delays it by 15 s, on the others' quotes;
 - on an exit, three sentinels of which another does not quote within 15 s, or two sentinels: post

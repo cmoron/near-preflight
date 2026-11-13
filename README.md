@@ -14,6 +14,8 @@ Before NEAR signs any purchase, three sentinels simulate the buy and its resales
 
 The agent holds no key for Base, the chain it buys on: the contract builds the transaction and NEAR signs it, within bounds: two of the three sentinels must agree, a `block` on its code quarantines the token for every agent, each token has a cap.
 
+Perimeter today: Uniswap V2 WETH pools on Base; NEAR testnet; in the demo the three sentinels run on one machine.
+
 ## One purchase
 
 <p align="center"><img src="docs/assets/flow.svg" alt="One purchase, read left to right. Outside near-preflight, dashed: the AI agent (untrusted, no key for Base), NEAR Chain Signatures and the Base blockchain. Inside the green near-preflight frame: the guard contract on NEAR, three sentinels and the proof anyone can replay. 1: the agent asks the guard to check a token and an amount. 2: each sentinel simulates the buy and the resale on Base. 3: each posts its vote to the guard; an allow takes two matching votes of three. 4: Chain Signatures signs the swap the guard built. Then anyone can broadcast the signed swap to Base, no key needed." width="830"></p>
@@ -34,12 +36,12 @@ Do not trust it blindly: anyone can [replay](docs/replay.md) a verdict, and the 
 - **A cap does not judge the token.** It bounds how much an agent spends, not on what; an allowlist judges only tokens someone already listed.
 - **The traps are real.** On Base on 2026-11-11, 24 of the 29 token/WETH pools opened on Uniswap V2 in 2.4 h were drained a median 13 min after funding; all 29 tokens shared one code template ([measurement](docs/sentinel.md#measured-on-real-base)).
 - **Measured on 96 real launches.** Checked as they stood 64 s after launch, none got `allow`. Of the 81 that ended badly within 24 h, 73 were blocked, all of one farm by its template's history, and 8 got `warn` ([corpus](docs/corpus.md)).
-- **What that means.** The check stops losses written in a token's code, and repeat farms. It does not tell an honest fresh launch from one whose liquidity will be pulled: both get `warn`, and the owner decides.
+- **What that means.** The check stops losses written in a token's code, and repeat farms; the first is shown on the project's trap tokens only, as the real launches held no code honeypot. It does not tell an honest fresh launch from one whose liquidity will be pulled: both get `warn`, and the owner decides.
 - **Every step can be checked.** NEAR signs only the transaction the sentinel simulated, the agent never picks route, recipient or minimum output, and anyone can re-derive a verdict.
 
-## Verify it yourself in five minutes
+## Verify it yourself
 
-No NEAR account, no key. You need `bun` 1.4, Foundry 1.8 and `jq`; a **fork** below is a local copy of Base run by Foundry's anvil.
+No NEAR account, no key: about a minute without a fork, six more for the trap tests. You need `bun` 1.4, Foundry 1.8 and `jq`; a **fork** below is a local copy of Base run by Foundry's anvil.
 
 First, the [status page](https://cmoron.github.io/near-preflight/journal.html) lists every check of the demo guard and its verdict.
 
@@ -91,7 +93,7 @@ bun test --timeout 30000                  #   355 pass, 0 fail
 - **Same-second entries.** A verdict takes about 30 s on Base, 20 s of them a deliberate wait for a later block; NEAR's signature takes 6 s more ([latency, and whom it fits](docs/latency.md)).
 - **Front-running.** The signing request is public on NEAR before the swap reaches Base.
 - **Template evasion.** Changing the code makes a new template; fewer than 3 earlier pools give no finding.
-- **Other pools.** Only Uniswap V2 WETH pools on Base are checked and bought today, where copy-paste trap launches concentrate (29 new V2 WETH pools in 2.4 h on 2026-11-11, all of one code template, 24 of them drained); Uniswap V3 and V4 pools are not supported yet.
+- **Other pools.** Only Uniswap V2 WETH pools on Base are checked and bought today, where copy-paste trap launches concentrate; Uniswap V3 and V4 pools are not supported yet.
 
 > [!WARNING]
 > Never send funds to the guard's address on Base mainnet. A transaction NEAR signs for chain 8453 is valid there; this demo broadcasts only to a local fork.

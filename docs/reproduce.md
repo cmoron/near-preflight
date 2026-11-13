@@ -95,10 +95,11 @@ What happens where:
    commands; each exits 0.
 7. **Optional.** With `NEAR_AI_API_KEY=...` in `.env.llm` ([cloud.near.ai](https://cloud.near.ai)), moment 1
    runs the live model (0.0003 USD here); without it, a recorded decision is verified.
-   `./demo.sh --full` (620 s here, 0.0011 USD) adds an exit sold on the median of the three sentinels'
+   `./demo.sh --full` (620 to 730 s here, 0.0011 USD) adds an exit sold on the median of the three sentinels'
    quotes, a `warn` the owner approves, a trap aimed at the guard's address, a second agent refused the
    token the first one's check got quarantined, three concurrent model runs, the emergency stop and a
-   withdrawal. On a fork just started, the first USDC check took 145 s while anvil fetched Base state.
+   withdrawal. Without the key its printed steps go from 9 to 11: step 10 is the model's own purchase.
+   On a fork just started, the first USDC check took 145 s while anvil fetched Base state.
 8. **Real Base.** `./check-mainnet.sh`, below.
 
 The journal reads any guard: `https://cmoron.github.io/near-preflight/journal.html?guard=guard.<you>.testnet`.
