@@ -65,7 +65,8 @@ Ask before each of these. Never do them on your own.
    returns `"400000000000000000000000"`. A read in the first seconds after arming may still say `"0"`: read again.
 6. **Smoke test.** `./demo.sh` runs the whole path in about 7 min and exits 0 ([reproduce](reproduce.md#full-demo)).
    It starts its own miner and sentinels on a fork alone: stop those of step 4 first (Ctrl-C on
-   `./start.sh`), then run `evm/fork.sh` in another terminal.
+   `./start.sh`), then run `evm/fork.sh` in another terminal. It stops its sentinels when it ends: to buy
+   afterwards, stop that fork, run `./start.sh` again, and arm again if the budget is spent or expired (step 5).
 
 ## Buy through the guard
 

@@ -68,7 +68,7 @@ record of Ethereum), the fee vaults, WETH's supply, the base fee, the Uniswap fa
 | The same, unless a pair was created between the approve and the swap, as the busy side did (`busy_tell`) | 🔴 not listed: the same, and `token calls or reads WETH and the V2 factory during a transfer: state all of Base moves` | `bun test -t "BusyTell"`                   |
 | Reads WETH's or the guard's state without a call (BALANCE, EXTCODE*), in its own code or its implementation's, in the proxy's context or the implementation's own | 🔴 not listed: `token calls or reads WETH …`, `token reads the ETH balance of the guard during a transfer …`  | `bun test -t "reads an ETH balance"`, `-t "implementation in the proxy"`, `-t "STATICCALL from the proxy"` |
 | Any of these, its pool traded by others during the check                                                 | 🔴 still blocked: others' trades are re-executed after the buy; when they cannot be, a sale refused there is a block | `bun test -t "its pool traded too"`, `-t "more trades of its pool"` |
-| Marks the guard in its implementation's own storage when someone buys after it, then refuses its sale (`impl_mark`, judge pass 9) | 🔴 not listed: `sale refused N s after the buy on Base's state of block B (…)`: every slot of the token's own addresses is carried | `bun test -t "J9ImplMark"` |
+| Marks the guard in its implementation's own storage when someone buys after it, then refuses its sale (`impl_mark`, review pass 9) | 🔴 not listed: `sale refused N s after the buy on Base's state of block B (…)`: every slot of the token's own addresses is carried | `bun test -t "J9ImplMark"` |
 | Upgraded during the check to code at a new address, which sells as before                               | 🔴 not listed: `reads 0x… during a transfer`: the later side is traced like the guard side | `bun test -t "upgraded during the check"` |
 
 The first row is the [environment rule](sentinel.md#environment-rule). The others meet two answers:
@@ -110,7 +110,7 @@ The guard's Base address is public: anyone can send it tokens or get a token to 
 | Attack                                                              | Answer (exact reason)                                                         | Reproduce                               |
 | ------------------------------------------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------- |
 | A token that freezes only the guard's address (`guard_frozen`)      | 🔴 not listed: `guard address only, not listed: sale refused …`               | `bun test -t "freezes only the guard"`  |
-| Closes the guard's sales only, 8 min after its buy (`guard_later`, judge pass 9) | 🔴 not listed, at every check: `guard address only, not listed: sale refused 900 s after the buy (…)` | `bun test -t "J9GuardLater"` |
+| Closes the guard's sales only, 8 min after its buy (`guard_later`, review pass 9) | 🔴 not listed, at every check: `guard address only, not listed: sale refused 900 s after the buy (…)` | `bun test -t "J9GuardLater"` |
 | Sends the guard tokens during a check                               | 🟢 USDC stays `allow`: the transfer is re-executed after the buy              | `bun test -t "USDC sent to the guard"` |
 | A sale that needs more gas than the guard signs with (`gas_hungry`) | 🔴 the simulation uses the guard's gas limit; the owner can raise it and sell | `bun test -t "more gas than the guard"` |
 
@@ -250,6 +250,8 @@ listed.
   buy. Dust sent to the guard is re-executed like a trade; dust plus ten trades of an honest token's pool
   block that check. A transaction that touched neither the pool nor a footprint slot stays as Base ran
   it, even if it would have acted otherwise after the buy.
+- **Same-second entries.** A verdict takes about 30 s on Base, 20 s of them a deliberate wait for a
+  later block, and the signature 6 s more ([latency](latency.md)).
 - **Front-running.** The signing request and the signed transaction are public on NEAR before anyone
   broadcasts them: a token owner can react before the swap's 300 s deadline.
 - **A rug by liquidity removal.** A token that sells normally and whose liquidity is pulled, or whose
@@ -278,8 +280,9 @@ Each limit, with the code that sets it: [contract](contract.md#limits), [sentine
 
 ## Closed after review
 
-Nine judge runs, a red team, automated reviews and our own security passes found the bypasses below.
-Each now has a test.
+Nine adversarial review passes found the bypasses below, with a red team, automated reviews and the
+team's own security passes. The reviewers were AI agents playing a hostile hackathon judge. Each
+bypass now has a test.
 
 | Found                                                                                             | Closed by                                                                                                 |
 | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -294,14 +297,14 @@ Each now has a test.
 | A sale that needs more gas than the guard signs with                                              | the simulation uses the guard's gas limit; the owner can raise it to retry                                |
 | Copies of an honest token's code listed as a template                                             | templates are never listed; reputation counts only pools funded before the target's                       |
 | A farm dating its pools by an empty pair created early, or liquidity added and removed            | pools are dated by net WETH funding                                                                       |
-| A token keyed on what the simulation did and the guard did not (fourth run's Trap2)               | the guard side runs the exact bytes the guard signs; the amount is stated at the check                    |
+| A token keyed on what the simulation did and the guard did not (review pass 4's Trap2)               | the guard side runs the exact bytes the guard signs; the amount is stated at the check                    |
 | A token keyed on any approve but the maximum also trapped the owner's exit                        | `sell` takes an approve of the owner's choice, 2^256 - 1 included                                         |
 | Drained copies of USDC's code got USDC blocked                                                    | reputation does not apply to a pool that predates the window                                              |
 | Anyone could block arming by depositing 1 yoctoNEAR to the agent                                  | `arm` refuses only a credit below what the armer read                                                     |
 | The recorded decision package re-anchored on a guard that never called the model                  | the signed request names the guard, the agent and a fresh NEAR block; `attest --check` verifies all three |
 | A compromised sentinel key could not be revoked                                                   | `set_sentinels` (first `set_sentinel`), owner only, logged                                                |
-| A sale only after a top-level `balanceOf`, which only the simulation sent (fifth run's JudgeTrap) | the guard side holds the guard's own transactions alone; every other call runs in a request of its own    |
-| Simulated blocks told apart from real ones (timestamps, one prevrandao for all)                   | every block up to the late sale listed, a prevrandao per L1 epoch; since batch 9, the cadence measured     |
+| A sale only after a top-level `balanceOf`, which only the simulation sent (review pass 5's JudgeTrap) | the guard side holds the guard's own transactions alone; every other call runs in a request of its own    |
+| Simulated blocks told apart from real ones (timestamps, one prevrandao for all)                   | every block up to the late sale listed, a prevrandao per L1 epoch; later, the cadence measured |
 | A sale tax hidden by a token that sells for itself into the pool during the sale                  | the tax is the ETH the seller receives; a pool paying out more is a `block`                               |
 | One signed decision anchored on two checks                                                        | the guard refuses a digest already anchored; `attest --check` verifies `decision_of`                      |
 | A pair created empty before the index window escaped reputation                                   | an older pool must have held 0.5 ETH before the window, otherwise it is dated by its funding inside it    |
@@ -316,15 +319,15 @@ Each now has a test.
 | A refund accepted before any replacement was signed; a replacement voiding a signed buy           | a refund needs a replacement signed at that nonce; only a reserved nonce can be replaced                  |
 | Any agent could get an honest token listed by picking an amount whose buy fails                   | only a finding after a buy that succeeded, on at least 1,000 units, lists; the wrapper refuses dust       |
 | A callback that ran out of gas would have held the signing slot forever                           | the owner releases it after 600 s; a late callback names its request                                      |
-| Judge pass 6's NextBlockKey and AmountTrap                                                        | the first sale's block and share are drawn per check; `replay --check` recomputes them                    |
+| Review pass 6's NextBlockKey and AmountTrap                                                        | the first sale's block and share are drawn per check; `replay --check` recomputes them                    |
 | `withdraw_fees` took the prices that paid for storage, then a `refund_credit` failed              | a withdrawal leaves storage, every credit and the escrow covered                                          |
 | A sentinel posted an honest proof with `list_target` true and `replay --check` said OK            | `list_target` is in the evidence and stored with the verdict; replay compares both                        |
 | A token delivering almost nothing escaped the blocklist                                           | dust is judged on the pool's quote for the agent's amount                                                 |
 | A token could sell only at the check's late block, always 255 blocks after the buy                | the late sale is drawn per check (now 30 to 51 s); `replay --check` refuses a chosen one                  |
-| Judge pass 7's WethKey: one unrelated `WETH.deposit()` froze every sale                           | first a busy side (a fixed recipe of others' activity), replaced in pass 8, below                         |
-| A sentinel could judge a farm copy on an index window that missed its earlier pools               | the window must start 2 h before the check (2,000 blocks until batch 9); since pass 8 it ends at the check's block |
+| Review pass 7's WethKey: one unrelated `WETH.deposit()` froze every sale                           | first a busy side (a fixed recipe of others' activity), replaced in pass 8, below                         |
+| A sentinel could judge a farm copy on an index window that missed its earlier pools               | the window must start 2 h before the check (2,000 blocks at first); since pass 8 it ends at the check's block |
 | An honest 30-block cooldown was listed whenever the first sale was drawn within it                | a refused sale lists only when the late sale is refused too                                               |
-| Judge pass 8's ApproveKey and BusyTell: the busy side's recipe, keyed around or recognised        | the later side, on a real block mined 16 to 24 s on; the token's code may not call WETH or the factory     |
+| Review pass 8's ApproveKey and BusyTell: the busy side's recipe, keyed around or recognised        | the later side, on a real block mined 16 to 24 s on; the token's code may not call WETH or the factory     |
 | The sentinel could pick any block from 60 s before the request to 60 s after its verdict, and so the draws | the reference block is the first block 4 s after the request; `replay --check` recomputes it              |
 | An index window could end 300 blocks before the check and drop a farm's newest pools              | the window ends at the check's block                                                                      |
 | Base mines five blocks a second, the check counted 2 s a block: every span a tenth of what it said, simulated blocks spaced as no real block | every rule in seconds, turned into blocks with the cadence measured at the reference block; replay measures it again |
@@ -335,8 +338,8 @@ Each now has a test.
 | Base's 0.2 s blocks cut the check's last sale to 51 s: a sale closed or taxed from 5 min got `allow` | the far sale: the late sale again 301 to 900 s after the buy, drawn per check, on the trace's local fork |
 | A trap forcing that merge (a write to a slot the buy wrote, eleven trades of its pool) turned its refusal there into a `warn` | a refusal there is a `block`, not listed; a lone slot moved with no trade (dust sent to the guard) gets both changes, decided by no value the token returns |
 | A token reading WETH or a balance from its implementation's own context (a plain call to it) escaped the rule | the tracer records every frame running the token's or its implementation's code, whatever the context |
-| Judge pass 9's J9ImplMark: a mark written in the implementation's own storage when others traded was not carried to the later side | every slot of the addresses the token's code may read with no finding is carried, the rule's own set |
-| Judge pass 9's J9GuardLater: a refusal for the guard alone from 8 min on was escaped by requesting checks until the far sale was drawn earlier | the far sale also runs at both ends of its range, 301 s and 900 s, at every check |
+| Review pass 9's J9ImplMark: a mark written in the implementation's own storage when others traded was not carried to the later side | every slot of the addresses the token's code may read with no finding is carried, the rule's own set |
+| Review pass 9's J9GuardLater: a refusal for the guard alone from 8 min on was escaped by requesting checks until the far sale was drawn earlier | the far sale also runs at both ends of its range, 301 s and 900 s, at every check |
 | The later side was not traced: a token could act differently there unseen (a proxy upgraded during the check) | the later side runs on a local fork too, traced by the same rule |
 | Dust sent to the guard was merged as a sum, exact for a balance only: another slot could turn a block into a warn | no value is summed: transfers to or from the guard are re-executed after the buy; any other slot keeps Base's value |
 | The tracer's stack of code addresses could lose its place on a frame that enters without exiting | a frame's code is found by its depth |

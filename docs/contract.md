@@ -244,7 +244,7 @@ agent buys.
 
 ## Token limits
 
-A check samples sales at drawn delays and sizes; a review after nine judge passes concluded that sampling
+A check samples sales at drawn delays and sizes; a design review after nine review passes concluded that sampling
 alone does not converge. So the contract bounds what any wrong `allow` costs, whatever missed the trap: a
 draw, a rule, or a lying sentinel.
 

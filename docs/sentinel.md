@@ -178,7 +178,7 @@ So the sentinel re-executes instead ([`app/later.ts`](../app/later.ts)):
 
 The set is the rule's own, not a list of slots: a sale that reads any other address is a `block`, so a
 token cannot keep a mark where the footprint does not look, and adding a contract only adds a finding.
-Judge pass 9's J9ImplMark (`impl_mark`) kept its mark in its implementation's own storage, written by a
+Review pass 9's J9ImplMark (`impl_mark`) kept its mark in its implementation's own storage, written by a
 plain call when someone bought after the guard: `allow` before, now `sale refused N s after the buy on
 Base's state of block B` (`bun test -t "J9ImplMark"`). Blocking a plain call to the implementation would
 also close it, but would block honest proxies for it and leave the next such address to find.
@@ -287,7 +287,7 @@ Both ends are fixed, and land at least 301 s and 900 s after the buy at any cade
 slower than a block a second rounds short (a fork whose 100 blocks took 201 s put "900 s" 898 s after the
 buy), so the count is raised until the time is reached; Base's 1,505 and 4,500 blocks do not move. A
 `block` for the guard's address alone lists nothing and nothing remembers it, so a
-drawn delay alone let an agent request checks until it fell before the trap: judge pass 9's J9GuardLater
+drawn delay alone let an agent request checks until it fell before the trap: review pass 9's J9GuardLater
 (`guard_later`) closes the guard's sales 8 minutes after its buy and got `allow` in 4 of 8 checks (2 of 8 here). Now
 every check meets it at 900 s: `guard address only, not listed: sale refused 900 s after the buy (…)`
 (`bun test -t "J9GuardLater"`).
@@ -389,7 +389,7 @@ expected address, runs the implementation in its own (`bun test -t "STATICCALL f
 - WETH and the factory are allowed above for the router's sake, yet all of Base moves their state. A
   token that reaches either one is a `block` naming it: `token calls or reads WETH and the V2 factory
 during a transfer: state all of Base moves`, whether or not that state moved during the check.
-- Judge pass 8's ApproveKey, BusyTell and pass 7's WethKey all call WETH (BusyTell the factory too).
+- Review pass 8's ApproveKey, BusyTell and pass 7's WethKey all call WETH (BusyTell the factory too).
 
 **`token_balances`**: the addresses whose ETH balance the token's own code reads, itself aside. Any is
 a `block`: `token reads the ETH balance of the guard during a transfer: a value no simulation can
@@ -399,7 +399,7 @@ and the later side gives it what its transactions spend, not Base's.
 The same trace gives the buy's state change (`prestateTracer`, its values read before and after its
 block), which the [later side](#the-four-requests) applies.
 
-**An allow-list for the token's own code.** Sampling sales does not converge: each judge pass found the
+**An allow-list for the token's own code.** Sampling sales does not converge: each review pass found the
 delay, the size or the state the samples missed. The rule above holds because it lists what is allowed.
 
 So `allow` also means that on the traced runs (the guard's buy, approves and sales on the reference

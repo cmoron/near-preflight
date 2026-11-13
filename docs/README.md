@@ -1,7 +1,7 @@
 # near-preflight documentation
 
 This is the top level of near-preflight's documentation. The [README](../README.md) is the two-minute
-version; each page below covers one part and stays short. Read them in this order if you are new.
+version; each page below covers one part. Read them in this order if you are new.
 
 ## Understand it
 
@@ -36,5 +36,3 @@ version; each page below covers one part and stays short. Read them in this orde
 - [Site](https://cmoron.github.io/near-preflight/): the landing page ([`index.html`](index.html),
   [`landing.js`](landing.js)) and the [journal](https://cmoron.github.io/near-preflight/journal.html) of the
   demo guard's checks ([`journal.html`](journal.html), [`app.js`](app.js)), in this folder.
-
-The former single page, [DETAILS.md](DETAILS.md), now points to these.
