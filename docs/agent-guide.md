@@ -1,0 +1,153 @@
+# Agent guide
+
+For an AI coding agent (Claude Code, Codex…) helping a human set up their own guard and make a trading
+agent buy through it. Humans can skim it. Every command is from this repository; the code is the reference.
+
+near-preflight is a NEAR contract, the **guard**, and three off-chain **sentinels**. An agent asks the
+guard to check a token and an amount; the sentinels simulate the buy and the resale on Base and vote;
+on `allow` the guard builds the swap and NEAR Chain Signatures signs it. The agent holds no Base key.
+
+There is no SDK, npm package, MCP server or hosted service. You deploy your own guard from this
+repository, run its sentinels yourself, and the trading agent calls the guard through
+[`app/agent.ts`](../app/agent.ts) or any NEAR client. The demo guard cannot be reused: only its owner
+registers agents.
+
+## Limits, before you start
+
+- **NEAR testnet only.** Nothing here runs on NEAR mainnet.
+- **A buy executes on a local fork of Base only.** The relay refuses any node that is not anvil. On Base
+  mainnet you get verdicts, read only (`./check-mainnet.sh <token>`), and you stop there.
+- **Uniswap V2 WETH pools on Base only.** No V3, no V4, no other chain.
+- **About 30 s per verdict** on real Base, 20 to 55 s on the fork, plus 6 s for the signature. A verdict
+  buys for 120 s, within 180 s of its request. Not for same-second entries ([latency](latency.md)).
+- **Three sentinels on one machine are three keys, not three parties** ([threat model](threat-model.md#a-lying-sentinel)).
+
+## What the human does, and confirms
+
+Ask before each of these. Never do them on your own.
+
+| Step                                            | Why it is theirs                                                                   |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Create and fund a NEAR testnet account (step 2) | its full-access key is the owner's key                                             |
+| Run `app/setup.ts` (step 3)                     | it moves 7.6 testnet NEAR and creates seven accounts                               |
+| Arm the agent, and choose the budget (step 5)   | the armed budget is what the agent may spend                                       |
+| Approve a `warn` (`app/human.ts approve <id>`)  | the owner reads the reasons and decides; any `app/human.ts` command is the owner's |
+
+## Prerequisites
+
+`bun` 1.4, Foundry 1.8 (`anvil`, `forge`, `cast`), `jq`, Rust 1.98 with `cargo-near` 0.23, `near` CLI
+0.31, and about 8 testnet NEAR. Check: `bun --version`, `anvil --version`,
+`cargo near --version`, `near --version`.
+
+## Setup
+
+1. **Clone.** `git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun install`
+2. **Testnet account** (the human). The faucet gives 10 NEAR:
+   `near account create-account sponsor-by-faucet-service <you>.testnet autogenerate-new-keypair save-to-legacy-keychain network-config testnet create`
+   Check: `~/.near-credentials/testnet/<you>.testnet.json` exists; setup reads the key there. On `429`,
+   see [troubleshooting](reproduce.md#troubleshooting).
+3. **Build and deploy** (the human confirms).
+   `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet`
+   It deploys `guard.<you>.testnet`, creates `agent.`, `agent2.`, `sentinel.`, `sentinel2.`, `sentinel3.`
+   and `armer.`, gives each a function-call key limited to the guard, sets the bounds and deposits
+   1.5 NEAR of credit for the agent. Last line:
+   `.env, .env.agent, .env.agent2, .env.sentinel, .env.sentinel2, .env.sentinel3, .env.armer written; agent credit: 1500000000000000000000000 yoctoNEAR`
+   Check: `near contract call-function as-read-only guard.<you>.testnet sentinels json-args {} network-config testnet now`
+   returns three accounts and `"quorum": 2`.
+4. **Fork and sentinels.** Terminal 1: `evm/fork.sh`, until
+   `Base fork at block 55836672 ready on http://127.0.0.1:8545` (about 30 s; it stays in the foreground).
+   Terminal 2, as [`demo.sh`](../demo.sh) does:
+   ```sh
+   export RPC_TIMEOUT_MS=60000 INDEX_FROM=$(($(jq .fork_block evm/tokens.json) + 1))
+   bun app/testkit.ts live &          # the fork mines nothing alone: one block a second
+   for k in .env.sentinel .env.sentinel2 .env.sentinel3; do bun --env-file=.env --env-file=$k app/sentinel.ts & done
+   ```
+   Check: each sentinel prints `sentinel N of 3 (quorum 2), listening to guard.<you>.testnet`.
+   A sentinel votes only on checks requested after it started.
+5. **Arm** (the human chooses the budget): `bun --env-file=.env --env-file=.env.armer app/arm.ts 0.4 900`
+   arms 0.4 NEAR for 900 s. Bounds set by setup: 0.5 NEAR per arming, 3,600 s, 5 NEAR per 7 days.
+   Check: the view `budget_left` with `{"account":"agent.<you>.testnet"}` is not `"0"`.
+6. **Smoke test.** `./demo.sh` runs the whole path in about 7 min and exits 0 ([reproduce](reproduce.md#full-demo)).
+   It starts its own sentinels: stop those of step 4 first.
+
+## Buy through the guard
+
+The shortest path is the wrapper. `buy.ts`, at the repository root:
+
+```ts
+import { parseEther, type Address } from "viem";
+import { guardedBuy } from "./app/agent";
+const [token, eth = "0.00001"] = process.argv.slice(2);
+const { id, signed } = await guardedBuy(token as Address, parseEther(eth));
+console.log(`#${id}: ${signed ? "signed by NEAR" : "no buy"}`);
+```
+
+```sh
+bun --env-file=.env --env-file=.env.agent buy.ts 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913   # USDC, on the fork
+bun --env-file=.env app/relay.ts <id>     # no key: broadcasts the signed swap to the fork, receipt status 1
+```
+
+The fork's trap tokens are in [`evm/tokens.json`](../evm/tokens.json); `sell_blocked` gets a `block`.
+`bun --env-file=.env --env-file=.env.agent app/check.ts <token> [ETH]` asks for a verdict and buys nothing.
+
+From another codebase, make the same calls with near-api-js, signed by the agent's function-call key
+(`AGENT_KEY` in `.env.agent`), as [`app/near.ts`](../app/near.ts) does. All on `guard.<you>.testnet`,
+deposit 0, amounts as decimal strings:
+
+| #   | Call                                                    | Gas      | Notes                                                                                           |
+| --- | ------------------------------------------------------- | -------- | ----------------------------------------------------------------------------------------------- |
+| 1   | `request_check({target, amount_wei})` returns the id    | default  | `target`: 0x + 40 hex. Debits the price (0.025 NEAR). `amount_wei` at most `bounds.max_buy_wei` |
+| 2   | view `get_check({id})`, every 1.5 s                     | none     | until `verdict` is `"allow"`, `"warn"` or `"block"`; `reasons` says why. `null`: read again     |
+| 3   | `buy({id, amount_wei})` returns the signed transaction  | 100 TGas | on `allow` only; the same `amount_wei`. Debits the value plus gas at the cap                    |
+| 4   | `refund_check({id})`                                    | default  | no verdict 300 s after the request: the price comes back                                        |
+| 5   | `request_exit({buy_id, amount})` returns the quote's id | default  | `amount`: tokens, at most the view `holding({agent, token})`. 0.025 NEAR from the credit        |
+| 6   | views `get_check({id})`, then `exit_ready({id})`        | none     | until `verdict` is `"allow"` and `exit_ready` is `true` (60 s at most)                          |
+| 7   | `sell_quoted({id})` returns approve and swap, signed    | 150 TGas | within 120 s of the quote. Then `app/relay.ts exit <nonce>`                                     |
+
+`sellAll(buyId)` in `app/agent.ts` does 5 to 7. Both `request_check` and `buy` take an optional
+`decision_sha256`. A check and a buy of 0.00001 ETH cost 0.0475 NEAR of budget and credit; an exit
+0.05 NEAR of credit. The agent picks only the token and the amount: never route, recipient or floor.
+
+**On each verdict.**
+
+- `allow`: buy within 120 s of the verdict and 180 s of the request.
+- `warn`: do not buy. Show the human the `reasons` and
+  `bun --env-file=.env app/human.ts approve <id>`. Buy only once `get_check` shows `approved: true`,
+  in the same 120 s. Otherwise give up.
+- `block`: do not buy. A `block` on the token's code quarantines it 30 min for every agent. Do not
+  ask again in a loop.
+- No verdict in 300 s: `refund_check`, then check that two sentinels run.
+
+**Refusals you will meet** (the contract's panic text):
+
+| Text                                                     | Do                                                                                                    |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `budget not armed`, `budget expired`, `budget exceeded`  | the human arms again (step 5)                                                                         |
+| `insufficient credit`                                    | the owner tops up: `deposit_credit({account_id})`, payable                                            |
+| `amount above the owner's per-buy limit`                 | lower the amount (setup: 0.0001 ETH)                                                                  |
+| `amount above what the owner's per-token cap leaves`     | wait (setup: 0.0005 ETH per token an hour)                                                            |
+| `a check of this target is already awaiting its verdict` | one check per token at a time: wait for it                                                            |
+| `target is quarantined after a block verdict`            | stop; only the owner lifts it                                                                         |
+| `target is on the shared blocklist`                      | stop                                                                                                  |
+| `verdict expired`, `check requested more than 180 s ago` | request a new check                                                                                   |
+| `transaction differs from the one simulated`             | another signature or a gas change happened: request a new check                                       |
+| `a signature is already in progress`                     | one signature at a time: retry after a few seconds                                                    |
+| `Not enough allowance for access key`                    | the key's gas allowance is spent: the owner replaces the key ([contract](contract.md#roles-and-keys)) |
+
+`buy` returning `null` means the MPC gave no signature: the nonce, credit and budget stay reserved
+until the owner settles it ([recovery](contract.md#recovery)). Do not buy again to compensate.
+
+## Never
+
+- Never ask for, read or copy the owner's full-access key (`~/.near-credentials`). The trading agent
+  gets `.env` and `.env.agent` only: not `.env.armer`, not a sentinel's file.
+- Never send funds to the guard's Base address on Base mainnet (view `evm_config`, field `address`). A
+  transaction NEAR signs for chain 8453 is valid there.
+- Never broadcast a signed transaction to anything but the local fork.
+- Never treat `warn` as `allow`, and never run `app/human.ts approve` yourself.
+- Never arm, raise a bound or a cap, lift a quarantine or unlist a token to get a buy through.
+- Never commit or print `.env*`: they hold keys.
+- Nothing on NEAR mainnet.
+
+More: [contract](contract.md) for every method and rule, [reproduce](reproduce.md) for each step's
+output, [architecture](architecture.md) for who holds which key.

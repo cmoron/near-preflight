@@ -29,6 +29,8 @@ version; each page below covers one part and stays short. Read them in this orde
 
 ## Run it
 
+- [Agent guide](agent-guide.md): give this to your AI coding agent if you want your own guard on NEAR
+  testnet and an agent that buys through it: setup, the contract calls in order, what it must never do.
 - [Reproduce](reproduce.md): read this if you want to run the demo, fix a setup error, or check the
   deployed code.
 - [Site](https://cmoron.github.io/near-preflight/): the landing page ([`index.html`](index.html),

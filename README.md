@@ -16,6 +16,12 @@ The agent holds no key for Base, the chain it buys on: the contract builds the t
 
 Perimeter today: Uniswap V2 WETH pools on Base; NEAR testnet; in the demo the three sentinels run on one machine.
 
+**Give this to your agent.** To set up your own guard on NEAR testnet and make an agent buy through it, paste this to your coding agent:
+
+```text
+Read https://raw.githubusercontent.com/cmoron/near-preflight/main/docs/agent-guide.md and guide me through it step by step. Ask me before anything that creates an account, signs or spends.
+```
+
 ## One purchase
 
 <p align="center"><img src="docs/assets/flow.svg" alt="One purchase, read left to right. Outside near-preflight, dashed: the AI agent (untrusted, no key for Base), NEAR Chain Signatures and the Base blockchain. Inside the green near-preflight frame: the guard contract on NEAR, three sentinels and the proof anyone can replay. 1: the agent asks the guard to check a token and an amount. 2: each sentinel simulates the buy and the resale on Base. 3: each posts its vote to the guard; an allow takes two matching votes of three. 4: Chain Signatures signs the swap the guard built. Then anyone can broadcast the signed swap to Base, no key needed." width="830"></p>
