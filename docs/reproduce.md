@@ -187,13 +187,15 @@ near account view-account-summary guard.goblin-guard-17826.testnet network-confi
 
 Run it in a plain clone, not in a worktree nested in another repository. The build ignores uncommitted
 changes. Two clones of that commit, in two directories, gave the same wasm. Later commits change the
-off-chain code and these pages, not `src/`: the guard names the commit its wasm was built from.
+off-chain code and these pages, and move the unit tests out of `src/lib.rs` into `src/tests/`, never
+the contract: `git diff 22e5c32 -- src/lib.rs` shows only the tests leaving. The guard names the commit
+its wasm was built from.
 
 CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs on every push to `main`: `cargo fmt`,
 `clippy`, `cargo test`, `bunx tsc --noEmit`, then the fork and `bun test`.
 
 Coverage, measured at commit `22e5c32` with `cargo llvm-cov` (cargo-llvm-cov 0.9.1): 98.4 % of
-`src/lib.rs`'s lines, its test module included; for the contract code above that module, 95.1 % of lines
-(1,503 of 1,581, from the lcov report).
+`src/lib.rs`'s lines, its test module included (since moved to `src/tests/`); for the contract code above
+that module, 95.1 % of lines (1,503 of 1,581, from the lcov report).
 
 The public pages open on `docs/snapshot.json`, then read only what changed: regenerate it with `bun app/snapshot.ts docs/snapshot.json` after a demo run (`demo.sh` does it) or a redeploy, and commit it.

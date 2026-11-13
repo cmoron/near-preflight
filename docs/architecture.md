@@ -157,7 +157,8 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 
 | File                                                             | Implements                                                                            |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| [`src/lib.rs`](../src/lib.rs)                                    | the guard contract and its unit tests ([contract](contract.md))                       |
+| [`src/lib.rs`](../src/lib.rs)                                    | the guard contract ([contract](contract.md))                                          |
+| [`src/tests/`](../src/tests/)                                    | its unit tests, one file per theme; the shared fixtures in `mod.rs`                   |
 | [`app/verifier.ts`](../app/verifier.ts)                          | the check: the four requests and the far sales, judging, listing, exit quotes ([sentinel](sentinel.md)) |
 | [`app/environment.ts`](../app/environment.ts)                    | the environment rule: addresses touched (guard side, far sales, later side), opcodes, what the token's own code calls and runs |
 | [`app/later.ts`](../app/later.ts)                                | the later side: others' trades of the pool, and transfers to the guard, re-executed after the buy |

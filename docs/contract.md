@@ -4,6 +4,11 @@ The guard is one NEAR contract, [`src/lib.rs`](../src/lib.rs) (near-sdk 5). It h
 prepaid credit and armed budget, stores checks and verdicts, keeps the shared blocklist, and builds every
 Base transaction that NEAR Chain Signatures signs for its address.
 
+The contract is `src/lib.rs` (about 2,800 lines); its unit tests are in [`src/tests/`](../src/tests/),
+one file per theme. Moving them there changed no contract byte: `git diff 22e5c32 -- src/lib.rs` shows
+only the tests leaving, and the deployed code is still the reproducible build of commit `22e5c32`
+([reproduce](reproduce.md#rebuild-the-deployed-wasm)).
+
 ## Contents
 
 - [Roles and keys](#roles-and-keys)
