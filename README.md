@@ -22,6 +22,8 @@ It is for the operator of an agent or bot that buys newly launched tokens on Uni
 
 Scope today: Uniswap V2 token/WETH pools on Base, NEAR testnet, purchases executed on a local copy of Base. In the demo the three sentinels run on one machine.
 
+The same contract is also on NEAR mainnet as [`guard.near-preflight.near`](https://nearblocks.io/address/guard.near-preflight.near), inert: no agent, bounds at zero, nothing signed. Its code hash is the reproducible build of the demo guard ([mainnet](docs/mainnet.md)).
+
 ## Give this to your agent
 
 Paste this to your coding agent (Claude Code, Codex…): it sets up your own guard with you and makes an agent buy through it.
