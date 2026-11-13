@@ -8,6 +8,8 @@ version; each page below covers one part and stays short. Read them in this orde
 - [Architecture](architecture.md): read this if you want to know which component talks to which, what
   each key can do, where state lives, and which file implements what.
 - [Glossary](glossary.md): read this if a word (floor, probe, late sale, template, listed) is unclear.
+- [Latency and fit](latency.md): read this if you ask how long a check takes, why, and whom it suits
+  today (an agent that can wait tens of seconds before a buy, not a same-second sniper).
 
 ## Judge its security
 

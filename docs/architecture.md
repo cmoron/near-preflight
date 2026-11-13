@@ -82,9 +82,9 @@ sequenceDiagram
     R->>B: broadcast (anvil only)
 ```
 
-Each sentinel polls the guard (`last_check_id`, then `get_check`): the guard never calls out. The verdict
-is set once the votes decide (both sentinels' identical `allow` in the demo; one `block` vote is enough).
-A `block` both post with `list_target` also lists the token. The four requests are in [sentinel](sentinel.md#the-four-requests).
+Each sentinel polls the guard (`last_check_id`, then `get_check` and `vote_due`): the guard never calls out. The verdict
+is set once the votes decide (two of the three sentinels' identical `allow` in the demo; one `block` vote
+is enough). A `block` two post with `list_target` also lists the token. The four requests are in [sentinel](sentinel.md#the-four-requests).
 
 ## One exit
 
@@ -103,7 +103,8 @@ sequenceDiagram
     S->>G: preview_check
     S->>B: simulate approve + swap
     S->>G: post_verdict, quote = ETH out
-    A->>G: sell_quoted(id)<br/>within 120 s
+    Note over G,M: every sentinel quotes: the median of three stands
+    A->>G: sell_quoted(id)<br/>once exit_ready, within 120 s
     Note over G,M: holding debited, floor = quote - 3 %
     G->>M: sign approve, then swap
     M-->>G: on_exit_signed
@@ -119,7 +120,7 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 | Key                           | Held by                      | Can                                                                                                         | Cannot                                                                                        |
 | ----------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | Agent function-call key       | the agent's process          | the five agent methods, gas up to a 0.5 NEAR allowance                                                      | move NEAR, call the MPC, pick route, recipient or floor, buy without a fresh `allow`          |
-| Sentinel function-call keys   | each sentinel's machine (two sentinels in the demo, on one machine) | vote on checks, post exit quotes; one key alone blocks a buy, never allows one | sign on Base, buy, move funds                                                                 |
+| Sentinel function-call keys   | each sentinel's machine (three sentinels in the demo, on one machine) | vote on checks, post exit quotes; one key alone blocks a buy, never allows one, and sets no exit's floor while the others quote | sign on Base, buy, move funds                                                                 |
 | Armer function-call key       | the armer's process          | arm within the owner's bounds, disarm                                                                       | exceed the bounds; it can fill the 7-day cap (the owner resets)                               |
 | Owner full-access key         | the human, near-cli keychain | every rule: bounds, roles, stop, approvals, unlist, sell, withdraw ETH to the address fixed at init, settle | change the code                                                                               |
 | Guard account full-access key | the deployer's keychain      | deploy other code, move the guard's NEAR                                                                    | nothing is out of reach: production removes it ([upgrade policy](contract.md#upgrade-policy)) |
@@ -129,12 +130,12 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 **Who is the sentinel, and why trust it?**
 
 - It is an off-chain program; the owner names the sentinels and their quorum with `set_sentinels`. The
-  demo guard has two, both needed for an `allow`: one key, or the one node it reads, cannot allow alone.
-- In the demo the owner runs both on one machine, no TEE: two keys, not two parties. A real deployment
+  demo guard has three, two needed for an `allow`: one key, or the nodes it reads, cannot allow alone.
+- In the demo the owner runs all three on one machine, no TEE: three keys, not three parties. A real deployment
   gives each sentinel its own machine, RPC provider and operator.
 - You need not trust it to check it: [replay](replay.md) re-derives every verdict from its proof file
   and public chain data.
-- Before anyone checks, an `allow` every sentinel lies on can buy a trap within 120 s, up to the owner's
+- Before anyone checks, an `allow` two sentinels lie on can buy a trap within 120 s, up to the owner's
   per-token cap ([threat model](threat-model.md#a-lying-sentinel)).
 - The owner replaces one with `set_sentinels`. Running them in enclaves is the planned next step, not shipped.
 

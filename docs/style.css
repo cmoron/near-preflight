@@ -162,7 +162,8 @@ footer p{margin:.25rem 0;max-width:none}
    its own pixel size (96 px logo, 6 px pixels), and under it the live readout. */
 .landing .hero{padding-top:clamp(2rem,5vw,4rem)}
 .landing .lede{font-size:clamp(1.0625rem,1rem + .3vw,1.25rem);line-height:1.55;max-width:38rem;margin:0 0 .9rem}
-.landing .hero h1+.lede{margin-top:clamp(1.5rem,3vw,2.25rem)}
+.landing .hero .sub{font-size:clamp(1.125rem,.8rem + 1.5vw,2.1rem);line-height:1.2;font-stretch:112.5%;letter-spacing:-.01em;color:var(--dim);max-width:none;margin:clamp(.6rem,1.2vw,1rem) 0 0;text-wrap:balance}
+.landing .hero .sub+.lede{margin-top:clamp(1.5rem,3vw,2.25rem)}
 .landing .vw{font:700 .84em var(--mono)}
 .allow.vw{color:var(--allow)} .warn.vw{color:var(--warn)} .block.vw{color:var(--block)}
 .landing .cta{display:flex;flex-wrap:wrap;gap:.75rem;margin:0 0 1.75rem}

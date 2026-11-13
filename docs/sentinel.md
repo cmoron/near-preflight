@@ -4,9 +4,9 @@ A sentinel judges a token before the guard lets an agent buy it. It runs off-cha
 ([`app/sentinel.ts`](../app/sentinel.ts)), reads the guard's new checks, simulates on a Base node
 ([`app/verifier.ts`](../app/verifier.ts)), and posts its vote with its one NEAR key, limited to `post_verdict`.
 
-The guard takes votes from the sentinels its owner names: the demo runs two, each with its own account
-and key, and an `allow` needs both ([quorum](contract.md#sentinel-quorum)). Everything below is what
-each one does; they agree because nothing in a check is theirs to choose.
+The guard takes votes from the sentinels its owner names: the demo runs three, each with its own account
+and key, and an `allow` needs two matching votes ([quorum](contract.md#sentinel-quorum)). Everything
+below is what each one does; they agree because nothing in a check is theirs to choose.
 
 Nothing is signed or sent on Base: every call is a read-only simulation (`eth_simulateV1`) or a log query.
 Every fact a verdict rests on goes into the **evidence**, whose sha256 the guard stores with the verdict.
@@ -594,10 +594,11 @@ Replay reports a `MISMATCH … is not bound to block …`, and rebuilds the whol
   (`the logs node … answers another hash for block …`), and replay reports a `MISMATCH`.
 - **Each sentinel its own.** `check-mainnet.sh` gives the first `mainnet.base.org` (simulation) and
   `base.public.blockpi.network` (logs), the second `base-rpc.publicnode.com` for both (`EVM_RPC_2`,
-  `INDEX_RPC_2`): two providers for each need, none read by both sentinels. Measured read only on
-  2026-11-12: `base.drpc.org` and blockpi serve every call a check sends but answered the trace's anvil
-  with HTTP 429; drpc and 1rpc refuse 5,000-block log ranges, 1rpc block receipts. On the local fork both
-  read the fork, the only node holding the demo tokens.
+  `INDEX_RPC_2`), the third `base.rpc.blxrbdn.com` for both (`EVM_RPC_3`, `INDEX_RPC_3`): four
+  providers, none read by two sentinels. Measured read only on 2026-11-12: `base.drpc.org`, blockpi and
+  thirdweb serve a check's calls but answered the trace's anvil with HTTP 429; drpc, 1rpc, tenderly and
+  thirdweb refuse 5,000-block log ranges, 1rpc block receipts. On the local fork all read the fork, the
+  only node holding the demo tokens.
 - `INDEX_FROM=none` runs without an index: every buy verdict is then at least `warn`.
 
 ### Measured on real Base
@@ -672,8 +673,8 @@ Do safe tokens get `allow`? Measured on 2026-11-12, read only, with the index on
 - **AIXBT** reads another contract during a transfer: a `block`, as before.
 - In no check did others trade the pool during the wait.
 
-`./check-mainnet.sh` then ran USDC through the guard: check #28, `allow` from both sentinels, each on its
-own nodes, replayed (`app/fixtures/usdc-base-mainnet.json`).
+`./check-mainnet.sh` then ran USDC through the guard: check #19, `allow` on two of the three sentinels'
+votes, each on its own nodes, replayed (`app/fixtures/usdc-base-mainnet.json`).
 
 ## Exit quotes
 
@@ -681,8 +682,20 @@ When an agent asks to sell (`request_exit`), the sentinel simulates the approve 
 sign, from the guard's address, alone: on the first block of the latest second, the approve 2 blocks
 ahead, the swap in the next, at the cadence measured there (in the evidence, as for a check).
 
-The quote is the ETH that reached the guard's address; the guard sets the agent's floor from it (quote
-minus 3 %). It simulates twice: with no floor to get the quote, then exactly as signed on that quote.
+The quote is the ETH that reached the guard's address. It simulates twice: with no floor to get the
+quote, then exactly as signed on that quote.
+
+**Every sentinel quotes.** They quote at different Base blocks, so their quotes differ and none is asked
+to match. The guard sets the agent's floor from the median of three quotes, the highest of fewer (that
+quote minus 3 %); a `block` is no quote and cancels none. It sells at once when every sentinel quoted,
+15 s after the request on the quorum's quotes, 60 s after it on one vote
+([quorum](contract.md#sentinel-quorum)); the agent's wrapper waits for the guard's `exit_ready`.
+
+A sentinel asks the guard whether its vote can still count (`vote_due`) before it simulates, on a buy
+check as on an exit. If another signature moves the guard's nonce under the quotes, the guard takes no
+more votes on that exit quote and the wrapper asks a new one, three at most.
+
+How long a quote takes is in the [latency budget](latency.md).
 
 ## What a check cannot show
 
@@ -721,8 +734,8 @@ A simulation cannot prove that a token will be sellable later. Still open:
   holds the LP, never who holds the token.
 - The node: each sentinel believes the Base nodes it reads (`EVM_RPC`, `INDEX_RPC`). The guard takes
   two sentinels' identical votes for an `allow` ([quorum](contract.md#sentinel-quorum)), so one lying
-  node no longer allows alone when the two read different nodes: on Base `check-mainnet.sh` gives them
-  three providers, none read by both; on the local fork both read the fork.
+  node no longer allows alone when no two read the same: on Base `check-mainnet.sh` gives the three
+  four providers, none read by two; on the local fork all read the fork.
 
 When the guard's address cannot pay for its transactions at the check, its balance is set to exactly
 what they spend.

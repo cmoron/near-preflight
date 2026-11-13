@@ -39,10 +39,12 @@ quote's evidence has `kind: "exit"` and fewer fields.
 
 Where it lives: each sentinel's evidence string is on NEAR, in its `verdict_posted` event, and its
 sha256 in the check's `votes`. Each sentinel writes its own proof file: `proofs/<id>.json` for the first
-one the guard names, `proofs/<id>.s2.json` for the second. The requests and responses are not: the sentinel publishes the proof file. Two ship in
-[`app/fixtures/`](../app/fixtures/) (`usdc-base-mainnet.json` is check #28 of the demo guard, an `allow`: its far sales
-301 s, 831 s and 900 s after the buy and its exit-size sale, which replay mines again on a local fork;
-both sentinels posted that same evidence string, each from its own nodes).
+one the guard names, `proofs/<id>.s2.json` and `.s3.json` for the next. An `allow` takes two votes: the
+third sentinel's same vote is not taken, and its file is no proof. The requests and responses are not on
+NEAR: the sentinel publishes the proof file. Two ship in
+[`app/fixtures/`](../app/fixtures/) (`usdc-base-mainnet.json` is check #19 of the demo guard, an `allow`: its far sales
+301 s, 560 s and 900 s after the buy and its exit-size sale, which replay mines again on a local fork;
+the two sentinels whose votes made the verdict posted that same evidence string, each from its own nodes).
 
 ## What `replay` recomputes
 
@@ -97,7 +99,7 @@ With `--check`, against the guard on NEAR (`GUARD` names it):
 - `slippage_bps` is the guard's (`evm_config`): the exit-size sale sold what an agent's exit sells;
 - the blocklist entries and the code at the last check, as the evidence cites them, are on the guard.
 
-Example, from a fresh clone ([reproduce](reproduce.md#without-an-account)): check #28 replays with 43 `OK`
+Example, from a fresh clone ([reproduce](reproduce.md#without-an-account)): check #19 replays with 43 `OK`
 lines and `REPLAY OK: verdict allow confirmed, same as on chain`.
 
 ## What replay cannot do
@@ -114,8 +116,11 @@ lines and `REPLAY OK: verdict allow confirmed, same as on chain`.
   block answers with an error: replay prints `ERROR resending the requests at block … (the node must
   still serve their state …)` and `REPLAY FAILED`, never an `OK` (`bun test -t "does not serve the later"`).
 
-An exit quote replays the same way: same request, same quote; with `--check`, the seller is the guard's
-derived address and the on-chain quote matches.
+An exit quote replays the same way: same request, same quote. Every sentinel quotes, so a file is one
+vote among three. With `--check`, the seller is the guard's derived address, the file's evidence and
+quote are one vote's, and the guard's quote is what the votes' quotes give: the median of three, the
+highest of fewer. A file whose vote was a `block`, or whose quote does not stand, is confirmed as a vote,
+not a mismatch; the stored reasons and transaction hashes are compared for the vote that stands.
 
 ## The attested agent
 
@@ -129,10 +134,10 @@ signature over `model:sha256(request):sha256(response)`, and the TDX and GPU att
 nonce. How long NEAR AI keeps a signature is unknown, hence the archive.
 
 Packages stay in `proofs/llm/`, outside the repository. One ships,
-[`app/fixtures/decision.json`](../app/fixtures/decision.json), anchored on check #1 of the demo guard.
+[`app/fixtures/decision.json`](../app/fixtures/decision.json), anchored on check #10 of the demo guard.
 
-Its signed request names `guard.goblin-guard-69369.testnet`, `agent.goblin-guard-69369.testnet` and a
-NEAR block 7 s before the check; its `request_check` tool call states the 10000000000000 wei the check stores.
+Its signed request names `guard.goblin-guard-17826.testnet`, `agent.goblin-guard-17826.testnet` and a
+NEAR block 9 s before the check; its `request_check` tool call states the 10000000000000 wei the check stores.
 
 The agent may attach a package's sha256 to `request_check` or `buy`. The guard stores it and refuses it a
 second time; it neither requires nor verifies it. The guard does not rely on the model: the scripted

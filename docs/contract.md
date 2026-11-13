@@ -29,7 +29,7 @@ would change the deployed contract and every recorded proof.
 | Owner    | full-access key of the account named at init (a human)                                   | bounds, token limits, roles and sentinels, emergency stop, approve a `warn`, unlist, sell, withdraw, settle |
 | Armer    | function-call key: `arm`, `disarm`                                                       | arm a registered agent within the owner's bounds                                |
 | Agent    | function-call key: `request_check`, `buy`, `refund_check`, `request_exit`, `sell_quoted` | ask checks, buy on `allow`, sell its holding                                    |
-| Sentinel | function-call key: `post_verdict`, one account and key per sentinel (two in the demo)    | vote on checks and post exit quotes, with their hashes                          |
+| Sentinel | function-call key: `post_verdict`, one account and key per sentinel (three in the demo)  | vote on checks and post exit quotes, with their hashes                          |
 | Relay    | none                                                                                     | read a signed transaction, check it, broadcast it (here only to anvil)          |
 
 The owner's CLI is [`app/human.ts`](../app/human.ts):
@@ -119,6 +119,7 @@ NEP-297 logs (`EVENT_JSON:`), standard `goblin_guard`. The
 | An `allow` or a `warn` takes the quorum's votes, identical on verdict, quote, transaction hashes, code and listing; the quorum is the one in force when the vote, the buy or the approval comes | `post_verdict`, `buy`, `approve_warn` |
 | One `block` vote blocks at once, and overturns an `allow` or a `warn` that can still buy (180 s from the request, not yet sent to signing); votes that disagree block too; the 120 s run from the vote that completes the quorum | `post_verdict` |
 | An exit quote takes every sentinel's vote: the median of three quotes stands, the highest of fewer; a `block` never cancels another sentinel's quote; it sells once every sentinel quoted, 15 s after the request with the quorum's quotes, or 60 s after it with one vote | `post_verdict`, `sell_quoted` |
+| An exit quote whose transactions the guard no longer signs (its nonce, gas or fees moved) takes no more votes and never sells: the agent asks another | `post_verdict`, `sell_quoted` |
 | A block lists its token only with the token's code and the quorum's identical `block` votes, each asking to list           | `post_verdict`                        |
 | Blocklist: tokens only, never a template; entries never overwritten; only the owner unlists; a sentinel is no reporter     | `report`, `unlist`                    |
 | An `allow` on code that differs from the reference is refused                                                              | `post_verdict`                        |
@@ -183,8 +184,10 @@ vote can be asked for. Every sentinel may vote until the exit is sent to signing
   high makes the sale revert on Base, the tokens still held; a floor too low lets the pool's next
   trader take the difference;
 - a `block` never cancels another sentinel's quote, and is no quote;
-- a quote is of the transactions simulated: once another signature moved the guard's nonce, or the
-  owner its gas, the quotes posted before count no more, for the floor nor for the quorum;
+- a quote is of the transactions simulated. Once another signature moved the guard's nonce, or the
+  owner its gas, under a quote already posted, the sentinels that quoted cannot quote again: the exit
+  quote takes no more votes and never sells (`sell_quoted` refuses it, `exit_ready` is true), and the
+  agent asks another, which every sentinel quotes afresh. A later quote never stands on older votes;
 - a quote a sentinel removed since voted on no longer sells: the agent asks another.
 
 **When it sells** (`sell_quoted`, view `exit_ready`), counting quotes only:
@@ -192,12 +195,13 @@ vote can be asked for. Every sentinel may vote until the exit is sent to signing
 - at once, when **every** sentinel's quote is in: one key never sets the floor while the others
   answer;
 - 15 s after the request, with the **quorum's** quotes: a sentinel that is down, or whose simulation
-  fails, costs an exit a short wait. An exit quote took 5 to 10 s on real Base, plus the sentinel's
-  1.5 s poll and the vote's inclusion on NEAR: an honest quote is in by then;
+  fails, costs an exit a short wait. An exit quote simulates in 0.5 to 2 s on real Base, plus the
+  sentinel's 2.5 s poll and about 2 s for the vote's inclusion on NEAR: an honest quote is in within
+  8 s ([measured](latency.md));
 - 60 s after the request, with **one** vote: no sentinel down ever refuses an exit.
 
 With two sentinels, both needed, that is both quotes or the 60 s. The quote's 120 s run from the
-oldest quote that counts.
+first quote.
 
 **What one stolen key can still do**, until the owner replaces it:
 
@@ -221,8 +225,8 @@ another account.
 **For a sentinel process.** `vote_due(id, sentinel)` says in one call whether its vote on a check
 can still count. False once it voted, once the check is 300 s old, signed, reserved or being signed;
 for a block that holds the quorum's votes; for an `allow` or a `warn` once 180 s have passed since
-its request; always false for an account that is not a sentinel. True for an exit quote until then:
-every quote counts toward the floor. A restarted sentinel skips every old check on it, and the guard
+its request; always false for an account that is not a sentinel. True for an exit quote until then
+(every quote counts toward the floor), unless the guard's nonce or gas moved under a quote posted. A restarted sentinel skips every old check on it, and the guard
 refuses the same votes with `verdict already posted`.
 
 **What it costs.** A vote that arrives after another signature moved the guard's nonce carries other
@@ -416,7 +420,8 @@ The owner role is separate: an account named at init, whose key changes bounds a
   reverts once its 300 s deadline has passed). If Base's base fee stays above its fee cap it cannot be
   mined, nothing can be signed at its nonce, and every later transaction waits until the fee falls.
 - **Verdicts tied to a nonce.** A signature for another check, or a gas or fee change, between the
-  verdict and the buy refuses that buy; the agent pays a new check. Busy agents race for one nonce sequence.
+  verdict and the buy refuses that buy; the agent pays a new check. An exit quote the same: it takes no
+  more votes, and the agent's wrapper asks a new one, three at most. Busy agents race for one nonce sequence.
 - **Holdings.** Credited at the signed minimum, not the amount received. A credit whose buy reverted on
   Base stays until the owner clears it; two agents cannot hold the same token at once.
 - **Blocklist.** A registered reporter can list honest tokens until the owner unlists them, paying

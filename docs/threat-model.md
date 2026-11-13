@@ -134,17 +134,21 @@ A sentinel is one NEAR key and its Base nodes (simulation, logs), with no TEE (t
 only vote on checks. The guard takes votes from the sentinels its owner names: an `allow` or a `warn`
 needs the quorum's identical votes, and any one sentinel blocks ([quorum](contract.md#sentinel-quorum)).
 
-The demo guard has two sentinels, both needed. What one stolen key, or one lying node, gets:
+The demo guard has three sentinels, two needed. What one stolen key, or one lying node, gets:
 
 | One sentinel alone                                      | Answer                                                                                  | Reproduce                                  |
 | ------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------ |
-| Posts `allow` on a trap                                 | no verdict: the other sentinel's `block` vetoes it, and nothing is bought on one vote   | `cargo test one_allow_vote`, `cargo test vetoes` |
-| Posts `allow` with another quote, transaction or code   | 🔴 the votes disagree: `sentinels disagree on …`, not listed                            | `cargo test disagree`                      |
-| Posts `block` on an honest token                        | 🔴 that check is blocked and the token quarantined 30 min; **not stopped**, the owner lifts it and replaces the key | `cargo test single_block_vote` |
+| Posts `allow` on a trap                                 | no verdict on one vote; another sentinel's `block` decides, and overturns an `allow` until its buy is sent to signing | `cargo test one_allow_vote`, `cargo test vetoes` |
+| Posts `allow` with another quote, transaction or code   | 🔴 the votes disagree: `sentinels disagree on …`, not listed, nothing quarantined       | `cargo test disagree`                      |
+| Posts `block` on an honest token                        | 🔴 that check is blocked and the token quarantined 30 min, before or after the others' `allow` (within 180 s of the request); **not stopped**, the owner lifts it and replaces the key | `cargo test single_block_vote` |
 | Asks to list an honest token                            | not listed: listing takes the quorum's identical `block` votes                          | `cargo test listing_takes_the_quorum`      |
-| Posts a low exit quote                                  | **not stopped**: an exit quote takes one vote, so that a sentinel down never blocks a sale; the agent's floor is lower | `cargo test exit_quote_takes_one_vote` |
+| Posts a low exit quote, or a `block` on one             | the median of the three quotes stands; a block is no quote, and costs a 15 s wait for the two others' quotes. A low quote stands only after 60 s with no other sentinel quoting (down, or its simulation failing) | `cargo test median_of_three`, `cargo test does_not_refuse_an_exit`, `cargo test does_not_make_an_exit_ready` |
+| Posts an exit quote above what the pool pays            | the three answering: the sale waits for the three quotes and the median stands. **Not stopped** when another sentinel does not quote within 15 s: the higher of two stands, the sale reverts on Base, the agent's charge is spent and its holding stays debited until the owner restores it; no token lost | `cargo test before_the_third`, `cargo test costs_one_exit` |
+| Posts an exit quote while both others are down          | **not stopped**: after 60 s one vote is enough, so that sentinels down never block a sale; that key then sets the floor | `cargo test enough_60_s` |
+| Voted, then is removed by the owner                     | its votes count no more, at once: no quorum, no buy, no approval, no sale on them      | `cargo test removed_sentinel`              |
+| Posts `block` on an old check, to quarantine again a token the owner lifted | refused: a check takes votes for 300 s from its request, an `allow` a block for 180 s | `cargo test older_than_300_s`, `cargo test too_old_to_buy` |
 
-Both sentinels lying together get what one got before the quorum. What replay then shows, afterwards:
+Two sentinels lying together are the quorum: they get what one got before it. What replay then shows, afterwards:
 
 | Lie                                                     | Answer                                                                                  | Reproduce                                                  |
 | ------------------------------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
@@ -154,15 +158,26 @@ Both sentinels lying together get what one got before the quorum. What replay th
 | Leaves out a trade of the pool it should re-execute     | `replay` reports a `MISMATCH`: it fetches the trades again from the node                 | `bun test -t "leaves out a trade"`                         |
 | States another cadence                                  | `replay` reports a `MISMATCH`: it measures the cadence again at the block               | `bun test -t "cadence other than"`                         |
 | Forges a simulation result or a fact                    | `replay` resends the requests and recomputes every fact                                 | `bun test app/replay.test.ts`                              |
-| Post `allow` on a trap, both of them                    | **not stopped**: bought if the agent buys within 120 s, at most the owner's per-token cap per period; replay shows the lie afterwards, from each proof file | see below                                                  |
+| Post `allow` on a trap, two of them                     | **not stopped**: bought if the agent buys within 120 s, at most the owner's per-token cap per period; replay shows the lie afterwards, from each proof file | see below                                                  |
 
-The owner replaces a compromised key with `set_sentinels`; votes it already posted stay.
+The owner replaces a compromised key with `set_sentinels`: from that call its votes count no more, on
+the checks it already voted on too ([votes that count](contract.md#sentinel-quorum)).
 
-**In the demo both sentinels run on one machine**, under one operator: two keys, not two parties. On
-Base, `./check-mainnet.sh` gives each its own nodes (`EVM_RPC`, `INDEX_RPC`; `EVM_RPC_2`, `INDEX_RPC_2`
-for the second), three providers, none read by both; on the local fork both read the fork, the only node holding the demo
-tokens. A real deployment also separates the machine and the operator of each sentinel; only then is one
-lying node or one stolen key alone.
+**The demo deployment, plainly.** Three keys are not three independent parties: here one operator
+runs the same program three times on one machine.
+
+| Demo guard                        | As deployed                                                                                         |
+| --------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Sentinels, quorum                 | three accounts and keys; two matching votes for an `allow` or a `warn`, one `block` vote blocks     |
+| Machines, operators               | one machine, one operator, one OS user that holds the three keys                                    |
+| Code                              | the same program for all three ([`app/sentinel.ts`](../app/sentinel.ts))                            |
+| Base nodes, `./demo.sh`           | all three read the one local fork, the only node holding the demo tokens                            |
+| Base nodes, `./check-mainnet.sh`  | 1: `mainnet.base.org`, logs from `base.public.blockpi.network`; 2: `base-rpc.publicnode.com`; 3: `base.rpc.blxrbdn.com`. Four providers, none read by two sentinels |
+| What the quorum tolerates         | one sentinel down; one key stolen alone; on real Base, one provider that lies or lags              |
+| What it does not                  | the machine, its OS user or the operator compromised (all three keys); a bug in the shared program; two providers lying alike; on the fork, the fork's node |
+
+A real deployment gives each sentinel its own machine, operator and providers (`EVM_RPC`, `INDEX_RPC`);
+only then is one lying node or one stolen key alone.
 
 ### Honest tokens
 
@@ -172,7 +187,7 @@ lying node or one stolen key alone.
 | USDC on the fork, its pool traded by others while the check waits | 🟢 `allow`: their trades re-executed after the buy, the resale verified      | `bun test -t "their trades re-executed"`   |
 | An honest 30-block cooldown (`cooldown_60`) | 🟠 `warn` naming NUMBER, which its code reads; 🔴 not listed when the first sale is drawn within 30 blocks (about 1 check in 6 on Base, every check on the fork) | `bun test -t "Cooldown60"`                 |
 | An honest one-block hold (`hold_one_block`) | 🟠 `warn` naming NUMBER and TIMESTAMP; its resale goes through, the owner approves           | `bun test -t "holding block"`              |
-| USDC on Base mainnet, read only             | 🟢 `allow` from both sentinels, each on its own nodes (check #28): reputation not applied, its pool predates the index window; nothing signed. When its pool trades during the wait, those trades are re-executed after the buy, or a `warn` says the resale was not verified | `./check-mainnet.sh`                       |
+| USDC on Base mainnet, read only             | 🟢 `allow` on two sentinels' votes, each on its own nodes (check #19): reputation not applied, its pool predates the index window; nothing signed. When its pool trades during the wait, those trades are re-executed after the buy, or a `warn` says the resale was not verified | `./check-mainnet.sh`                       |
 
 A refused sale lists the token only if the far sale at 900 s is refused too: a refusal that clears with
 time blocks that check alone, or any agent could repeat checks until one lists an honest token. The
@@ -182,18 +197,24 @@ listed.
 
 ## What it does not stop
 
-- **Every sentinel lying, or all on one machine.** An `allow` the quorum posts on a trap is bought if
+- **A quorum of sentinels lying, or all on one machine.** An `allow` two of the three post on a trap is bought if
   the agent buys within 120 s, up to the owner's per-token cap. Replay shows a forged simulation, a block
   or draw they chose, or an index window not bound to the check, only afterwards, and only from the proof
   files (a sentinel may withhold its own) and a node that still serves both blocks' state.
 - **Nodes that lie alike.** Each sentinel believes the nodes it reads. `./check-mainnet.sh` gives each
-  its own simulation and logs nodes, three providers, none read by both, each logs node tied to its
-  simulation node by block hash; on the local fork both read the fork. Nodes that lie alike give both the same wrong verdict.
+  its own simulation and logs nodes, four providers, none read by two sentinels, each logs node tied to
+  its simulation node by block hash; on the local fork all read the fork. Two sentinels whose nodes lie
+  alike post the same wrong verdict: the quorum.
 - **One sentinel blocking.** A stolen key blocks every buy and quarantines the tokens it votes on,
   until the owner replaces it; a sentinel whose node fails blocks the checks it cannot simulate, without
-  quarantine. An exit is never blocked.
-- **A lying exit quote.** One vote is enough for it, so a sentinel down never blocks a sale: one key
-  gives the agent a lower floor (minimum output); replay catches it afterwards.
+  quarantine (one that is down stops nothing: two votes decide). An exit another sentinel quotes is not
+  refused by one key.
+- **A lying exit quote.** With the three sentinels answering, the sale waits for the three quotes and
+  the median stands. With two quotes (the third not in within 15 s), the higher: one key can post one
+  above what the pool pays, and the agent's sale reverts on Base (charge spent, holding debited until
+  the owner restores it). With no other sentinel quoting, one vote is enough after 60 s, so that
+  sentinels down never block a sale: that key then sets the floor (minimum output), or leaves the exit
+  without a quote. Replay catches it afterwards.
 - **What a token does after 900 s.** `eth_simulateV1` reaches 256 blocks past a real block, 51 s at
   Base's five blocks a second; the far sales play the late sale again 301 s and 900 s after the buy, and
   at a delay drawn between, on a local fork. A sale closed or taxed from 5 to 15 min on, for anyone or for
@@ -215,8 +236,10 @@ listed.
   sale's time; an agent exits when it chooses.
 - **Asking again, later.** One check per token runs at a time, and a `block` that rests on the token's
   code quarantines it for every agent, 30 min by default: a re-draw after such a block costs that wait.
-  A `warn`, a disagreement between sentinels or a check that could not run quarantines nothing. An
-  agent may still ask again, with new draws ([token limits](contract.md#token-limits)).
+  A `warn`, a disagreement between sentinels or a check that could not run quarantines nothing: no
+  sentinel found a refusal, and the agent asks again at once, for one price
+  ([why no cool-down](contract.md#limits)). After a quarantine it may ask again too, with new draws
+  ([token limits](contract.md#token-limits)).
 - **State that does not move within the later side's window.** A token keyed on its own pool or storage
   passes when nobody touched them during those 16 to 24 s, and fails once someone does. Others' trades of
   the pool are re-executed after the buy, without the transactions before them in their block; when that
@@ -315,5 +338,11 @@ Each now has a test.
 | One sentinel key, or the one node it read, was enough for an `allow` on a trap                    | a quorum of sentinels: identical votes for an `allow` or a `warn`, any one blocks, listing takes the quorum |
 | The sentinel alone could `report` any token to the blocklist                                      | a sentinel is no reporter: its votes list with the quorum                                                 |
 | No sale was the size an agent's exit sells (its holding, 97 % of the balance): a token refusing 88 % to 99.99 % passed every check | every check also sells exactly that share, the guard's slippage bound read from the guard; replay recomputes it |
-| Both sentinels read one Base node, and the logs (index, LP holders) a node nothing tied to the simulation's | each its own nodes on Base, three providers, none read by both; each logs node must give the check's block and the index window's start the simulation node's hashes |
-| A restarted sentinel voted on old checks, fork checks too from a mainnet run                       | a sentinel votes only on checks requested since it started; a vote refused for the set or the quorum makes it read them again |
+| Both sentinels read one Base node, and the logs (index, LP holders) a node nothing tied to the simulation's | each its own nodes on Base, four providers for three sentinels, none read by two; each logs node must give the check's block and the index window's start the simulation node's hashes |
+| A restarted sentinel voted on old checks, fork checks too from a mainnet run                       | a sentinel votes only on checks requested since it started, and only while the guard says its vote is due (`vote_due`) |
+| A removed sentinel's vote still completed a quorum; a `block` after the quorum's `allow` was refused, and the buy went through | votes are weighed when used, the current sentinels' only; a `block` overturns an `allow` until its buy is sent to signing, and every `block` on the code quarantines |
+| A `block` on an hour-old check quarantined again a token the owner had lifted                      | a check takes votes for 300 s from its request, an `allow` a `block` for 180 s                            |
+| One key refused an agent's exit with a `block`, or set its floor with a low quote                  | every sentinel quotes: the median of three stands, the highest of fewer; a `block` is no quote            |
+| With two quotes of three in, a liar's high quote sold at once, before the median applied           | an exit sells once every sentinel quoted, 15 s after its request on the quorum's quotes, 60 s on one vote |
+| An `allow` still bought after a later check's approved `warn` had moved the token's reference code | `buy` refuses a check whose code is no longer the reference                                               |
+| After the guard's nonce moved, one fresh exit quote sold on the older votes and the time elapsed   | such an exit quote takes no more votes and never sells; the agent asks another, quoted afresh by all     |

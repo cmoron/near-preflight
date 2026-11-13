@@ -21,7 +21,7 @@ One line per term, in alphabetical order. Links go to the page that explains it.
 | **escrow**             | NEAR the guard holds for nobody yet: checks awaiting a verdict, signatures in progress                                     |
 | **evidence**           | the facts a verdict rests on, posted with it; the guard stores its sha256                                                  |
 | **exit-size sale**     | a sale of what an agent's exit sells, the quote minus the slippage bound (97 %), at every check ([sentinel](sentinel.md#the-agents-exit-size)) |
-| **exit quote**         | the sentinel's simulation of an agent's sale; it sets the sale's floor                                                     |
+| **exit quote**         | each sentinel's simulation of an agent's sale; the median of three quotes (the highest of fewer) sets the sale's floor ([contract](contract.md#sentinel-quorum)) |
 | **far sale**           | the late sale again, 301 s and 900 s after the buy and at a delay drawn between, on a local fork whose clock moves ([sentinel](sentinel.md#the-far-sale)) |
 | **farm**               | someone who launches copies of one code, funds each pool, then pulls the liquidity                                         |
 | **first sale**         | the check's first simulated sale: 2 to 25 s after the buy, 13 % to 87 % of the tokens                                      |
@@ -47,7 +47,7 @@ One line per term, in alphabetical order. Links go to the page that explains it.
 | **reference block**    | the first Base block at least 4 s after a check's request on NEAR: the check simulates on it                               |
 | **relay**              | a program with no key that broadcasts a transaction NEAR signed; here only to anvil                                        |
 | **replay**             | `app/replay.ts`: re-derives a verdict from its proof file and a Base node                                                  |
-| **sentinel**           | an off-chain program that simulates each check and posts its vote, with a key limited to that; the demo guard has two      |
+| **sentinel**           | an off-chain program that simulates each check and posts its vote, with a key limited to that; the demo guard has three, two needed |
 | **takeback**           | a `transferFrom` of a buyer's tokens without approval, by `owner()` or a stranger                                          |
 | **TEE**                | trusted execution environment: hardware that attests which code runs (Intel TDX here)                                      |
 | **template**           | a token's code with metadata and `PUSH32` operands masked: copies share it                                                 |

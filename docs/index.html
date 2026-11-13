@@ -15,7 +15,7 @@
       media="(prefers-color-scheme: light)"
     />
     <title>
-      near-preflight: an AI agent cannot buy a token it could never sell
+      near-preflight: test the resale before the buy
     </title>
     <meta
       name="description"
@@ -30,7 +30,7 @@
     />
     <meta
       property="og:title"
-      content="near-preflight: an AI agent cannot buy a token it could never sell"
+      content="near-preflight: test the resale before the buy"
     />
     <meta
       property="og:description"
@@ -44,12 +44,12 @@
     <meta property="og:image:height" content="640" />
     <meta
       property="og:image:alt"
-      content="near-preflight: the rocket and its go/no-go board. An AI agent cannot buy a token it could never sell."
+      content="near-preflight: the rocket and its go/no-go board. Test the resale before the buy. NEAR signs only what was checked."
     />
     <meta name="twitter:card" content="summary_large_image" />
     <meta
       name="twitter:title"
-      content="near-preflight: an AI agent cannot buy a token it could never sell"
+      content="near-preflight: test the resale before the buy"
     />
     <meta
       name="twitter:description"
@@ -83,11 +83,12 @@
 
     <main>
       <section class="hero" aria-labelledby="h-hero">
-        <h1 id="h-hero">An AI agent cannot buy a token it could never sell.</h1>
+        <h1 id="h-hero">Test the resale before the buy.</h1>
+        <p class="sub">NEAR signs only what was checked.</p>
         <p class="lede">
           The agent buys on the Base blockchain only through the guard, a NEAR
           contract. Before
-          NEAR signs, two sentinels simulate the buy and the resale, check
+          NEAR signs, three sentinels simulate the buy and the resale, check
           whether the token's code has drained pools before, and vote a
           verdict anyone can replay: <span class="vw allow">allow</span>,
           <span class="vw warn">warn</span> (the owner decides) or
@@ -260,8 +261,8 @@
                 >
                 <span
                   >One stolen sentinel key, or a Base node only one sentinel
-                  reads, says allow on a trap: the second sentinel's vote is
-                  missing, or blocks</span
+                  reads, says allow on a trap: the second matching vote is
+                  missing, or another sentinel blocks</span
                 >
               </a>
             </li>
@@ -291,10 +292,11 @@
           <h2>What it does not stop</h2>
           <ul>
             <li>
-              <b>Both sentinels lying.</b> One alone can only block. In this
-              demo both run on one machine, each on its own nodes on Base (on the
-              fork, the fork): two keys, not two parties. Replay shows a lie
-              afterwards.
+              <b>Two of the three sentinels lying.</b> One alone never allows:
+              it can block a buy, or spoil an exit while another is down. In
+              this demo all run on one machine, each on its own nodes on Base
+              (on the fork, the fork): three keys, not three parties. Replay
+              shows a lie afterwards.
             </li>
             <li>
               <b>What a token does later.</b> A pause, tax or blacklist after
@@ -373,7 +375,7 @@
             <text class="sub" x="32" y="344">no key for Base</text>
             <rect class="box" x="176" y="282" width="130" height="88" />
             <text class="name" x="192" y="320">sentinels</text>
-            <text class="sub" x="192" y="344">off-chain, two</text>
+            <text class="sub" x="192" y="344">off-chain, three</text>
             <rect class="box" x="366" y="282" width="178" height="88" />
             <text class="name" x="382" y="320">Base blockchain</text>
             <text class="sub" x="382" y="344">a local fork here</text>
@@ -418,8 +420,8 @@
             <li>
               Each posts its vote to the guard, with the sha256 of its evidence
               and the hash of the one transaction NEAR may sign. An
-              <code>allow</code> takes both votes; one <code>block</code> is
-              enough.
+              <code>allow</code> takes two matching votes of three; one
+              <code>block</code> is enough.
             </li>
             <li>
               On a fresh <code>allow</code>, within 120 s, the agent buys. It
@@ -436,7 +438,7 @@
           </ol>
         </div>
         <p class="note">
-          The guard's owner appoints the sentinels, two on the demo guard; a
+          The guard's owner appoints the sentinels, three on the demo guard; a
           sentinel's key can only vote on checks.
           <a
             href="https://github.com/cmoron/near-preflight/blob/main/docs/threat-model.md#a-lying-sentinel"
@@ -465,14 +467,14 @@
           <pre
             id="cmds"
           ><code>git clone https://github.com/cmoron/near-preflight &amp;&amp; cd near-preflight &amp;&amp; bun install
-export GUARD=<span id="cmd-guard">guard.goblin-guard-69369.testnet</span>   <span class="c"># the demo guard on NEAR testnet, read only</span>
+export GUARD=<span id="cmd-guard">guard.goblin-guard-17826.testnet</span>   <span class="c"># the demo guard on NEAR testnet, read only</span>
 
-<span class="c"># Check #28 (USDC on Base mainnet): resent, traced on a local fork, its template index rebuilt, re-judged, compared with NEAR</span>
+<span class="c"># Check #19 (USDC on Base mainnet): resent, traced on a local fork, its template index rebuilt, re-judged, compared with NEAR</span>
 INDEX_RPC=https://base-rpc.publicnode.com bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
 <span class="c">#   REPLAY OK: verdict allow confirmed, same as on chain</span>
 
-<span class="c"># The model's decision behind check #1: signature, Intel and NVIDIA attestation, the guard's record</span>
-bun app/attest.ts app/fixtures/decision.json --check 1
+<span class="c"># The model's decision behind check #10: signature, Intel and NVIDIA attestation, the guard's record</span>
+bun app/attest.ts app/fixtures/decision.json --check 10
 <span class="c">#   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)</span></code></pre>
           <p class="copy">
             <button type="button" class="btn small" id="copy">
