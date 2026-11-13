@@ -10,7 +10,7 @@
 
 **Test the resale before the buy. NEAR signs only what was checked.**
 
-**[Watch the demo](https://cmoron.github.io/near-preflight/assets/demo.mp4)** (86 s, no sound) · **[Give this to your agent](#give-this-to-your-agent)** · **[Verify it yourself](#verify-it-yourself)**
+**[Watch the demo](https://cmoron.github.io/near-preflight/assets/demo.mp4)** (86 s, no sound) · **[Give this to your agent](#give-this-to-your-agent)** · **[Verify in one minute](#in-one-minute-nothing-to-install)** · **[Verify it yourself](#verify-it-yourself)**
 
 A spending cap stops an AI agent from spending too much. It does not stop a prompt-injected agent from spending a little on a scam token.
 
@@ -63,6 +63,58 @@ The guard's owner appoints the sentinels, which are off-chain programs. Anyone c
 
 ## Verify it yourself
 
+### In one minute, nothing to install
+
+`./verify.sh` reads both deployed guards from public NEAR nodes with `curl` and `jq`: no account, no key, no `bun`. It took 5 s here. CI runs it on every push to `main` and once a day ([workflow](.github/workflows/ci.yml)).
+
+```text
+$ ./verify.sh
+NEAR testnet, the demo guard (https://test.rpc.fastnear.com)
+PASS  guard.goblin-guard-17826.testnet: code sha256 3c5b992fea5d6e13cbf6c75760d138fa434a1efd67d5a1ff385f9bacb566372f, the reproducible build's
+PASS  guard.goblin-guard-17826.testnet: source metadata (NEP-330) names commit 22e5c32ad5387189eee7575ce00c6938ff253dc2
+PASS  sentinels: sentinel, sentinel2, sentinel3, quorum 2
+PASS  signer: v1.signer-prod.testnet (NEAR Chain Signatures on testnet), for the Base address 0x32fA09D7725D86CaF6A69e0Aa7819bad1b8127C9
+PASS  checks stored: 27, verdicts allow 12, warn 2, block 13, none yet 0
+PASS  buys NEAR signed: 10, each on 2 matching sentinel votes: allow 9, warn approved by the owner 1
+PASS  no buy signed on a block (9 checks) or on a warn not approved (1)
+PASS  agent.goblin-guard-17826.testnet: 1 function-call key, limited to the guard and to buy, refund_check, request_check, request_exit, sell_quoted
+INFO  agent.goblin-guard-17826.testnet also has 1 full-access key: setup keeps it in the owner's keychain, the agent process gets the function-call key. Not provable on chain.
+INFO  guard.goblin-guard-17826.testnet holds 1 full-access key: its holder can redeploy it (README, How NEAR is used).
+
+NEAR mainnet, the inert guard (https://free.rpc.fastnear.com)
+PASS  guard.near-preflight.near: code sha256 3c5b992fea5d6e13cbf6c75760d138fa434a1efd67d5a1ff385f9bacb566372f, the reproducible build's
+PASS  guard.near-preflight.near: source metadata (NEP-330) names commit 22e5c32ad5387189eee7575ce00c6938ff253dc2
+PASS  only sentinel: near-preflight.near, the guard's parent account, quorum 1
+PASS  bounds and per-token cap zero (max_buy_wei 0, cap_wei 0): every check is refused
+PASS  agents registered: 0
+PASS  checks requested: 0; exits or withdrawals signed: none
+PASS  signer: v1.signer (NEAR Chain Signatures on mainnet)
+PASS  its Base address 0xB407022A1e227D66B994149d25c675d4cdbc9538 holds 0x0 wei on Base mainnet (https://mainnet.base.org)
+PASS  guard.near-preflight.near: 0 function-call key: no agent, armer or sentinel key can act on it
+INFO  guard.near-preflight.near holds 1 full-access key, the owner's: inert until the owner changes it, not immutable (docs/mainnet.md).
+
+ALL CHECKS PASSED
+```
+
+`INFO` lines are disclosures, not claims. Not checked here, because it takes more than `curl`: the inert guard's owner and armer, and that each Base address is the one the signer derives (`bun app/deploy.ts near-preflight.near --verify` reads both, see [mainnet](docs/mainnet.md#verify)).
+
+### Claims and where to check them
+
+Code is `src/lib.rs` unless a file is named; Rust tests are in `src/tests/`. Check numbers are the demo guard's: `get_check {"id": n}` on `guard.goblin-guard-17826.testnet`, or the [status page](https://cmoron.github.io/near-preflight/journal.html).
+
+| Claim | Code | Test | On chain |
+| --- | --- | --- | --- |
+| The agent holds no Base key | `buy` (l. 1659) takes a check id and an amount; `app/demo.ts` gives the agent process `.env.agent` only | `app/relay.test.ts`: "refused: other router, other token, other recipient, other signer, other chain" | the agent's key list: one function-call key, five methods of the guard (`verify.sh`). Its off-chain keys cannot be read on chain |
+| The guard builds the swap | `preview_check` (l. 2196), `buy` | `buy.rs`: `the_preview_is_the_transaction_the_buy_signs` | check #27: `tx_hashes` voted by the sentinels, then `signed_tx` |
+| NEAR signs only after two of three said `allow` | `post_verdict` (l. 1282), `buy` | `checks.rs`: `one_allow_vote_of_two_does_not_buy`, `two_identical_allow_votes_make_the_verdict` | the 10 signed buys and their votes (`verify.sh`); check #27: `allow` from `sentinel` and `sentinel3` |
+| A `warn` buys only once the owner approved it | `approve_warn` (l. 2098) | `buy.rs`: `buy_refused_on_warn_without_the_human`, `an_approved_warn_is_bought_and_the_approval_is_logged` | check #6: `warn`, not approved, nothing signed; check #7: same token, `approved`, signed |
+| A `block` quarantines the token for every agent | `post_verdict`, `request_check` (l. 1118) | `quarantine.rs`: `a_blocked_token_is_not_checked_again_at_once`, `another_agent_does_not_check_a_blocked_token_either` | `token_limits`: `quarantine_s` 1800; check #25, a `block`. A quarantine lapses after 30 min: `quarantined_until` shows only a current one |
+| Anyone can replay a verdict | `app/replay.ts` | `app/replay.test.ts`: "a tampered verdict (block -> allow) is detected" | check #19: `evidence_sha256` `df51fe65…f3b8`, the sha256 of the evidence in `app/fixtures/usdc-base-mainnet.json` |
+| An exit sells on the sentinels' quote | `request_exit` (l. 1163), `sell_quoted` (l. 1815) | `exits.rs`: `an_exit_floor_is_the_median_of_three_quotes` | check #5: an exit, three votes carrying the same quote |
+| The mainnet guard is inert | `verify()` in `app/deploy.ts` | `app/deploy.test.ts`: "the inert guard: one account, its code and new, every role the owner's, nothing else" | `guard.near-preflight.near`: transactions [1](https://nearblocks.io/txns/F3AabD7DJf7XQCSwFA3BuJG3JKuPzjrYoegTN6aR9VJf) and [2](https://nearblocks.io/txns/E35MNZ1KdKvvVCmWxYshP52snsrsNBeXxetKTqGNkzgo), views `bounds`, `sentinels`, `last_check_id` (`verify.sh`) |
+
+### Replay a verdict, run the traps
+
 No NEAR account, no key, nothing to deploy. You need `bun` 1.4, Foundry 1.8 and `jq`.
 
 The first two commands take about a minute: `replay` starts its own throwaway forks (local copies of Base, run by Foundry's anvil). The trap tests take six more, on a fork you start.
@@ -86,7 +138,7 @@ bun app/attest.ts app/fixtures/decision.json --check 10
 # Every trap of the table below, as CI runs it
 [ -f .env ] || echo GUARD=$GUARD > .env
 evm/fork.sh                  # terminal 1: wait for "Base fork at block … ready" (about 30 s), leave it running
-bun test --timeout 30000     # terminal 2: 355 pass, 0 fail (5 to 7 min)
+bun test --timeout 30000     # terminal 2: 361 pass, 0 fail (5 to 7 min)
 ```
 
 `INDEX_RPC` serves the logs the template index is rebuilt from; `mainnet.base.org` refuses them. When no anvil is running, `evm/fork.sh` first deletes the state directories stopped anvils left in `~/.foundry/anvil/tmp` (10 GB and more each).
@@ -129,7 +181,7 @@ Every limit, with its reason: [threat model](docs/threat-model.md#what-it-does-n
 1. Install Rust with `cargo-near` 0.23, `near` CLI 0.31, `bun` 1.4, Foundry 1.8 and `jq`. `cargo test` gives `354 passed`; then `bun install`.
 2. Get a testnet account holding about 8 NEAR. The faucet gives 10; if it answers `429`, see [troubleshooting](docs/reproduce.md#troubleshooting).
 3. `cargo near build non-reproducible-wasm && bun app/setup.ts <you>.testnet` deploys the guard and creates the agent, armer and three sentinel accounts, each with a key limited to the guard.
-4. `evm/fork.sh` in another terminal, then `bun test --timeout 30000`: `355 pass`.
+4. `evm/fork.sh` in another terminal, then `bun test --timeout 30000`: `361 pass`.
 5. `./demo.sh` exits 0 in about 7 min: a poisoned message pushes the agent to a trap (blocked), a farm copy (blocked), USDC (allowed, signed by NEAR, broadcast to the fork), then the agent's bypasses (refused).
 6. It prints this run's `replay --check` and `attest --check` commands; each exits 0.
 7. Optional: `NEAR_AI_API_KEY` in `.env.llm` runs the live model; `./demo.sh --full` adds an exit, an approved `warn`, a second agent and the emergency stop.

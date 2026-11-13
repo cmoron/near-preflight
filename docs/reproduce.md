@@ -46,7 +46,7 @@ Then every trap on a local Base fork, as CI runs it:
 
 ```sh
 echo GUARD=$GUARD > .env && evm/fork.sh    # Base fork at block 55836672 ready on http://127.0.0.1:8545 (about 30 s)
-bun test --timeout 30000                   # in another terminal: 355 pass, 0 fail (5 to 7 min)
+bun test --timeout 30000                   # in another terminal: 361 pass, 0 fail (5 to 7 min)
 ```
 
 `evm/fork.sh` starts anvil on a copy of Base at block 55,836,672 and deploys the demo tokens at fixed
@@ -82,7 +82,7 @@ What happens where:
    function-call key limited to the guard. An `allow` takes two of the three sentinels' matching votes;
    the armer, a key apart from the agent's, opens the agent's armed budget. `WASM=<file>` deploys
    another build than `target/near/goblin_near.wasm` (the demo guard: the reproducible one, below).
-4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`355 pass`) and
+4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`361 pass`) and
    `bunx tsc --noEmit` (exit 0).
 5. **Run the demo.** `./demo.sh` exits 0 in about 7 min (415 and 435 s with the live model and three
    sentinels; each check waits for Base blocks and for two matching votes, 20 to 55 s on the fork), in
@@ -192,7 +192,8 @@ the contract: `git diff 22e5c32 -- src/lib.rs` shows only the tests leaving. The
 its wasm was built from.
 
 CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs on every push to `main`: `cargo fmt`,
-`clippy`, `cargo test`, `bunx tsc --noEmit`, then the fork and `bun test`.
+`clippy`, `cargo test`, `bunx tsc --noEmit`, then the fork and `bun test`. It also runs [`verify.sh`](../verify.sh)
+on every push and once a day: both deployed guards read from public NEAR nodes, no key.
 
 Coverage, measured at commit `22e5c32` with `cargo llvm-cov` (cargo-llvm-cov 0.9.1): 98.4 % of
 `src/lib.rs`'s lines, its test module included (since moved to `src/tests/`); for the contract code above
