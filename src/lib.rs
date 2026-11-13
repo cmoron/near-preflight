@@ -12,10 +12,16 @@ use omni_transaction::evm::types::Signature;
 use omni_transaction::evm::utils::parse_eth_address;
 use omni_transaction::evm::EVMTransaction;
 
-/// Buy on Base: fixed chain id, Uniswap V2 router and WETH. A transaction signed for 8453
-/// is valid on real Base.
+/// Buy on Base: the chain id is fixed at init (`EvmConfig::chain_id`), Base mainnet unless the init
+/// names Base Sepolia; the Uniswap V2 router is the guard's own for that chain (`router_of`), never an
+/// argument. A transaction signed for 8453 is valid on real Base.
 pub const CHAIN_ID: u64 = 8453;
+/// Base Sepolia, Base's public testnet.
+pub const BASE_SEPOLIA_CHAIN_ID: u64 = 84_532;
 const ROUTER: &str = "4752ba5DBc23f44D87826276BF6Fd6b1C372aD24";
+/// Uniswap V2 Router02 on Base Sepolia; its `WETH()` is `WETH` below, as on Base.
+const SEPOLIA_ROUTER: &str = "1689E7B1F10000AE47eBfE339a4f69dECd19F602";
+/// The OP-stack WETH predeploy: the same address on Base and Base Sepolia.
 const WETH: &str = "4200000000000000000000000000000000000006";
 /// `swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256)`
 const SWAP_SELECTOR: [u8; 4] = [0xb6, 0xf9, 0xde, 0x95];
@@ -205,6 +211,25 @@ pub struct EvmConfig {
     pub max_slippage_bps: u16,
     /// The owner's EVM address: the only destination of `withdraw_eth`.
     pub withdraw_to: String,
+    /// The EVM chain every transaction is signed for, fixed at init: `CHAIN_ID` (Base mainnet, also
+    /// when the init does not name one) or `BASE_SEPOLIA_CHAIN_ID`. No method changes it.
+    #[serde(default = "base_mainnet")]
+    pub chain_id: u64,
+}
+
+/// The chain of an init that names none.
+fn base_mainnet() -> u64 {
+    CHAIN_ID
+}
+
+/// The Uniswap V2 router the guard swaps on for `chain_id` (40 hex digits), none for a chain it does
+/// not know: a constant of this code, so that no init argument points a guard at another contract.
+fn router_of(chain_id: u64) -> Option<&'static str> {
+    match chain_id {
+        CHAIN_ID => Some(ROUTER),
+        BASE_SEPOLIA_CHAIN_ID => Some(SEPOLIA_ROUTER),
+        _ => None,
+    }
 }
 
 /// Buy waiting for the MPC signature.
@@ -645,6 +670,10 @@ impl Guard {
             "price below the storage cost of a check"
         );
         require!(is_evm_address(&evm.address), "invalid derived address");
+        require!(
+            router_of(evm.chain_id).is_some(),
+            "unsupported chain id: 8453 (Base) or 84532 (Base Sepolia)"
+        );
         check_gas(
             evm.gas_limit,
             evm.max_fee_per_gas.0,
@@ -2060,8 +2089,8 @@ impl Guard {
         self.last_exit.as_ref()
     }
 
-    /// EVM parameters: derived address, withdrawal address, gas, fees, rate (gas and fees set by
-    /// the owner, the rest fixed at init).
+    /// EVM parameters: chain id, derived address, withdrawal address, gas, fees, rate (gas and fees
+    /// set by the owner, the rest fixed at init).
     #[must_use]
     pub fn evm_config(&self) -> &EvmConfig {
         &self.evm
@@ -2295,7 +2324,12 @@ impl Guard {
             word(&parse_eth_address(WETH)),
             word(&parse_eth_address(&target[2..])),
         ];
-        self.tx(self.evm_nonce, ROUTER, value, SWAP_SELECTOR, &words)
+        self.tx(self.evm_nonce, self.router(), value, SWAP_SELECTOR, &words)
+    }
+
+    /// The Uniswap V2 router of the guard's chain (`router_of`; the init refused a chain without one).
+    fn router(&self) -> &'static str {
+        router_of(self.evm.chain_id).unwrap_or_else(|| env::panic_str("unsupported chain id"))
     }
 
     /// The exit's transactions from `e.nonce`: approve then swap for a sale, the transfer for a
@@ -2310,7 +2344,8 @@ impl Guard {
             .as_deref()
             .and_then(approve_word)
             .unwrap_or(amount);
-        let approve = [word(&parse_eth_address(ROUTER)), allowed];
+        let router = self.router();
+        let approve = [word(&parse_eth_address(router)), allowed];
         let swap = [
             amount,
             word(&e.min_out.0.to_be_bytes()),
@@ -2323,7 +2358,7 @@ impl Guard {
         ];
         vec![
             self.tx(e.nonce, &token[2..], 0, APPROVE_SELECTOR, &approve),
-            self.tx(e.nonce + 1, ROUTER, 0, SELL_SELECTOR, &swap),
+            self.tx(e.nonce + 1, router, 0, SELL_SELECTOR, &swap),
         ]
     }
 
@@ -2342,7 +2377,7 @@ impl Guard {
             input.extend_from_slice(w);
         }
         EVMTransaction {
-            chain_id: CHAIN_ID,
+            chain_id: self.evm.chain_id,
             nonce,
             to: Some(parse_eth_address(to)),
             value,

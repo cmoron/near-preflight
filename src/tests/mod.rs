@@ -55,6 +55,7 @@ fn evm() -> EvmConfig {
         yocto_per_wei: U128(RATE),
         max_slippage_bps: 300,
         withdraw_to: WITHDRAW_TO.into(),
+        chain_id: CHAIN_ID,
     }
 }
 
@@ -68,6 +69,11 @@ fn ctx(who: &str, deposit: u128, now_ns: u64) {
 }
 
 fn guard() -> Guard {
+    guard_with(evm())
+}
+
+/// A guard initialised with `evm`; `guard()` is the Base mainnet one.
+fn guard_with(evm: EvmConfig) -> Guard {
     // Empty storage: a test that builds several guards would otherwise share their maps' prefixes,
     // and one guard's credits would not add up to another's `credits_total`.
     near_sdk::mock::with_mocked_blockchain(|b| drop(b.take_storage()));
@@ -77,7 +83,7 @@ fn guard() -> Guard {
         id("armer.test"),
         id("sentinel.test"),
         U128(PRICE),
-        evm(),
+        evm,
     );
     // A per-token cap that never binds, for tests about something else (zero at init:
     // `no_buy_before_the_owner_sets_the_token_cap`).

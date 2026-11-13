@@ -457,6 +457,85 @@ fn an_invalid_evm_configuration_is_refused() {
     }
 }
 
+// The chain a guard signs for is fixed at init: Base mainnet (the default) or Base Sepolia, each
+// with the Uniswap V2 router the guard itself knows for it.
+// viem 2.57 vectors (serializeTransaction, keccak256): the fields of `HASH0`, `APPROVE_HASH` and
+// `SALE_FLOOR_0_HASH` with chain id 84532 and Base Sepolia's router; the same script gives those three.
+const SEPOLIA_BUY: &str = "0x02f9011583014a3480830f42408402faf0808303d090941689e7b1f10000ae47ebfe339a4f69decd19f6028609184e72a000b8e4b6f9de950000000000000000000000000000000000000000000000000000000000004d6d00000000000000000000000000000000000000000000000000000000000000800000000000000000000000007e5f4552091a69125d5dfcb7b8c2659029395bdf000000000000000000000000000000000000000000000000000000000000012c00000000000000000000000000000000000000000000000000000000000000020000000000000000000000004200000000000000000000000000000000000006000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7c0";
+const SEPOLIA_APPROVE_HASH: &str =
+    "8751f0d92d727c4aa91f19b94aa01ca5f8e4fc7154f8fe186657854e41aa3464";
+const SEPOLIA_SALE_FLOOR_0_HASH: &str =
+    "4a75566f6bbbeab5716d657c2c981cb10b954693b4c81542a22cf81f79d9820d";
+
+fn sepolia_guard() -> Guard {
+    guard_with(EvmConfig {
+        chain_id: BASE_SEPOLIA_CHAIN_ID,
+        ..evm()
+    })
+}
+
+// a script that does not name the chain (app/setup.ts and app/deploy.ts before it was a parameter)
+// gets a Base mainnet guard, whose transactions are the Base vectors of these tests (`HASH0`...)
+#[test]
+fn an_init_without_a_chain_id_is_a_base_mainnet_guard() {
+    let mut json = near_sdk::serde_json::to_value(evm()).unwrap();
+    json.as_object_mut().unwrap().remove("chain_id");
+    let config: EvmConfig = near_sdk::serde_json::from_value(json).unwrap();
+    assert_eq!(config.chain_id, 8453);
+    assert_eq!(guard_with(config).evm_config().chain_id, 8453);
+}
+
+// chain id 84532 and Base Sepolia's router, in the buy and in the exit's approve and swap; no other
+// byte differs from the Base transactions
+#[test]
+fn a_base_sepolia_guard_signs_for_chain_84532_on_its_own_router() {
+    let mut g = sepolia_guard();
+    assert_eq!(g.evm_config().chain_id, 84_532);
+    ctx("owner.test", 0, 0);
+    g.set_bounds(U128(100 * U), 1000, U128(1000 * U), NO_BUY_LIMIT);
+    g.register_agent(id("agent.test"));
+    ctx("owner.test", ONE_NEAR, 0);
+    g.deposit_credit(Some(id("agent.test")));
+    arm_at(&mut g, 100 * U, 1, 0);
+    ctx("agent.test", 0, 500);
+    let check = g.request_check(TARGET.into(), U128(VALUE), None);
+    assert_eq!(g.preview_check(check, U128(QUOTE)), [SEPOLIA_BUY]);
+    let sale: Vec<String> = g
+        .preview_sale(TARGET.into(), U128(SELL_AMOUNT), 300)
+        .iter()
+        .map(|t| hex(&env::keccak256_array(hex::decode(&t[2..]).unwrap())))
+        .collect();
+    assert_eq!(sale, [SEPOLIA_APPROVE_HASH, SEPOLIA_SALE_FLOOR_0_HASH]);
+}
+
+// the guard holds one router per chain it knows: any other chain is refused at init, so no guard
+// of this code signs for Ethereum mainnet or another chain where its address may hold funds
+#[test]
+fn a_chain_the_guard_has_no_router_for_is_refused_at_init() {
+    for chain_id in [0, 1, 8_452, 84_531, 11_155_111, u64::MAX] {
+        ctx("guard.test", 0, 0);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Guard::new(
+                id("owner.test"),
+                id("armer.test"),
+                id("sentinel.test"),
+                U128(PRICE),
+                EvmConfig { chain_id, ..evm() },
+            )
+        }));
+        assert!(r.is_err(), "chain id {chain_id} accepted");
+    }
+}
+
+// the owner's gas settings are the only EVM parameters that move after init
+#[test]
+fn the_chain_stays_the_one_of_the_init_when_the_owner_sets_the_gas() {
+    let mut g = sepolia_guard();
+    ctx("owner.test", 0, 0);
+    g.set_evm_gas(300_000, U128(60_000_000), U128(1_000_000));
+    assert_eq!(g.evm_config().chain_id, 84_532);
+}
+
 // 22. gas: the owner may change the gas limit and fees within bounds (a sale that needs more gas
 // can be retried); a verdict simulated with another gas limit neither buys nor exits
 /// The owner sets the gas limit to `gas` (fees unchanged) at 650 ns.

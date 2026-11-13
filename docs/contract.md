@@ -334,6 +334,11 @@ guard does not check the package itself ([attest](replay.md#what-attest-verifies
 The guard builds every transaction itself: chain 8453, Uniswap V2 router, path WETH to token, recipient
 its own derived address, the nonce, gas and fees the owner set. The agent never picks any of it.
 
+The chain is fixed at init and no method changes it: `evm.chain_id` is 8453 (Base mainnet, also when the
+init names none) or 84532 (Base Sepolia); `new` refuses any other. The router is not an argument: the
+guard holds one per chain it knows (`router_of` in `src/lib.rs`), so no init points it at another
+contract. The view `evm_config` returns the chain id.
+
 The **floor** (minimum output) is the sentinel's quote minus 3 %; an exit's floor is the exit quote's ETH
 minus 3 %. The swap deadline is the check's request time + 300 s, so it is part of the simulated bytes.
 
