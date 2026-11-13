@@ -395,7 +395,9 @@ nonces after the buy in flight.
 
 `app/setup.ts` deploys the guard with a full-access key of the guard account, kept in the deployer's
 near-cli keychain: whoever holds it can deploy other code, which replaces every rule above, or move its
-NEAR. The demo keeps that key so it can be redeployed.
+NEAR. It can also call the MPC signer's `sign` as the guard account: the signer derives the Base address
+from the calling account and the path (`evm-1`, public), so that key gets any transaction signed for the
+guard's Base address, with none of the rules above. The demo keeps that key so it can be redeployed.
 
 A production deployment removes it after the deployment and the `new` call, which leaves the code
 immutable, or hands it to a DAO or multisig that upgrades only after a vote and a delay:

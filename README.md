@@ -48,7 +48,7 @@ The guard's owner appoints the sentinels, which are off-chain programs. Anyone c
 ## How NEAR is used
 
 - **A contract, the guard.** It holds each agent's budget, the owner's rules and every verdict, and builds each Base transaction ([contract](docs/contract.md)).
-- **Chain Signatures.** NEAR's threshold signing network signs for the guard's Base address, so no agent and no server holds a Base key.
+- **Chain Signatures.** NEAR's threshold signing network signs for the guard's Base address. The agent, the sentinels and the armer hold no Base key and no key that can make NEAR sign. The guard account's own full-access key, held by the owner, can: a production guard deletes it or locks it ([upgrade policy](docs/contract.md#upgrade-policy)).
 - **Function-call keys.** The agent, the armer (who opens the agent's budget) and each sentinel hold a key limited to their own methods of the guard ([roles](docs/contract.md#roles-and-keys)).
 - **NEAR AI Cloud.** The demo agent's model runs in an attested enclave (TEE) that signs its decision; `app/attest.ts` verifies it ([attest](docs/replay.md#the-attested-agent)). The guard does not rely on it.
 

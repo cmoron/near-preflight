@@ -273,6 +273,11 @@ listed.
   A refund of an agent's failed exit waits while another agent holds the token, and fees withdrawn
   between a verdict and its buy can leave that buy's storage to the credits
   ([contract](contract.md#recovery)).
+- **The owner's guard key.** `app/setup.ts` leaves the guard account a full-access key in the owner's
+  near-cli keychain. Whoever holds it can deploy other code, or call the MPC signer's `sign` as the guard
+  account and get any Base transaction signed for the guard's address, with none of the guard's rules.
+  The remedy is to delete that key: the guard becomes immutable, and the NEAR held for its storage can no
+  longer be recovered ([upgrade policy](contract.md#upgrade-policy)).
 - **Base mainnet.** A transaction signed for chain 8453 is valid there: never fund the guard's address.
   The relay broadcasts only to a local anvil.
 
