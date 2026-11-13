@@ -6,3 +6,9 @@
 node_modules/
 proofs/
 .claude/
+
+# Launch corpus runs (corpus/): the cache and the per-pool data are address lists, never committed.
+/corpus/cache/
+/corpus/tmp/
+/corpus/*.json
+/corpus/*.txt

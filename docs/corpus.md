@@ -222,5 +222,6 @@ blocks and reputation.
 
 The window, the label rules and the method above are enough to measure it again: every input is a
 public log or state of Base at the blocks named, and the check is the repository's own `checkToken`
-and `indexer`. The per-pool data is a list of pool and launcher addresses: it is not published here
-(see the README's Disclosure). The scripts are not in the repository; they can be shared on request.
+and `indexer`. The scripts are in [`corpus/`](../corpus/README.md), with the commands of this run;
+a small window is a quick trial, about a minute a pool. The per-pool data is a list of pool and launcher addresses: it is
+not published here (see the README's Disclosure), and the scripts' outputs are ignored by git.
