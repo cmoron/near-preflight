@@ -1,7 +1,7 @@
 // Fixed vectors: no network call. Master key and signatures taken from testnet on 2026-11-11.
 import { expect, test } from "bun:test";
 import { recoverAddress, type Hex } from "viem";
-import { deriveEvmAddress } from "./derive";
+import { addressOfKey, deriveEvmAddress } from "./derive";
 
 const MASTER = "secp256k1:4NfTiv3UsGahebgTaHyD9vF8KYKMBnfd6kh94mK6xv8fGBiJB8TBtFMP5WWXz6B89Ac1fbpzPwAvoyQebemHFwx3";
 const ACCOUNT = "goblin-guard-00044.testnet";
@@ -23,6 +23,14 @@ test("derived address of the demo account", () => {
 test("another path or another account gives another address", () => {
   expect(deriveEvmAddress(MASTER, ACCOUNT, "evm-2")).not.toBe(ADDR);
   expect(deriveEvmAddress(MASTER, "other.testnet", "evm-1")).not.toBe(ADDR);
+});
+
+// Read from mainnet's v1.signer on 2026-11-13: public_key, and derived_public_key for that account and path.
+test("on mainnet, the local derivation gives the address v1.signer derives itself", () => {
+  const master = "secp256k1:3tFRbMqmoa6AAALMrEFAYCEoHcqKxeW38YptwowBVBtXK1vo36HDbUWuR6EZmoK4JcH6HDkNMGGqP1ouV7VZUWya";
+  const derived = "secp256k1:5ZfCtgU28p4iGSag2FoBytBkEfWmW3fPc3sKxNtpDpfqDt5LLtyQutTXBqpCvnvMoEc8m7yvT2LW55dgJcAXBLPH";
+  expect(deriveEvmAddress(master, "guard.near-preflight.near", "evm-1")).toBe(addressOfKey(derived));
+  expect(addressOfKey(derived)).toBe("0xB407022A1e227D66B994149d25c675d4cdbc9538");
 });
 
 test("the real MPC signatures recover the derived address", async () => {

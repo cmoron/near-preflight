@@ -3,6 +3,7 @@ import { Account, getTransactionLastResult, JsonRpcProvider, yoctoToNear } from 
 import { chmod, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { patientFetch } from "./verifier";
+import { NET, NETWORK } from "./derive";
 
 // near-api-js calls fetch without a timeout (a response that never arrives hung the sentinel) and throws
 // on the RPC's rate limit (HTTP 429: replay --check, the armer and the agent failed on it). Every fetch of
@@ -10,7 +11,7 @@ import { patientFetch } from "./verifier";
 // same bytes sent again.
 globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => patientFetch(input, init)) as typeof fetch;
 
-export const RPC = process.env.NEAR_RPC ?? "https://test.rpc.fastnear.com";
+export const RPC = process.env.NEAR_RPC ?? NET.rpc;
 export const provider = new JsonRpcProvider({ url: RPC });
 
 /** A required setting from the environment (.env or a role's key file); throws, naming setup, if unset. */
@@ -32,9 +33,9 @@ export function account(id: string, key: string): Account {
   return new Account(id, provider, key as `ed25519:${string}`);
 }
 
-/** The human's account, signed by its full key from the near-cli keychain (~/.near-credentials). */
+/** The human's account, signed by its full key from the near-cli keychain (~/.near-credentials/<network>). */
 export async function humanAccount(id: string): Promise<Account> {
-  const file = `${homedir()}/.near-credentials/testnet/${id}.json`;
+  const file = `${homedir()}/.near-credentials/${NETWORK}/${id}.json`;
   const { private_key } = await Bun.file(file).json();
   return account(id, private_key);
 }
@@ -69,8 +70,8 @@ export async function requoted<T>(attempt: (n: number) => Promise<T>, tries = 3)
   }
 }
 
-/** Link to a testnet transaction on nearblocks. */
-export const explorer = (tx: string) => `https://testnet.nearblocks.io/txns/${tx}`;
+/** Link to a transaction on nearblocks, on the network NEAR_NETWORK names. */
+export const explorer = (tx: string) => `${NET.explorer}/txns/${tx}`;
 
 /** Guard call signed by `who`; returns the value, the transaction link and what it
  *  burnt (gas and NEAR, all its receipts included: MPC call and callback for a buy). */

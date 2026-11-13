@@ -335,7 +335,7 @@ minus 3 %. The swap deadline is the check's request time + 300 s, so it is part 
 A verdict is tied to a nonce. If another signature happens between the verdict and the buy, or the owner
 changes gas or fees, the buy is refused (`transaction differs from the one simulated`): request a new check.
 
-`buy` calls the MPC contract `v1.signer-prod.testnet` with derivation path `evm-1`; `on_signed` stores the
+`buy` calls the MPC contract named at init (`v1.signer-prod.testnet`; on mainnet `v1.signer`, [mainnet](mainnet.md)) with derivation path `evm-1`; `on_signed` stores the
 signed transaction with the check. One signature runs at a time for all agents and exits.
 
 ## Recovery

@@ -6,9 +6,11 @@
 import { actions, KeyPair, nearToYocto, teraToGas } from "near-api-js";
 import { homedir } from "node:os";
 import { mkdir } from "node:fs/promises";
-import { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH, MPC_CONTRACT } from "./derive";
+import { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH, MPC_CONTRACT, NETWORK } from "./derive";
 import { account, humanAccount, provider, RPC, writeSecret } from "./near";
 
+// The demo arms agents and funds them: never on mainnet, where app/deploy.ts deploys an inert guard.
+if (NETWORK !== "testnet") throw new Error(`setup.ts deploys the testnet demo; on ${NETWORK}: bun app/deploy.ts <parent> --dry-run (docs/mainnet.md)`);
 const [parent, withdrawTo = "0x000000000000000000000000000000000000dEaD"] = process.argv.slice(2);
 if (!parent?.endsWith(".testnet") || !/^0x[0-9a-fA-F]{40}$/.test(withdrawTo)) {
   throw new Error("usage: bun app/setup.ts <parent>.testnet [owner EVM address for ETH withdrawals]");

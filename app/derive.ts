@@ -1,4 +1,5 @@
-// Derivation of a NEAR account's EVM address via Chain Signatures (MPC testnet).
+// The NEAR network every script talks to, and the derivation of a NEAR account's EVM address via
+// Chain Signatures on it.
 // tweak = sha3_256("near-mpc-recovery v0.1.0 epsilon derivation:" + predecessor + "," + path)
 // key = master_key + tweak*G ; address = last 20 bytes of keccak256(key without the 04 prefix)
 import { secp256k1 } from "@noble/curves/secp256k1.js";
@@ -7,10 +8,18 @@ import bs58 from "bs58";
 import { keccak256, toHex, getAddress, type Hex } from "viem";
 import { patientFetch } from "./verifier";
 
-export const MPC_CONTRACT = "v1.signer-prod.testnet";
+/** NEAR_NETWORK=mainnet, testnet when unset; any other value throws. Each value's source: docs/mainnet.md. */
+const NETWORKS = {
+  testnet: { rpc: "https://test.rpc.fastnear.com", mpc: "v1.signer-prod.testnet", explorer: "https://testnet.nearblocks.io", suffix: ".testnet" },
+  mainnet: { rpc: "https://free.rpc.fastnear.com", mpc: "v1.signer", explorer: "https://nearblocks.io", suffix: ".near" },
+} as const;
+export const NETWORK = (process.env.NEAR_NETWORK || "testnet") as keyof typeof NETWORKS;
+if (!(NETWORK in NETWORKS)) throw new Error(`NEAR_NETWORK=${NETWORK}: expected testnet or mainnet`);
+export const NET = NETWORKS[NETWORK];
+export const MPC_CONTRACT = NET.mpc;
 /** Guard derivation path, fixed by the contract (DERIVATION_PATH in src/lib.rs). */
 export const GUARD_PATH = "evm-1";
-const RPC = process.env.NEAR_RPC ?? "https://test.rpc.fastnear.com";
+const RPC = process.env.NEAR_RPC ?? NET.rpc;
 
 /** Master key "secp256k1:<base58 of x||y>" -> its 64 bytes; throws on any other length. */
 export function parseNearSecpKey(s: string): Uint8Array {
@@ -31,20 +40,33 @@ export function deriveEvmAddress(masterPublicKey: string, predecessor: string, p
   return getAddress("0x" + keccak256(toHex(uncompressed.slice(1))).slice(26));
 }
 
-/** The MPC contract's master public key (view `public_key`), read from the NEAR RPC (a 429 waited out). */
-export async function fetchMasterPublicKey(): Promise<string> {
+/** EVM address of a NEAR secp256k1 key "secp256k1:<base58 of x||y>". */
+export function addressOfKey(key: string): Hex {
+  return getAddress("0x" + keccak256(toHex(parseNearSecpKey(key))).slice(26));
+}
+
+/** A view of the MPC contract, read from the NEAR RPC (a 429 waited out). */
+async function mpcView(method: string, args: object): Promise<string> {
   const r = await patientFetch(RPC, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       jsonrpc: "2.0", id: 1, method: "query",
-      params: { request_type: "call_function", finality: "final", account_id: MPC_CONTRACT, method_name: "public_key", args_base64: "e30=" },
+      params: { request_type: "call_function", finality: "final", account_id: MPC_CONTRACT, method_name: method, args_base64: Buffer.from(JSON.stringify(args)).toString("base64") },
     }),
   });
   const j: any = await r.json();
-  if (!j.result?.result) throw new Error(`public_key: ${JSON.stringify(j.error ?? j)}`);
+  if (!j.result?.result) throw new Error(`${method}: ${JSON.stringify(j.error ?? j)}`);
   return JSON.parse(Buffer.from(j.result.result).toString());
 }
+
+/** The MPC contract's master public key (view `public_key`). */
+export const fetchMasterPublicKey = () => mpcView("public_key", {});
+
+/** The address the MPC contract itself derives for `predecessor` and `path` (view `derived_public_key`,
+ *  secp256k1 domain 0): what deriveEvmAddress must give. */
+export const fetchDerivedAddress = async (predecessor: string, path: string) =>
+  addressOfKey(await mpcView("derived_public_key", { path, predecessor, domain_id: 0 }));
 
 if (import.meta.main) {
   const [account, path] = process.argv.slice(2);
