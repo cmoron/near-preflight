@@ -164,7 +164,13 @@ const firstReason = (k) => (k.verdict ? (k.reasons ? reasonsOf(k).split(' ; ')[0
 // A block that judged nothing: a sentinel's node failed three times (app/sentinel.ts), or the simulation came
 // after the buy's swap deadline (the router's EXPIRED). Said as such, its reason after it.
 const FAIL_CLOSED = 'blocked because the check could not be completed — the guard fails closed';
+// A block on an exit quote whose sale failed at the router's transferFrom judged no token: the guard's address
+// had nothing to sell where the sentinels simulated (a holding bought on the fork, quoted on Base mainnet,
+// where the demo never broadcasts), or could not move it. Said as such, its reason after it.
+const NO_HOLDING = "no exit quote: the guard's address holds none of this token on the network the sentinels read, or cannot move it; the token is not judged";
+const noHolding = (k) => kindOf(k) === 'sale' && k.verdict === 'block' && /^exit sale fails in simulation \(TransferHelper: TRANSFER_FROM_FAILED\)/.test(k.reasons || '');
 const failClosed = (k) => k.verdict === 'block' && /^(simulation impossible after |simulated buy failed: UniswapV2Router: EXPIRED)/.test(k.reasons || '');
+const reframed = (k) => (failClosed(k) ? FAIL_CLOSED : noHolding(k) ? NO_HOLDING : null);
 
 async function mapBatches(items, fn) {
   const out = [];
@@ -190,7 +196,7 @@ function checkItem({ id, check: k }, open) {
     ['Requested', when(k.requested_ns)],
     ['Judged', k.verdict ? when(k.judged_ns) + ' (' + (secs(k.judged_ns) - secs(k.requested_ns)) + ' s later)' : 'not yet'],
     ['Votes', votesOf(k).length ? el('span', { class: 'stack' }, ...(k.verdict ? [tally(k) + ':'] : []), ...votesOf(k).map((v) => el('span', { class: 'vote' }, badge(v.verdict), ' ', acct(v.sentinel), el('small', {}, v.quote != null ? ' quotes ' + eth(v.quote) + ',' : '', ' evidence ', mono(v.evidence_sha256))))) : 'none yet'],
-    ['Reasons', ...(failClosed(k) ? [FAIL_CLOSED + ': '] : []), reasonsOf(k) || '-'],
+    ['Reasons', ...(reframed(k) ? [reframed(k) + ': '] : []), reasonsOf(k) || '-'],
     ['Quote', sale ? eth(k.quote) + ' for the sale' : k.quote + ' token units for the buy'],
     k.verdict === 'warn' && ['Owner approval', k.approved ? 'approved' : 'not approved'],
     k.verdict === 'block' && ['Asked to list the token', k.list_target ? 'yes' : 'no'],
@@ -206,7 +212,7 @@ function checkItem({ id, check: k }, open) {
     el('span', { class: 'id' }, '#' + id),
     el('span', { class: 'kind' }, token(k.target), sale ? el('small', {}, ' sale') : null),
     lamps(verdictOf(k), signedOf(k)),
-    el('span', { class: 'why' }, ...(failClosed(k) ? [FAIL_CLOSED, el('small', {}, ' (' + firstReason(k) + ')')] : [firstReason(k)]), extra ? el('small', {}, ' (+' + extra + ' more)') : null));
+    el('span', { class: 'why' }, ...(reframed(k) ? [reframed(k), el('small', {}, ' (' + firstReason(k) + ')')] : [firstReason(k)]), extra ? el('small', {}, ' (+' + extra + ' more)') : null));
   const d = el('details', { 'data-id': String(id) }, summary, body);
   d.open = open.has(String(id));
   return el('li', {}, d);
@@ -221,7 +227,7 @@ function renderSteps(checks) {
   const step = (title, ...text) => el('li', {}, el('b', {}, title), ' ', ...text);
   $('steps').replaceChildren(
     step('The agent asks.', acct(k.agent), ' asked to buy ', eth(k.amount_wei), ' of ', token(k.target, true), ' at ', when(k.requested_ns), '.'),
-    step('The sentinels simulate.', 'The buy NEAR would sign, then two sales of what it bought, were simulated by each sentinel on its Base node. ',
+    step('The sentinels simulate.', 'Each sentinel simulated on its Base node the buy NEAR would sign, then its resales, at several delays and sizes. ',
       secs(k.judged_ns) - secs(k.requested_ns) + ' s after the request, ' + (votesOf(k).length ? tally(k) : 'the sentinel') + ' answered ', badge(k.verdict), ': ', el('q', {}, firstReason(k)), '.'),
     step('The verdict is stored on NEAR.', 'With the sha256 of its evidence, ', mono(k.evidence_sha256), ', a quote of ', k.quote,
       ' token units, and the hash of the only transaction the guard may sign for it, ', mono('0x' + k.tx_hashes[0]), '.'),

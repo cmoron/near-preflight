@@ -299,6 +299,22 @@
               shows a lie afterwards.
             </li>
             <li>
+              <b>A rug by liquidity removal.</b> A token that sells normally
+              gets warn at best; block only when its code template has drained
+              pools before. Of 81 real launches that ended badly within 24 h,
+              73 were blocked that way and 8 got warn (<a
+                href="https://github.com/cmoron/near-preflight/blob/main/docs/corpus.md"
+                >corpus</a
+              >).
+            </li>
+            <li>
+              <b>Same-second entries.</b> A verdict takes about 30 s, NEAR's
+              signature 6 s more (<a
+                href="https://github.com/cmoron/near-preflight/blob/main/docs/latency.md"
+                >latency, and whom it fits</a
+              >).
+            </li>
+            <li>
               <b>What a token does later.</b> A pause, tax or blacklist after
               the buy.
             </li>
@@ -318,10 +334,8 @@
             </li>
             <li>
               <b>Other pools.</b> Only Uniswap V2 WETH pools on Base are checked
-              and bought today; Uniswap V3 and V4 pools are not supported yet.
-              V2 is where copy-paste trap launches concentrate: 29 new V2 WETH
-              pools in 2.4 h on 2026-11-11, all of one code template, 24 of them
-              drained.
+              and bought today, where copy-paste trap launches concentrate;
+              Uniswap V3 and V4 pools are not supported yet.
             </li>
           </ul>
           <p class="note">
@@ -415,7 +429,7 @@
             </li>
             <li>
               Each sentinel reads the check and simulates on Base the exact buy
-              the guard would sign, then two sales of what it bought.
+              the guard would sign, then its resales, at several delays and sizes.
             </li>
             <li>
               Each posts its vote to the guard, with the sha256 of its evidence
@@ -458,7 +472,7 @@
           decision behind a check. You need <code>bun</code> 1.4, Foundry 1.8
           and <code>jq</code>.
           <a
-            href="https://github.com/cmoron/near-preflight#verify-it-yourself-in-five-minutes"
+            href="https://github.com/cmoron/near-preflight#verify-it-yourself"
             >The README section</a
           >
           adds the trap tests on a local fork.
