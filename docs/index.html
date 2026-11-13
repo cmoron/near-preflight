@@ -118,6 +118,27 @@
         </p>
       </section>
 
+      <section class="film" aria-labelledby="h-film">
+        <h2 id="h-film">The demo, in 86 seconds</h2>
+        <p class="intro">
+          A real run on NEAR testnet and a local fork of Base, the waits cut.
+          No sound.
+        </p>
+        <video
+          controls
+          preload="none"
+          playsinline
+          muted
+          poster="assets/demo-poster.jpg"
+          width="1920"
+          height="1080"
+          aria-labelledby="h-film"
+        >
+          <source src="assets/demo.mp4" type="video/mp4" />
+          <a href="assets/demo.mp4">Download the demo video</a>
+        </video>
+      </section>
+
       <section class="run" id="run" aria-labelledby="h-run">
         <h2 id="h-run">Run a check</h2>
         <p class="intro">
@@ -294,8 +315,8 @@
             <li>
               <b>Two of the three sentinels lying.</b> One alone never allows:
               it can block a buy, or spoil an exit while another is down. In
-              this demo all run on one machine, each on its own nodes on Base
-              (on the fork, the fork): three keys, not three parties. Replay
+              this demo all three run on one machine: three keys, not three
+              parties. Replay
               shows a lie afterwards.
             </li>
             <li>
@@ -502,7 +523,8 @@ bun app/attest.ts app/fixtures/decision.json --check 10
 
     <footer class="foot">
       <p>
-        Built for the NEAR Hackathon, track AI Security &amp; Defense. MIT
+        Built for the NEAR Hackathon, tracks AI Security &amp; Defense and Open
+        Innovation. MIT
         license. The demo's tokens live on a local fork of Base; nothing is sent
         to Base. The figures above are read from NEAR testnet by your browser,
         with no backend, no wallet and no key.

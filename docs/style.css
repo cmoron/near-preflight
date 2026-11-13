@@ -184,6 +184,10 @@ footer p{margin:.25rem 0;max-width:none}
 .landing .live strong{font:700 1.1em var(--mono);font-variant-numeric:tabular-nums}
 .landing .live small{display:block;margin-top:.2rem;color:var(--dim);font-size:.875rem}
 
+/* The demo film: the poster is a frame of the film, on the night ground in both themes. The width and height
+   attributes and the ratio hold its place before anything loads. */
+.landing .film video{display:block;width:100%;max-width:60rem;height:auto;aspect-ratio:16/9;background:#0E1A2C;outline:1px solid var(--rule)}
+
 /* Run a check: the picker, then the board. A lamp per step, joined by a rail; lit in order in the text colour,
    then all of them in the verdict's colour once the verdict is stored; the fourth only if NEAR signed. */
 .landing .console{display:grid;grid-template-columns:minmax(0,19rem) minmax(0,1fr);align-items:start}
