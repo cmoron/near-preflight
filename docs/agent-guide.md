@@ -72,7 +72,10 @@ Ask before each of these. Never do them on your own.
 
 `app/buy.ts <token> [ETH]` (default 0.00001) runs the wrapper's `guardedBuy`
 ([`app/agent.ts`](../app/agent.ts)): it prints the check's id, the verdict and its reasons, then the
-relay command, or why there is no buy (exit code 1).
+relay command, or why there is no buy (exit code 1). The first check on a fork just started can take up
+to about 3 min while anvil fetches Base state; if its `allow` comes too late to buy, `buy.ts` asks once
+more by itself. Each check debits 0.025 NEAR of credit and budget, and one that got a verdict, even too
+late, is not refunded (`refund_check` only refunds a check with no verdict after 300 s).
 
 ```sh
 bun --env-file=.env --env-file=.env.agent app/buy.ts 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913   # USDC, on the fork

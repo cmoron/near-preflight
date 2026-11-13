@@ -60,12 +60,13 @@ async function waitApproval(id: number, judgedNs: string, requestedNs: string, w
 
 /** Buys `target` for `wei` on Base, on an allow verdict, or on warn once the human approved it on
  *  chain (asked through `onWarn`, waited for at most `approvalWaitMs`): the guard builds the
- *  transaction and has NEAR sign it. Returns the id and the signed transaction (null without a buy). */
+ *  transaction and has NEAR sign it. Returns the id and the signed transaction (null without a buy);
+ *  `late` when the verdict allowed (or its warn was approved) but came too late to buy. */
 export async function guardedBuy(
   target: Address,
   wei: bigint,
   opts: { approvalWaitMs?: number; onWarn?: (id: number) => void } = {},
-): Promise<{ id: number; signed: string | null }> {
+): Promise<{ id: number; signed: string | null; late?: boolean }> {
   const id = await requestCheck(target, wei);
   const check = await waitVerdict(id);
   if (!check) {
@@ -92,7 +93,7 @@ export async function guardedBuy(
   const asked = Date.now() - Number(BigInt(check.requested_ns) / 1_000_000n);
   if (age > VERDICT_TTL_MS || asked > FRESH_MS) {
     log(`#${id} : ${verdict} expired (${Math.round(age / 1000)} s old, limit ${VERDICT_TTL_MS / 1000} s; requested ${Math.round(asked / 1000)} s ago, limit ${FRESH_MS / 1000} s), I REFUSE TO BUY`);
-    return { id, signed: null };
+    return { id, signed: null, late: true };
   }
   return { id, signed: await buy(id, wei, verdict) };
 }
