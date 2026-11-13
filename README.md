@@ -10,7 +10,7 @@
 
 **Test the resale before the buy. NEAR signs only what was checked.**
 
-**[Watch the demo](https://cmoron.github.io/near-preflight/assets/demo.mp4)** (86 s, no sound).
+**[Watch the demo](https://cmoron.github.io/near-preflight/assets/demo.mp4)** (86 s, no sound) · **[Give this to your agent](#give-this-to-your-agent)** · **[Verify it yourself](#verify-it-yourself)**
 
 A spending cap stops an AI agent from spending too much. It does not stop a prompt-injected agent from spending a little on a scam token.
 
@@ -22,11 +22,15 @@ It is for the operator of an agent or bot that buys newly launched tokens on Uni
 
 Scope today: Uniswap V2 token/WETH pools on Base, NEAR testnet, purchases executed on a local copy of Base. In the demo the three sentinels run on one machine.
 
-**Give this to your agent.** To set up your own guard and make an agent buy through it, paste this to your coding agent. It costs about 8 testnet NEAR from the faucet, no real funds; it needs `bun`, Foundry, `jq`, Rust and the `near` CLI, and its smoke test runs 7 min.
+## Give this to your agent
+
+Paste this to your coding agent (Claude Code, Codex…): it sets up your own guard with you and makes an agent buy through it.
 
 ```text
 Read https://raw.githubusercontent.com/cmoron/near-preflight/main/docs/agent-guide.md and guide me through it step by step. Ask me before anything that creates an account, signs or spends.
 ```
+
+It costs about 8 testnet NEAR from the faucet, no real funds; it needs `bun`, Foundry, `jq`, Rust and the `near` CLI, and its smoke test runs 7 min.
 
 ## One purchase
 
