@@ -16,6 +16,9 @@ version; each page below covers one part and stays short. Read them in this orde
 - [Threat model](threat-model.md): read this if you want every attack, the guard's exact answer and the
   test that shows it, what it does not stop, and what each review found.
 
+- [Launch corpus](corpus.md): read this if you want the check's verdicts on 96 real Base launches
+  against what happened to each pool in the next 24 h, and what that does and does not show.
+
 ## Component manuals
 
 - [Contract](contract.md): read this if you call the guard or audit it: methods, roles and keys, rules,

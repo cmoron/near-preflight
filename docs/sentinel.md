@@ -754,3 +754,11 @@ removable (false `warn`s).
 - On Base a farm spreads its pools over hours, so the 2 h minimum window lets a lying sentinel drop a
   farm's older pools.
 - An operator who keeps 0.5 ETH in its target's pool from before the window escapes the farm's history.
+- The margin is thin. On the farm of the [launch corpus](corpus.md), 0.82 to 1.00 of the earlier pools
+  were drained at each check (median 0.86), against the 0.80 threshold: its newest pools are not
+  drained yet and count against the block. A farm that pulls later or launches more often passes.
+- Cold start: fewer than 3 earlier pools of a template in the window give no finding, so the first
+  pools of a family are judged by the simulation and the liquidity rule alone.
+- Pools funded under 0.5 ETH are not counted: a dust farm is invisible to the rule.
+- A rug by liquidity removal on a token that sells normally is a `warn` (removable liquidity) at best
+  without that history: in the corpus, all 8 such pools outside the farm.

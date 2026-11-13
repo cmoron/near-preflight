@@ -196,8 +196,9 @@ vote can be asked for. Every sentinel may vote until the exit is sent to signing
   answer;
 - 15 s after the request, with the **quorum's** quotes: a sentinel that is down, or whose simulation
   fails, costs an exit a short wait. An exit quote simulates in 0.5 to 2 s on real Base, plus the
-  sentinel's 2.5 s poll and about 2 s for the vote's inclusion on NEAR: an honest quote is in within
-  8 s ([measured](latency.md));
+  sentinel's 2.5 s poll and about 2 s for the vote's inclusion on NEAR: an honest quote was in within
+  6 s, and later than 15 s only while the public NEAR RPC rate-limited the sentinels
+  ([measured](latency.md));
 - 60 s after the request, with **one** vote: no sentinel down ever refuses an exit.
 
 With two sentinels, both needed, that is both quotes or the 60 s. The quote's 120 s run from the

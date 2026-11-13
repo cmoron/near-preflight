@@ -33,6 +33,8 @@ Do not trust it blindly: anyone can [replay](docs/replay.md) a verdict, and the 
 
 - **A cap does not judge the token.** It bounds how much an agent spends, not on what; an allowlist judges only tokens someone already listed.
 - **The traps are real.** On Base on 2026-11-11, 24 of the 29 token/WETH pools opened on Uniswap V2 in 2.4 h were drained a median 13 min after funding; all 29 tokens shared one code template ([measurement](docs/sentinel.md#measured-on-real-base)).
+- **Measured on 96 real launches.** Checked as they stood 64 s after launch, none got `allow`. Of the 81 that ended badly within 24 h, 73 were blocked, all of one farm by its template's history, and 8 got `warn` ([corpus](docs/corpus.md)).
+- **What that means.** The check stops losses written in a token's code, and repeat farms. It does not tell an honest fresh launch from one whose liquidity will be pulled: both get `warn`, and the owner decides.
 - **Every step can be checked.** NEAR signs only the transaction the sentinel simulated, the agent never picks route, recipient or minimum output, and anyone can re-derive a verdict.
 
 ## Verify it yourself in five minutes
@@ -84,6 +86,7 @@ bun test --timeout 30000                  #   355 pass, 0 fail
 - **Two of the three sentinels lying.** One alone never allows: it can block a buy, or [spoil an exit](docs/threat-model.md#a-lying-sentinel) while another is down. In the demo all run on one machine, each on its own nodes on Base (on the fork, the fork): three keys, not three parties. Replay shows a lie afterwards.
 - **What a token does later.** A pause, tax or blacklist after the buy; a change past the check's last sale, 15 min after the buy, by code that read neither the time nor its pool during the check.
 - **Asking again, later.** A `block` on the token's code [quarantines](docs/contract.md#token-limits) it for 30 min, for every agent; a `warn` or a split vote does not. Then an agent may ask again, with new draws.
+- **A rug by liquidity removal.** On a token that sells normally: `warn` (removable liquidity) at best, `block` only when its code template has drained pools before.
 - **What no code shows.** A holder of most of the supply can sell into the pool; liquidity older than one hour is not read; each sentinel believes the Base node it reads.
 - **Same-second entries.** A verdict takes about 30 s on Base, 20 s of them a deliberate wait for a later block; NEAR's signature takes 6 s more ([latency, and whom it fits](docs/latency.md)).
 - **Front-running.** The signing request is public on NEAR before the swap reaches Base.

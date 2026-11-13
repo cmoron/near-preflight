@@ -252,8 +252,17 @@ listed.
   it, even if it would have acted otherwise after the buy.
 - **Front-running.** The signing request and the signed transaction are public on NEAR before anyone
   broadcasts them: a token owner can react before the swap's 300 s deadline.
+- **A rug by liquidity removal.** A token that sells normally and whose liquidity is pulled, or whose
+  reserve is dumped, shows nothing to a buy-and-resale simulation. It gets the `warn` for removable
+  liquidity that an honest fresh launch gets too; a `block` only when its template has drained pools
+  before. On 96 real launches that was every bad outcome: 73 blocked by reputation, 8 `warn`
+  ([corpus](corpus.md)).
 - **Template evasion.** A template is the code with `PUSH32` operands and metadata masked: changing any
-  other constant makes a new one. Fewer than 3 earlier pools give no finding.
+  other constant makes a new one. Fewer than 3 earlier pools give no finding: the first pools of a
+  family pass the reputation rule (8 bad outcomes in the corpus, all `warn`).
+- **A farm near the threshold.** The reputation block had a thin margin on the farm measured: 0.82 to
+  1.00 of its earlier pools drained, against the 0.80 threshold. A farm that pulls later, or launches
+  more often, would fall under it; one that funds under 0.5 ETH is not counted at all.
 - **A pool funded before the index window.** It is not judged by reputation (its reasons say so); a
   lying sentinel can still drop a farm's pools funded more than 2 h before the check.
 - **The model's decision.** Its digest is optional: a compromised agent can omit it or attach another.
