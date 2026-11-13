@@ -54,41 +54,32 @@ Ask before each of these. Never do them on your own.
    `.env, .env.agent, .env.agent2, .env.sentinel, .env.sentinel2, .env.sentinel3, .env.armer written; agent credit: 1499100000000000000000000 yoctoNEAR`
    Check: `near contract call-function as-read-only guard.<you>.testnet sentinels json-args {} network-config testnet now`
    returns three accounts and `"quorum": 2`.
-4. **Fork and sentinels.** Terminal 1: `evm/fork.sh`, until
-   `Base fork at block 55836672 ready on http://127.0.0.1:8545` (about 30 s; it stays in the foreground).
-   Terminal 2, as [`demo.sh`](../demo.sh) does:
-   ```sh
-   export RPC_TIMEOUT_MS=60000 INDEX_FROM=$(($(jq .fork_block evm/tokens.json) + 1))
-   bun app/testkit.ts live &          # the fork mines nothing alone: one block a second
-   for k in .env.sentinel .env.sentinel2 .env.sentinel3; do bun --env-file=.env --env-file=$k app/sentinel.ts & done
-   ```
-   Check: each sentinel prints `sentinel N of 3 (quorum 2), listening to guard.<you>.testnet`.
+4. **Fork and sentinels.** `./start.sh` starts the local Base fork (`evm/fork.sh`), its block miner
+   and the three sentinels, as [`demo.sh`](../demo.sh) does, waits until each sentinel listens, then prints
+   `ready: …` with its log files (about 35 s) and stays in the foreground. Ctrl-C stops them all.
+   Check: each sentinel's log has `sentinel N of 3 (quorum 2), listening to guard.<you>.testnet`.
    A sentinel votes only on checks requested after it started.
 5. **Arm** (the human chooses the budget): `bun --env-file=.env --env-file=.env.armer app/arm.ts 0.4 900`
    arms 0.4 NEAR for 900 s. Bounds set by setup: 0.5 NEAR per arming, 3,600 s, 5 NEAR per 7 days.
    Check: `near contract call-function as-read-only guard.<you>.testnet budget_left json-args '{"account":"agent.<you>.testnet"}' network-config testnet now`
    returns `"400000000000000000000000"`. A read in the first seconds after arming may still say `"0"`: read again.
 6. **Smoke test.** `./demo.sh` runs the whole path in about 7 min and exits 0 ([reproduce](reproduce.md#full-demo)).
-   It starts its own sentinels: stop those of step 4 first.
+   It starts its own miner and sentinels on a fork alone: stop those of step 4 first (Ctrl-C on
+   `./start.sh`), then run `evm/fork.sh` in another terminal.
 
 ## Buy through the guard
 
-The shortest path is the wrapper. `buy.ts`, at the repository root:
-
-```ts
-import { parseEther, type Address } from "viem";
-import { guardedBuy } from "./app/agent";
-const [token, eth = "0.00001"] = process.argv.slice(2);
-const { id, signed } = await guardedBuy(token as Address, parseEther(eth));
-console.log(`#${id}: ${signed ? "signed by NEAR" : "no buy"}`);
-```
+`app/buy.ts <token> [ETH]` (default 0.00001) runs the wrapper's `guardedBuy`
+([`app/agent.ts`](../app/agent.ts)): it prints the check's id, the verdict and its reasons, then the
+relay command, or why there is no buy (exit code 1).
 
 ```sh
-bun --env-file=.env --env-file=.env.agent buy.ts 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913   # USDC, on the fork
-bun --env-file=.env app/relay.ts <id>     # no key: broadcasts the signed swap to the fork, receipt status 1
+bun --env-file=.env --env-file=.env.agent app/buy.ts 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913   # USDC, on the fork
+bun --env-file=.env app/relay.ts <id>     # the command buy.ts prints; no key: broadcasts the signed swap to the fork, receipt status 1
 ```
 
-The fork's trap tokens are in [`evm/tokens.json`](../evm/tokens.json); `sell_blocked` gets a `block`.
+The fork's trap tokens are in [`evm/tokens.json`](../evm/tokens.json); `sell_blocked` gets a `block`
+the first time, which lists it: later checks of it are refused (`target is on the shared blocklist`).
 `bun --env-file=.env --env-file=.env.agent app/check.ts <token> [ETH]` asks for a verdict and buys nothing.
 
 From another codebase, make the same calls with near-api-js, signed by the agent's function-call key
@@ -105,19 +96,11 @@ deposit 0, amounts as decimal strings:
 | 6   | views `get_check({id})`, then `exit_ready({id})`        | none     | until `verdict` is `"allow"` and `exit_ready` is `true` (60 s at most)                          |
 | 7   | `sell_quoted({id})` returns approve and swap, signed    | 150 TGas | within 120 s of the quote. Then `app/relay.ts exit <nonce>`                                     |
 
-`sellAll(buyId)` in `app/agent.ts` does 5 to 7. `sell.ts`, beside `buy.ts`, sells what check `<id>` bought:
-
-```ts
-import { sellAll } from "./app/agent";
-const { id, nonce, signed } = await sellAll(Number(process.argv[2]));
-console.log(
-  `#${id}: ${signed.length ? `signed by NEAR, relay with: bun --env-file=.env app/relay.ts exit ${nonce}` : "no sale"}`,
-);
-```
+`sellAll(buyId)` in `app/agent.ts` does 5 to 7. `app/sell.ts <id>` runs it on what check `<id>` bought:
 
 ```sh
-bun --env-file=.env --env-file=.env.agent sell.ts <id>
-bun --env-file=.env app/relay.ts exit <nonce>   # the nonce sell.ts prints: approve then swap, both receipt status 1
+bun --env-file=.env --env-file=.env.agent app/sell.ts <id>
+bun --env-file=.env app/relay.ts exit <nonce>   # the command sell.ts prints: approve then swap, both receipt status 1
 ```
 
 Both `request_check` and `buy` take an optional

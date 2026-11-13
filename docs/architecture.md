@@ -170,7 +170,9 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 | [`app/relay.ts`](../app/relay.ts)                                | the keyless relay, anvil only                                                         |
 | [`app/arm.ts`](../app/arm.ts), [`app/human.ts`](../app/human.ts) | the armer's and the owner's CLIs                                                      |
 | [`app/check.ts`](../app/check.ts)                                | one check from the command line                                                       |
+| [`app/buy.ts`](../app/buy.ts), [`app/sell.ts`](../app/sell.ts)   | one buy, one sale through the guard from the command line                             |
 | [`app/demo.ts`](../app/demo.ts), [`demo.sh`](../demo.sh)         | the demo                                                                              |
+| [`start.sh`](../start.sh)                                        | the fork, its block miner and the sentinels in one foreground command                 |
 | [`check-mainnet.sh`](../check-mainnet.sh)                        | one check on Base mainnet, then its replay                                            |
 | [`app/setup.ts`](../app/setup.ts)                                | deployment and role keys                                                              |
 | [`app/derive.ts`](../app/derive.ts)                              | the guard's Base address, derived as Chain Signatures does                            |
