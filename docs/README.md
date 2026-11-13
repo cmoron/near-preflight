@@ -33,6 +33,8 @@ version; each page below covers one part. Read them in this order if you are new
   testnet and an agent that buys through it: setup, the contract calls in order, what it must never do.
 - [Reproduce](reproduce.md): read this if you want to run the demo, fix a setup error, or check the
   deployed code.
+- [Mainnet](mainnet.md): read this if you deploy the guard on NEAR mainnet as an inert, readable guard:
+  dry run, deploy, verify, undo.
 - [Site](https://cmoron.github.io/near-preflight/): the landing page ([`index.html`](index.html),
   [`landing.js`](landing.js)) and the [journal](https://cmoron.github.io/near-preflight/journal.html) of the
   demo guard's checks ([`journal.html`](journal.html), [`app.js`](app.js)), in this folder.
