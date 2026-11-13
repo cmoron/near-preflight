@@ -285,9 +285,8 @@ Each limit, with the code that sets it: [contract](contract.md#limits), [sentine
 
 ## Closed after review
 
-Nine adversarial review passes found the bypasses below, with a red team, automated reviews and the
-team's own security passes. The reviewers were AI agents playing a hostile hackathon judge. Each
-bypass now has a test.
+Adversarial review passes by AI reviewers playing a hostile hackathon judge found the bypasses below,
+with a red team, automated reviews and the team's own security passes. Each bypass now has a test.
 
 | Found                                                                                             | Closed by                                                                                                 |
 | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |

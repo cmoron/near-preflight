@@ -51,7 +51,8 @@ Ask before each of these. Never do them on your own.
    It deploys `guard.<you>.testnet`, creates `agent.`, `agent2.`, `sentinel.`, `sentinel2.`, `sentinel3.`
    and `armer.`, gives each a function-call key limited to the guard, sets the bounds and deposits
    1.5 NEAR of credit for the agent. Last line:
-   `.env, .env.agent, .env.agent2, .env.sentinel, .env.sentinel2, .env.sentinel3, .env.armer written; agent credit: 1499100000000000000000000 yoctoNEAR`
+   `.env, .env.agent, .env.agent2, .env.sentinel, .env.sentinel2, .env.sentinel3, .env.armer written; agent credit: 1499… yoctoNEAR`
+   (about 1.499 NEAR: the last digits vary with storage)
    Check: `near contract call-function as-read-only guard.<you>.testnet sentinels json-args {} network-config testnet now`
    returns three accounts and `"quorum": 2`.
 4. **Fork and sentinels.** `./start.sh` starts the local Base fork (`evm/fork.sh`), its block miner
