@@ -1,13 +1,23 @@
 # Runs on every push to main (free while the repository is public) and on demand.
+# Once a day, only the chain job: the deployed guards are read again, the code is not rebuilt.
 name: ci
 on:
   workflow_dispatch:
   push:
     branches: [main]
+  schedule:
+    - cron: "17 6 * * *"
 permissions:
   contents: read
 jobs:
+  chain:
+    runs-on: ubuntu-latest # curl, jq and sha256sum are on the runner: nothing to install
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./verify.sh
   contract:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -20,6 +30,7 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
   app:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20 # the fork tests mine the blocks each check waits for: about 30 s of setup, then 5 min locally
     steps:
