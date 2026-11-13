@@ -1,6 +1,6 @@
 'use strict';
 // Guard account to read. Override with ?guard=<account id>.
-const DEFAULT_GUARD = 'guard.goblin-guard-69369.testnet';
+const DEFAULT_GUARD = 'guard.goblin-guard-17826.testnet';
 const RPCS = ['https://test.rpc.fastnear.com', 'https://rpc.testnet.near.org'];
 const REFRESH_MS = 30000, BATCH = 5, PAGE = 50;
 // A check judged this long ago no longer changes (approval, buy and quoted exit end 120 s after the
