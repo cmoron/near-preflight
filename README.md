@@ -87,7 +87,7 @@ evm/fork.sh                  # terminal 1: wait for "Base fork at block … read
 bun test --timeout 30000     # terminal 2: 355 pass, 0 fail (5 to 7 min)
 ```
 
-`INDEX_RPC` serves the logs the template index is rebuilt from; `mainnet.base.org` refuses them.
+`INDEX_RPC` serves the logs the template index is rebuilt from; `mainnet.base.org` refuses them. When no anvil is running, `evm/fork.sh` first deletes the state directories stopped anvils left in `~/.foundry/anvil/tmp` (10 GB and more each).
 
 These commands read public Base nodes. If one answers `429`, wait a minute and run the command again; `FORK_URL=<a Base archive node> evm/fork.sh` starts the fork from another node.
 

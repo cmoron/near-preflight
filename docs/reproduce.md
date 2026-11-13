@@ -52,7 +52,9 @@ bun test --timeout 30000                   # in another terminal: 355 pass, 0 fa
 `evm/fork.sh` starts anvil on a copy of Base at block 55,836,672 and deploys the demo tokens at fixed
 addresses ([`evm/tokens.json`](../evm/tokens.json)); `guard_frozen` freezes the guard's derived address,
 read from `GUARD`. The sentinel and replay also start throwaway anvil forks of their own. None keeps
-block states on disk (`--prune-history`), and each removes its directory when it stops.
+block states on disk (`--prune-history`), and each removes its directory when it stops. When no anvil is
+running, `evm/fork.sh` first deletes the `anvil-state-*` directories stopped anvils left in
+`~/.foundry/anvil/tmp` (10 GB and more each).
 
 The fork mines nothing on its own, while a check waits for real blocks (its reference block, then the
 later side's). Each test mines them, a second apart (Base mines five a second, but anvil's
