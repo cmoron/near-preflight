@@ -14,7 +14,7 @@ const NETWORKS = {
   mainnet: { rpc: "https://free.rpc.fastnear.com", mpc: "v1.signer", explorer: "https://nearblocks.io", suffix: ".near" },
 } as const;
 export const NETWORK = (process.env.NEAR_NETWORK || "testnet") as keyof typeof NETWORKS;
-if (!(NETWORK in NETWORKS)) throw new Error(`NEAR_NETWORK=${NETWORK}: expected testnet or mainnet`);
+if (!Object.hasOwn(NETWORKS, NETWORK)) throw new Error(`NEAR_NETWORK=${NETWORK}: expected testnet or mainnet`);
 export const NET = NETWORKS[NETWORK];
 export const MPC_CONTRACT = NET.mpc;
 /** Guard derivation path, fixed by the contract (DERIVATION_PATH in src/lib.rs). */
