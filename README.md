@@ -14,7 +14,7 @@
   <a href="https://cmoron.github.io/near-preflight/#demo"><img src="docs/assets/demo-preview.webp" alt="Seventeen seconds of the demo video, looping. A prompt injection tells an AI agent to buy a token. Three sentinels simulate the buy and the resale: the resale fails, they vote block, NEAR signs nothing. On a healthy token they vote allow and NEAR signs the swap the guard built." width="800"></a>
 </p>
 
-**[▶ Watch the demo](https://cmoron.github.io/near-preflight/#demo)** (86 s, no sound) · **[Give this to your agent](#give-this-to-your-agent)** · **[Verify in one minute](#in-one-minute-nothing-to-install)** · **[Verify it yourself](#verify-it-yourself)**
+**[▶ Watch the demo](https://cmoron.github.io/near-preflight/#demo)** (86 s, narrated) · **[Give this to your agent](#give-this-to-your-agent)** · **[Verify in one minute](#in-one-minute-nothing-to-install)** · **[Verify it yourself](#verify-it-yourself)**
 <!-- X-POST: when the demo post exists, replace this whole comment with:  · **[Demo post on X](https://x.com/…)** -->
 
 A spending cap stops an AI agent from spending too much. It does not stop a prompt-injected agent from spending a little on a scam token.
