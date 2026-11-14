@@ -5,9 +5,10 @@ prepaid credit and armed budget, stores checks and verdicts, keeps the shared bl
 Base transaction that NEAR Chain Signatures signs for its address.
 
 The contract is `src/lib.rs` (about 2,800 lines); its unit tests are in [`src/tests/`](../src/tests/),
-one file per theme. Moving them there changed no contract byte: `git diff 22e5c32 -- src/lib.rs` shows
-only the tests leaving, and the deployed code is still the reproducible build of commit `22e5c32`
-([reproduce](reproduce.md#rebuild-the-deployed-wasm)).
+one file per theme. Moving them there changed no contract byte: `git diff 22e5c32 f8f804f -- src/lib.rs`
+shows only the tests leaving. Two builds are deployed: the demo and mainnet guards run commit `22e5c32`,
+the Base Sepolia guard commit `c3c361f`, which adds the chain fixed at init ([signing](#signing),
+[reproduce](reproduce.md#rebuild-the-deployed-wasm)).
 
 ## Contents
 
@@ -35,7 +36,7 @@ would change the deployed contract and every recorded proof.
 | Armer    | function-call key: `arm`, `disarm`                                                       | arm a registered agent within the owner's bounds                                |
 | Agent    | function-call key: `request_check`, `buy`, `refund_check`, `request_exit`, `sell_quoted` | ask checks, buy on `allow`, sell its holding                                    |
 | Sentinel | function-call key: `post_verdict`, one account and key per sentinel (three in the demo)  | vote on checks and post exit quotes, with their hashes                          |
-| Relay    | none                                                                                     | read a signed transaction, check it, broadcast it (here only to anvil)          |
+| Relay    | none                                                                                     | read a signed transaction, check it, broadcast it (an anvil fork or Base Sepolia) |
 
 The owner's CLI is [`app/human.ts`](../app/human.ts):
 
@@ -104,7 +105,7 @@ NEP-297 logs (`EVENT_JSON:`), standard `goblin_guard`. The
 | Only the agent's function-call key acts for it, and only on the guard                                                      | NEAR protocol                         |
 | A buy needs an `allow`, or a `warn` the owner approved, within 120 s of the verdict and 180 s of the check's request       | `buy`, `approve_warn`                 |
 | A buy is of the amount stated at the check, at most the owner's per-buy limit, within the budget                           | `request_check`, `buy`, `set_bounds`  |
-| The guard builds the swap: chain 8453, router, path, recipient = its address, gas, fees, floor                             | `buy`, `preview_check`                |
+| The guard builds the swap: its chain (fixed at init, 8453 or 84532), router, path, recipient = its address, gas, fees, floor                             | `buy`, `preview_check`                |
 | An allow or warn carries the hashes of what the guard would sign; it signs nothing else                                    | `post_verdict`, `buy`                 |
 | A buy needs a token neither listed nor quarantined, whose code is still the reference its verdict saw; signed within 180 s of the request, it has 120 s left to its deadline | `buy` |
 | A `block` vote that carries the token's code quarantines it, listed or not, whatever was decided before it: no check, no buy, for any agent, 30 min at init | `post_verdict`, `request_check`, `buy` |
@@ -331,7 +332,7 @@ guard does not check the package itself ([attest](replay.md#what-attest-verifies
 
 ## Signing
 
-The guard builds every transaction itself: chain 8453, Uniswap V2 router, path WETH to token, recipient
+The guard builds every transaction itself: its chain, Uniswap V2 router, path WETH to token, recipient
 its own derived address, the nonce, gas and fees the owner set. The agent never picks any of it.
 
 The chain is fixed at init and no method changes it: `evm.chain_id` is 8453 (Base mainnet, also when the
@@ -408,6 +409,9 @@ near-cli keychain: whoever holds it can deploy other code, which replaces every 
 NEAR. It can also call the MPC signer's `sign` as the guard account: the signer derives the Base address
 from the calling account and the path (`evm-1`, public), so that key gets any transaction signed for the
 guard's Base address, with none of the rules above. The demo keeps that key so it can be redeployed.
+
+The current code cannot be deployed over a guard running commit `22e5c32`: it adds `chain_id` to the stored
+state, with no migration, so every call would fail until the old code is put back. It needs a new account.
 
 A production deployment removes it after the deployment and the `new` call, which leaves the code
 immutable, or hands it to a DAO or multisig that upgrades only after a vote and a delay:

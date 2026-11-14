@@ -6,8 +6,9 @@ revert, and signed its owner's withdrawal, which landed too. Everything below is
 replay it.
 
 The demo guard of the [README](../README.md) signs for Base (chain 8453) and its swaps go to a local fork.
-This guard runs the same contract initialised with `evm.chain_id: 84532`
-([contract](contract.md#signing)), so its swaps can land on a public chain at no cost.
+This guard runs the same source at a later commit, `c3c361f`, which fixes the chain at init. It was
+initialised with `evm.chain_id: 84532` ([contract](contract.md#signing)), so its swaps can land on a
+public chain at no cost.
 
 ## Accounts
 
@@ -15,8 +16,9 @@ This guard runs the same contract initialised with `evm.chain_id: 84532`
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | Guard                | [`guard.preflight-sepolia-96623.testnet`](https://testnet.nearblocks.io/address/guard.preflight-sepolia-96623.testnet), **no access key**   |
 | Owner                | `preflight-sepolia-96623.testnet`: bounds, sentinels, emergency stop; not the code                                                          |
-| Agent, armer         | `agent.` and `armer.preflight-sepolia-96623.testnet`, each a function-call key limited to the guard                                         |
+| Agent, armer         | `agent.` and `armer.preflight-sepolia-96623.testnet`, each acting through a function-call key limited to the guard                          |
 | Sentinels            | `sentinel.`, `sentinel2.`, `sentinel3.preflight-sepolia-96623.testnet`, quorum 2 of 3                                                       |
+| Their other keys     | each of these five accounts also holds a full-access key, in the owner's keychain: only the guard is keyless                                |
 | Signer               | `v1.signer-prod.testnet`, derivation path `evm-1`                                                                                           |
 | Guard's Base address | [`0x4F87638FB3F58aE20630369eb2e02D6F0C68Ba5E`](https://sepolia.basescan.org/address/0x4F87638FB3F58aE20630369eb2e02D6F0C68Ba5E)             |
 | Healthy token        | [`0x79FD62c0B69372EC28932101D6f2C5fDbd9f316b`](https://sepolia.basescan.org/address/0x79FD62c0B69372EC28932101D6f2C5fDbd9f316b) (`HEALTHY`) |
@@ -38,11 +40,13 @@ Nobody can deploy other code on it, move its NEAR, or call the signer as the gua
 ([upgrade policy](contract.md#upgrade-policy)). The key was deleted by [`app/lock.ts`](../app/lock.ts)
 after the purchase below had landed; the refusal and the withdrawal came after it.
 
-Its code is the reproducible build of commit `c3c361f`, the commit the wasm names
+Its code is the reproducible build of commit `c3c361f`, published as tag `base-sepolia-guard`, the commit the wasm names
 (`contract_source_metadata`): 402,725 bytes, sha256
 `f2136c17d830afc5123e9ee80b5b6bc2aa857d6d571c6e1bb7e6c80faef301a9`, in base58 the account's code hash
 `HHxqii6btaYAL9zCHx32GX4tqSQXmnM3Jty7PJUUh41n`. Rebuild it as in
-[reproduce](reproduce.md#rebuild-the-deployed-wasm): `git checkout c3c361f && cargo near build reproducible-wasm`.
+[reproduce](reproduce.md#rebuild-the-deployed-wasm): `git checkout base-sepolia-guard && cargo near build reproducible-wasm`.
+The commits on `main` are the same source cherry-picked, under other hashes: only the tag builds this wasm,
+which embeds its commit.
 
 ## What happened
 
@@ -54,7 +58,7 @@ sentinels simulated the buy and the resale on Base Sepolia, each on its own prov
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Deploy and `new`                  | [`2ViB8yUs…`](https://testnet.nearblocks.io/txns/2ViB8yUsAXBVtLmP1MqWK7ie6hyskwm1WxtVihTLeqbk)                                                                                                 |                                                                                                                                                                                                                                                       |
 | Check #1 requested                | [`HtPa3zrC…`](https://testnet.nearblocks.io/txns/HtPa3zrCcmqXpdxaP1qY7TDuoLe4A8hPLQQSbNfVnpGF)                                                                                                 |                                                                                                                                                                                                                                                       |
-| Two `allow` votes                 | [`946CLP6X…`](https://testnet.nearblocks.io/txns/946CLP6XBBTzVtGYuZAopJTYFU5Y1vbcmXLgtWbMdjJR), [`Gxc4uGn5…`](https://testnet.nearblocks.io/txns/Gxc4uGn5A5jtQfkZxDQTgHHGjA7TiGuMMbSvMniRVWir) | simulated at block 58,470,986                                                                                                                                                                                                                         |
+| Two `allow` votes                 | [`946CLP6X…`](https://testnet.nearblocks.io/txns/946CLP6XBBTzVtGYuZAopJTYFU5Y1vbcmXLgtWbMdjJR), [`Gxc4uGn5…`](https://testnet.nearblocks.io/txns/Gxc4uGn5A5jtQfkZxDQTgHHGjA7TiGuMMbSvMniRVWir) | simulated at reference block 58,470,891, the sales again at 58,470,986                                                                                                                                                                                                                       |
 | `buy`: built and signed           | [`7uDySyMK…`](https://testnet.nearblocks.io/txns/7uDySyMKFfkBvirkfHutGcJXFmmGUhztsCwJLJbbmVeh)                                                                                                 | [`0x2d5d3776…`](https://sepolia.basescan.org/tx/0x2d5d377655b8f8faf7921b40e2a25cfe95190c1b8a17e6d0733f4b1070e46863), status 1                                                                                                                         |
 | Exit quote #2, three quotes       | [`AEgxUmYa…`](https://testnet.nearblocks.io/txns/AEgxUmYaaEEEt3nx7FdAU3yEixrpChXfWm6YgHpEvHpa)                                                                                                 |                                                                                                                                                                                                                                                       |
 | `sell_quoted`: approve, then swap | [`CbqF1BnJ…`](https://testnet.nearblocks.io/txns/CbqF1BnJ5sRHThftnHzDVxyT5f7a7rAsroLjo6dJzAFz)                                                                                                 | [`0xd7de7627…`](https://sepolia.basescan.org/tx/0xd7de762732c130366e39ca543ebfeb8ad0fb9708d8cec0604e24f9403d14c4c4) and [`0x7f65205c…`](https://sepolia.basescan.org/tx/0x7f65205ca9c33b80a9228b0ed2c0647c75548fb6aa2e780020355cc4778a21c9), status 1 |
@@ -110,8 +114,9 @@ bun app/lock.ts guard.<you>.testnet     # last: deletes the guard's key, for goo
 
 To rehearse first without spending: `FORK=1 evm/sepolia.sh` keeps a throwaway fork of Base Sepolia in one
 terminal, `FORK=1 ./sepolia.sh` runs against it in another. NEAR really signs, so the rehearsal moves
-the guard's nonce: give it a guard of its own (another parent account, `ENV_FILE=.env.dryrun` on the three
-commands), or the real guard's first transaction waits behind ones that never landed.
+the guard's nonce, and what it signs is valid on Base Sepolia and public on NEAR: anyone can broadcast it.
+Give the rehearsal a guard of its own (another parent account, `ENV_FILE=.env.dryrun` on the three
+commands).
 
 ## Limits
 
@@ -120,8 +125,8 @@ commands), or the real guard's first transaction waits behind ones that never la
   ([corpus](corpus.md)).
 - **Three sentinels, one machine.** Three accounts and keys run by one operator. They simulated on three
   providers (`sepolia.base.org`, `base-sepolia-rpc.publicnode.com`, `rpc.sentio.xyz`) but read their logs
-  from one, publicnode, the only public node we found that serves 5,000 blocks of logs a request; each
-  ties it to its own node by block hash.
+  from one, publicnode, the only public node we found that serves 5,000 blocks of logs a request. Two
+  tie it to their own node by block hash; the third simulates on publicnode itself.
 - **One vote on the first refusal.** A single `block` vote refuses, and on check #3 the script stopped
   the other two sentinels once the verdict was in. It now waits for a second vote, as on check #4.
 - **Testnet on both sides.** NEAR testnet and its signer; Base Sepolia ETH has no value. Nothing here ran

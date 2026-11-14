@@ -79,7 +79,7 @@ sequenceDiagram
     G->>M: sign(payload, evm-1)
     M-->>G: on_signed: signed tx stored
     R->>G: get_check(id)
-    R->>B: broadcast (anvil only)
+    R->>B: broadcast (anvil fork or Base Sepolia)
 ```
 
 Each sentinel polls the guard (`last_check_id`, then `get_check` and `vote_due`): the guard never calls out. The verdict
@@ -123,7 +123,7 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 | Sentinel function-call keys   | each sentinel's machine (three sentinels in the demo, on one machine) | vote on checks, post exit quotes; one key alone blocks a buy, never allows one, and sets no exit's floor while the others quote | sign on Base, buy, move funds                                                                 |
 | Armer function-call key       | the armer's process          | arm within the owner's bounds, disarm                                                                       | exceed the bounds; it can fill the 7-day cap (the owner resets)                               |
 | Owner full-access key         | the human, near-cli keychain | every rule: bounds, roles, stop, approvals, unlist, sell, withdraw ETH to the address fixed at init, settle | change the code                                                                               |
-| Guard account full-access key | the deployer's keychain      | deploy other code, move the guard's NEAR, ask the signer directly                                                                   | nothing is out of reach: production removes it ([upgrade policy](contract.md#upgrade-policy)) |
+| Guard account full-access key | the deployer's keychain      | deploy other code, move the guard's NEAR, ask the signer directly                                                                   | nothing is out of reach: production removes it ([upgrade policy](contract.md#upgrade-policy)); the Base Sepolia guard has none |
 | Chain Signatures              | NEAR's MPC network           | sign for the guard's derived address, only when the guard calls it                                          | sign for that address at anyone else's request: the key derives from the caller's account     |
 | none (relay)                  | anyone                       | broadcast a signed transaction, or not                                                                      | change it                                                                                     |
 
@@ -151,7 +151,7 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 | Base                | the tokens and ETH at the guard's derived address, the pools                                                                                                                                 |
 | Sentinel's machine  | `proofs/<id>.json` (requests and responses); the template index, built for each check over the 2 h before its block (from `INDEX_FROM` on the fork)                                         |
 | Agent's machine     | decision packages in `proofs/llm/`                                                                                                                                                           |
-| This repository     | two proofs in `app/fixtures/`, the fork's token addresses in `evm/tokens.json`                                                                                                               |
+| This repository     | four proofs in `app/fixtures/`, the fork's token addresses in `evm/tokens.json`                                                                                                               |
 
 ## Source map
 
@@ -168,13 +168,15 @@ If the swap reverts on Base, the holding stays debited until the owner restores 
 | [`app/attest.ts`](../app/attest.ts)                              | verification of a model decision                                                      |
 | [`app/llm.ts`](../app/llm.ts)                                    | the model's tool loop on NEAR AI Cloud, decision packages                             |
 | [`app/agent.ts`](../app/agent.ts)                                | the agent's wrapper: request a check, wait, buy, sell                                 |
-| [`app/relay.ts`](../app/relay.ts)                                | the keyless relay, anvil only                                                         |
+| [`app/relay.ts`](../app/relay.ts)                                | the keyless relay: to an anvil fork or Base Sepolia, nothing else                     |
 | [`app/arm.ts`](../app/arm.ts), [`app/human.ts`](../app/human.ts) | the armer's and the owner's CLIs                                                      |
 | [`app/check.ts`](../app/check.ts)                                | one check from the command line                                                       |
 | [`app/buy.ts`](../app/buy.ts), [`app/sell.ts`](../app/sell.ts)   | one buy, one sale through the guard from the command line                             |
 | [`app/demo.ts`](../app/demo.ts), [`demo.sh`](../demo.sh)         | the demo                                                                              |
 | [`start.sh`](../start.sh)                                        | the fork, its block miner and the sentinels in one foreground command                 |
 | [`check-mainnet.sh`](../check-mainnet.sh)                        | one check on Base mainnet, then its replay                                            |
+| [`sepolia.sh`](../sepolia.sh), [`evm/sepolia.sh`](../evm/sepolia.sh) | a buy and a sale mined on Base Sepolia, a trap blocked ([base-sepolia](base-sepolia.md)) |
+| [`app/lock.ts`](../app/lock.ts)                                  | deletes a testnet guard's own key, for good                                           |
 | [`app/setup.ts`](../app/setup.ts)                                | deployment and role keys                                                              |
 | [`app/derive.ts`](../app/derive.ts)                              | the guard's Base address, derived as Chain Signatures does                            |
 | [`app/near.ts`](../app/near.ts)                                  | NEAR access shared by every role                                                      |

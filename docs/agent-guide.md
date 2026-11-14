@@ -15,8 +15,9 @@ registers agents.
 ## Limits, before you start
 
 - **NEAR testnet only.** Nothing here runs on NEAR mainnet.
-- **A buy executes on a local fork of Base only.** The relay refuses any node that is not anvil. On Base
+- **A buy executes on a local fork of Base only.** The relay refuses any other node. On Base
   mainnet you get verdicts, read only (`./check-mainnet.sh <token>`), and you stop there.
+  Swaps mined on Base Sepolia are another run, with a guard of its own ([base-sepolia](base-sepolia.md#run-your-own)).
 - **Uniswap V2 WETH pools on Base only.** No V3, no V4, no other chain.
 - **About 30 s per verdict** on real Base, 20 to 55 s on the fork, plus 6 s for the signature. A verdict
   buys for 120 s, within 180 s of its request. Not for same-second entries ([latency](latency.md)).

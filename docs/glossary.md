@@ -45,7 +45,7 @@ One line per term, in alphabetical order. Links go to the page that explains it.
 | **quarantine**         | after a `block` on the token's code, it can be neither checked nor bought for the owner's period (30 min by default) |
 | **quorum**             | how many sentinels must post the same `allow` or `warn` for it to count; any one blocks ([contract](contract.md#sentinel-quorum)) |
 | **reference block**    | the first Base block at least 4 s after a check's request on NEAR: the check simulates on it                               |
-| **relay**              | a program with no key that broadcasts a transaction NEAR signed; here only to anvil                                        |
+| **relay**              | a program with no key that broadcasts a transaction NEAR signed, to an anvil fork or Base Sepolia only                     |
 | **replay**             | `app/replay.ts`: re-derives a verdict from its proof file and a Base node                                                  |
 | **sentinel**           | an off-chain program that simulates each check and posts its vote, with a key limited to that; the demo guard has three, two needed |
 | **takeback**           | a `transferFrom` of a buyer's tokens without approval, by `owner()` or a stranger                                          |

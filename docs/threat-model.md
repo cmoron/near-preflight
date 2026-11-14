@@ -185,6 +185,7 @@ only then is one lying node or one stolen key alone.
 | ------------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------ |
 | USDC on the fork                            | 🟢 `allow`; the guard builds the swap, NEAR signs it, the relay broadcasts it to the fork    | `bun test -t "USDC, healthy"`, `./demo.sh` |
 | USDC on the fork, its pool traded by others while the check waits | 🟢 `allow`: their trades re-executed after the buy, the resale verified      | `bun test -t "their trades re-executed"`   |
+| Our healthy test token on Base Sepolia      | 🟢 `allow`; NEAR signs the swap, the relay broadcasts it to Base Sepolia, where it was mined | [base-sepolia](base-sepolia.md)            |
 | An honest 30-block cooldown (`cooldown_60`) | 🟠 `warn` naming NUMBER, which its code reads; 🔴 not listed when the first sale is drawn within 30 blocks (about 1 check in 6 on Base, every check on the fork) | `bun test -t "Cooldown60"`                 |
 | An honest one-block hold (`hold_one_block`) | 🟠 `warn` naming NUMBER and TIMESTAMP; its resale goes through, the owner approves           | `bun test -t "holding block"`              |
 | USDC on Base mainnet, read only             | 🟢 `allow` on two sentinels' votes, each on its own nodes (check #19): reputation not applied, its pool predates the index window; nothing signed. When its pool trades during the wait, those trades are re-executed after the buy, or a `warn` says the resale was not verified | `./check-mainnet.sh`                       |
@@ -277,9 +278,11 @@ listed.
   near-cli keychain. Whoever holds it can deploy other code, or call the MPC signer's `sign` as the guard
   account and get any Base transaction signed for the guard's address, with none of the guard's rules.
   The remedy is to delete that key: the guard becomes immutable, and the NEAR held for its storage can no
-  longer be recovered ([upgrade policy](contract.md#upgrade-policy)).
+  longer be recovered ([upgrade policy](contract.md#upgrade-policy)). The Base Sepolia guard's is deleted
+  ([base-sepolia](base-sepolia.md)); the demo guard and the mainnet guard keep theirs.
 - **Base mainnet.** A transaction signed for chain 8453 is valid there: never fund the guard's address.
-  The relay broadcasts only to a local anvil.
+  The relay broadcasts only to a local anvil fork, or to Base Sepolia a transaction signed for chain
+  84532; no swap of a Base mainnet token has left a fork.
 
 Each limit, with the code that sets it: [contract](contract.md#limits), [sentinel](sentinel.md#what-a-check-cannot-show).
 

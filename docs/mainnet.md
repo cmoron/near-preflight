@@ -3,6 +3,9 @@
 How to deploy the guard on NEAR mainnet as an **inert guard**: deployed and readable, no agent armed, nothing
 bought on Base. Rehearsed on testnet, then deployed on 2026-11-13 as [`guard.near-preflight.near`](https://nearblocks.io/address/guard.near-preflight.near) (parent `near-preflight.near`; transactions [1](https://nearblocks.io/txns/F3AabD7DJf7XQCSwFA3BuJG3JKuPzjrYoegTN6aR9VJf) and [2](https://nearblocks.io/txns/E35MNZ1KdKvvVCmWxYshP52snsrsNBeXxetKTqGNkzgo)); its full-access key is kept, so it is not immutable. Check it: `NEAR_NETWORK=mainnet NEAR_RPC=https://free.rpc.fastnear.com bun app/deploy.ts near-preflight.near --verify`.
 
+It runs commit `22e5c32`, the demo guard's code, not the later `c3c361f` of the keyless Base Sepolia guard
+([base-sepolia](base-sepolia.md)).
+
 **Inert means: until the owner changes it.** The owner (`<parent>.near`) can later call `set_bounds`,
 `set_token_cap`, `register_agent`, `sell`, `withdraw_eth` or `sign_replacement`, and the guard's own
 full-access key can deploy other code: either one can make NEAR sign a transaction valid on Base mainnet.

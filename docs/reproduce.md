@@ -46,7 +46,7 @@ Then every trap on a local Base fork, as CI runs it:
 
 ```sh
 echo GUARD=$GUARD > .env && evm/fork.sh    # Base fork at block 55836672 ready on http://127.0.0.1:8545 (about 30 s)
-bun test --timeout 30000                   # in another terminal: 361 pass, 0 fail (5 to 7 min)
+bun test --timeout 30000                   # in another terminal: 371 pass, 0 fail (5 to 7 min)
 ```
 
 `evm/fork.sh` starts anvil on a copy of Base at block 55,836,672 and deploys the demo tokens at fixed
@@ -73,7 +73,10 @@ What happens where:
 | Signed swap broadcast       | to the local fork only              | nothing                              |
 | Executed on Base mainnet    | nothing                             | nothing                              |
 
-1. **Build and test the contract.** `cargo test` gives `354 passed`; then `bun install`.
+A third run, `./sepolia.sh`, broadcasts to Base Sepolia with a guard of its own:
+[base-sepolia](base-sepolia.md#run-your-own).
+
+1. **Build and test the contract.** `cargo test` gives `358 passed`; then `bun install`.
 2. **Get a testnet account** holding about 8 NEAR (setup moves 7.6 NEAR). The faucet gives 10:
    `near account create-account sponsor-by-faucet-service <you>.testnet autogenerate-new-keypair save-to-legacy-keychain network-config testnet create`.
    If it fails, see [troubleshooting](#troubleshooting).
@@ -82,7 +85,7 @@ What happens where:
    function-call key limited to the guard. An `allow` takes two of the three sentinels' matching votes;
    the armer, a key apart from the agent's, opens the agent's armed budget. `WASM=<file>` deploys
    another build than `target/near/goblin_near.wasm` (the demo guard: the reproducible one, below).
-4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`361 pass`) and
+4. **Fork and test.** `evm/fork.sh` in another terminal, then `bun test --timeout 30000` (`371 pass`) and
    `bunx tsc --noEmit` (exit 0).
 5. **Run the demo.** `./demo.sh` exits 0 in about 7 min (415 and 435 s with the live model and three
    sentinels; each check waits for Base blocks and for two matching votes, 20 to 55 s on the fork), in
@@ -171,6 +174,11 @@ measurements are in [sentinel](sentinel.md#measured-on-real-base).
 Check the code hash yourself: `view_account` on the guard returns it in base58; decoded, it is the
 wasm's sha256.
 
+Two other guards are deployed. The inert guard on NEAR mainnet runs the same wasm ([mainnet](mainnet.md)).
+The Base Sepolia guard, `guard.preflight-sepolia-96623.testnet`, runs a later commit, `c3c361f`: 402,725 bytes,
+sha256 `f2136c17…01a9`, and its account holds no key ([base-sepolia](base-sepolia.md)). The
+[README](../README.md) has the three in one table.
+
 ### Rebuild the deployed wasm
 
 The wasm names the commit it was built from (NEP-330), so its hash belongs to that commit. Read it on chain,
@@ -186,14 +194,22 @@ near account view-account-summary guard.goblin-guard-17826.testnet network-confi
 ```
 
 Run it in a plain clone, not in a worktree nested in another repository. The build ignores uncommitted
-changes. Two clones of that commit, in two directories, gave the same wasm. Later commits change the
-off-chain code and these pages, and move the unit tests out of `src/lib.rs` into `src/tests/`, never
-the contract: `git diff 22e5c32 -- src/lib.rs` shows only the tests leaving. The guard names the commit
-its wasm was built from.
+changes. Two clones of that commit, in two directories, gave the same wasm. Up to `f8f804f`, later
+commits change the off-chain code and these pages, and move the unit tests out of `src/lib.rs` into
+`src/tests/`, never the contract: `git diff 22e5c32 f8f804f -- src/lib.rs` shows only the tests leaving.
+The guard names the commit its wasm was built from.
+
+The Base Sepolia guard runs the one commit that changes the contract after that, `c3c361f`: the EVM chain
+is fixed at init, 8453 or 84532. The tag `base-sepolia-guard` names it:
+
+```sh
+git checkout base-sepolia-guard && cargo near build reproducible-wasm
+#   SHA-256 checksum hex : f2136c17d830afc5123e9ee80b5b6bc2aa857d6d571c6e1bb7e6c80faef301a9
+```
 
 CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs on every push to `main`: `cargo fmt`,
 `clippy`, `cargo test`, `bunx tsc --noEmit`, then the fork and `bun test`. It also runs [`verify.sh`](../verify.sh)
-on every push and once a day: both deployed guards read from public NEAR nodes, no key.
+on every push and once a day: the three deployed guards read from public NEAR nodes, no key.
 
 Coverage, measured at commit `22e5c32` with `cargo llvm-cov` (cargo-llvm-cov 0.9.1): 98.4 % of
 `src/lib.rs`'s lines, its test module included (since moved to `src/tests/`); for the contract code above
