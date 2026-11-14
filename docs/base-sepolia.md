@@ -65,7 +65,12 @@ sentinels simulated the buy and the resale on Base Sepolia, each on its own prov
 `block` on the first vote
 ([`97wxc3kw…`](https://testnet.nearblocks.io/txns/97wxc3kwpXhGXDThBbnQKDNpDguE9a2reM1ZKF4kiB2u):
 `sale refused 23 s after the buy (TransferHelper::transferFrom: transferFrom failed)`). The guard stores no
-signed transaction for it, and the token is quarantined.
+signed transaction for it, and quarantined the token for 30 min. Asked again after that, check #4
+([`FuptoFEU…`](https://testnet.nearblocks.io/txns/FuptoFEUp97M1pRgELJYLSHC7HVTCxvTM4RCbWotbqqj)) got two
+identical `block` votes
+([`8gKgfPrE…`](https://testnet.nearblocks.io/txns/8gKgfPrEcyujHUeWzbzFey6T9UcMKREu4RzAVaWoTwJ8),
+[`Gf7EmJTs…`](https://testnet.nearblocks.io/txns/Gf7EmJTs2ECZgihC4nA1Fhv3VhnkSSzdTzq5kfTCLSUt)), which
+put the token on the guard's shared blocklist: no agent can ask for it again.
 
 **3. The owner's withdrawal, signed by the keyless guard.** `withdraw_eth`
 ([`BqLKCtjT…`](https://testnet.nearblocks.io/txns/BqLKCtjTroozk2WF43TyfWKQ11uq1oNFXm5q5Tpwu9bS)) sent
@@ -117,9 +122,8 @@ commands), or the real guard's first transaction waits behind ones that never la
   providers (`sepolia.base.org`, `base-sepolia-rpc.publicnode.com`, `rpc.sentio.xyz`) but read their logs
   from one, publicnode, the only public node we found that serves 5,000 blocks of logs a request; each
   ties it to its own node by block hash.
-- **One vote on the refusal.** A single `block` vote refuses. The script stopped the other two sentinels
-  once the verdict was in, so the token is quarantined but not on the shared blocklist, which takes two
-  identical votes.
+- **One vote on the first refusal.** A single `block` vote refuses, and on check #3 the script stopped
+  the other two sentinels once the verdict was in. It now waits for a second vote, as on check #4.
 - **Testnet on both sides.** NEAR testnet and its signer; Base Sepolia ETH has no value. Nothing here ran
   on Base mainnet, and the relay refuses to broadcast there.
 - **The owner still decides.** No key can change the code, but the owner account sets bounds and

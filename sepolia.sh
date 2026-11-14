@@ -59,8 +59,18 @@ for rpc in "$RPC" "$RPC_2" "$RPC_3"; do
   EVM_RPC=$rpc bun --env-file="$E" --env-file="$keys" app/sentinel.ts >"$LOGS/sentinel$n.log" 2>&1 &
   SENTINELS+=($!)
 done
-# On every exit: the sentinels stop (by PID) and the agent is disarmed, so the guard signs no more buys.
-trap 'kill "${SENTINELS[@]}" 2>/dev/null || true; "${ARMER[@]}" disarm || true; echo "sentinel logs: $LOGS"' EXIT
+# On every exit: each sentinel stops, by PID, with the throwaway anvil it may be tracing on (a sentinel
+# stopped in the middle of a check would leave it running), and the agent is disarmed, so the guard signs
+# no more buys.
+stop() {
+  for pid in "${SENTINELS[@]}"; do
+    pkill -x anvil -P "$pid" || true
+    kill "$pid" 2>/dev/null || true
+  done
+  "${ARMER[@]}" disarm || true
+  echo "sentinel logs: $LOGS"
+}
+trap stop EXIT
 for i in 1 2 3; do until grep -q "listening to" "$LOGS/sentinel$i.log"; do kill -0 "${SENTINELS[$((i - 1))]}" || { cat "$LOGS/sentinel$i.log"; exit 1; }; sleep 0.5; done; done
 
 for step in "$@"; do
@@ -78,10 +88,16 @@ for step in "$@"; do
     echo "The agent asks to buy $BUY_ETH ETH of $TRAP, whose sales revert: block, nothing signed."
     if out=$(EVM_RPC=$RPC "${AGENT[@]}" app/buy.ts "$TRAP" $BUY_ETH); then echo "$out"; echo "  !!! SIGNED, the guard failed"; exit 1; fi
     echo "$out"
-    # Run again, the guard refuses the request itself: the first block listed the token for every agent.
-    if grep -q "target is on the shared blocklist" <<<"$out"; then continue; fi
+    # Run again, the guard refuses the request itself: the block quarantined the token, then listed it.
+    if grep -qE "target is (quarantined after a block verdict|on the shared blocklist)" <<<"$out"; then continue; fi
     grep -q "verdict=block" <<<"$out" || { echo "  !!! not bought, but not on a block verdict"; exit 1; }
     id=$(sed -n 's/^#\([0-9]*\) verdict=block.*/\1/p' <<<"$out")
+    # One block vote refuses; listing the token for every agent takes two identical ones: wait for the
+    # second, 90 s at most.
+    for _ in $(seq 45); do
+      (($(cat "$LOGS"/sentinel*.log | grep -c "#$id : BLOCK") >= 2)) && break
+      sleep 2
+    done
     signed=$(bun --env-file="$E" -e 'const { view } = await import("./app/near"); const c = await view("get_check", { id: Number(process.argv[1]) }); console.log(c.signed_tx === null && !c.settled ? "none" : "SIGNED")' "$id")
     echo "  [guard] check #$id: signed transaction $signed"
     [[ $signed == none ]]
