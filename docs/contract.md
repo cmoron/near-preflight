@@ -416,6 +416,10 @@ immutable, or hands it to a DAO or multisig that upgrades only after a vote and 
 near account delete-keys guard.<parent>.testnet public-keys <its full-access key> network-config testnet sign-with-keychain send
 ```
 
+[`app/lock.ts`](../app/lock.ts) does it for a testnet guard: it checks the account runs the wasm named and
+holds that one key, deletes it, and reads the key list back. The Base Sepolia guard has none
+([base-sepolia](base-sepolia.md)).
+
 The owner role is separate: an account named at init, whose key changes bounds and roles, not code.
 
 ## Limits
