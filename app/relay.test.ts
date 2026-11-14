@@ -148,9 +148,9 @@ test("a relay set for Base refuses a transaction signed for Base Sepolia", async
   await expect(verifyExit(raws, sale, ADDR, OTHER)).rejects.toThrow("chain id 84532");
 });
 
-/** A node that is not anvil (it knows no anvil_ method) serving `chainId`, where `ADDR` holds `balance`;
- *  `calls` records every method it was asked. */
-function publicNode(chainId: number, balance = 10n ** 18n) {
+/** A node that is not anvil (it knows no anvil_ method, unless `more` answers one) serving `chainId`, where
+ *  `ADDR` holds `balance`; `calls` records every method it was asked. */
+function publicNode(chainId: number, balance = 10n ** 18n, more: Record<string, unknown> = {}) {
   const calls: string[] = [];
   const server = Bun.serve({
     port: 0,
@@ -165,13 +165,15 @@ function publicNode(chainId: number, balance = 10n ** 18n) {
         eth_call: toHex(354n, { size: 32 }), // getL1Fee
         eth_blockNumber: "0x2",
         eth_sendRawTransaction: hash,
+        ...more,
         eth_getTransactionReceipt: { transactionHash: hash, transactionIndex: "0x0", blockHash: hash, blockNumber: "0x1", from: ADDR, to: OTHER, cumulativeGasUsed: "0x5208", gasUsed: "0x5208", effectiveGasPrice: "0x1", contractAddress: null, logs: [], logsBloom: `0x${"00".repeat(256)}`, status: "0x1", type: "0x2" },
       };
       const known = Object.hasOwn(answers, method);
       return Response.json({ jsonrpc: "2.0", id, ...(known ? { result: answers[method] } : { error: { code: -32601, message: "Method not found" } }) });
     },
   });
-  return { client: createPublicClient({ transport: http(`http://127.0.0.1:${server.port}`, { retryCount: 0 }) }), calls, stop: () => server.stop(true) };
+  const url = `http://127.0.0.1:${server.port}`;
+  return { client: createPublicClient({ transport: http(url, { retryCount: 0 }) }), url, calls, stop: () => server.stop(true) };
 }
 const pay = (chainId: number) => signer.signTransaction({ ...fees, chainId, nonce: 0, to: OTHER, value: 1_000n, data: "0x" });
 const sent = (calls: string[]) => calls.includes("eth_sendRawTransaction");
@@ -187,6 +189,19 @@ test("broadcast refuses a node that is neither a local anvil fork nor Base Sepol
     } finally {
       node.stop();
     }
+  }
+});
+
+test("a node on another host that answers anvil_nodeInfo is not taken for a local fork: Base mainnet is refused", async () => {
+  const node = publicNode(BASE, 10n ** 18n, { anvil_nodeInfo: {} });
+  // the same node, reached under a name that is not this machine's
+  const remote = createPublicClient({ transport: http("http://node.example:8545", { retryCount: 0, fetchFn: (_url, init) => fetch(node.url, init) }) });
+  try {
+    await expect(broadcast(remote, await pay(BASE), ADDR, () => {})).rejects.toThrow(`refusing to broadcast: the EVM node is neither a local anvil fork nor Base Sepolia (chain id ${BASE})`);
+    expect(sent(node.calls)).toBe(false);
+    expect(forkSetup(node.calls)).toEqual([]);
+  } finally {
+    node.stop();
   }
 });
 

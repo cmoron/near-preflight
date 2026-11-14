@@ -110,9 +110,12 @@ const mineFirst = (client: PublicClient) => client.request({ method: "evm_mine" 
 
 /** Where the relay broadcasts: a local anvil fork (`fork`, with the setup a real chain would not need),
  *  or Base Sepolia itself, a public testnet (`sepolia`: no setup, the address holds real test ETH). Any
- *  other node is refused, Base mainnet first: what NEAR signs for chain 8453 is valid there. */
+ *  other node is refused, Base mainnet first: what NEAR signs for chain 8453 is valid there. A fork is a
+ *  node of this machine: any node can answer `anvil_nodeInfo`, so one on another host is not taken for one. */
 export async function nodeKind(client: PublicClient): Promise<"fork" | "sepolia"> {
-  const anvil = await client.request({ method: "anvil_nodeInfo" } as never).then(() => true, () => false);
+  const url = (client.transport as { url?: string }).url;
+  const local = url !== undefined && ["127.0.0.1", "[::1]", "localhost"].includes(new URL(url).hostname);
+  const anvil = local && (await client.request({ method: "anvil_nodeInfo" } as never).then(() => true, () => false));
   if (anvil) return "fork";
   const id = await client.getChainId();
   if (id !== BASE_SEPOLIA) throw new Error(`refusing to broadcast: the EVM node is neither a local anvil fork nor Base Sepolia (chain id ${id})`);
