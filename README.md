@@ -10,7 +10,12 @@
 
 **Test the resale before the buy. NEAR signs only what was checked.**
 
-**[Watch the demo](https://cmoron.github.io/near-preflight/assets/demo.mp4)** (86 s, no sound) · **[Give this to your agent](#give-this-to-your-agent)** · **[Verify in one minute](#in-one-minute-nothing-to-install)** · **[Verify it yourself](#verify-it-yourself)**
+<p align="center">
+  <a href="https://cmoron.github.io/near-preflight/#demo"><img src="docs/assets/demo-poster.jpg" alt="A frame of the demo video. Three sentinels each report: buy ok, resale refused. Each votes block. The verdict block is stored on NEAR testnet, and the step Signed by NEAR stays dark. Caption: Resale fails: block. NEAR signs nothing." width="800"></a>
+</p>
+
+**[▶ Watch the demo](https://cmoron.github.io/near-preflight/#demo)** (86 s, no sound) · **[Give this to your agent](#give-this-to-your-agent)** · **[Verify in one minute](#in-one-minute-nothing-to-install)** · **[Verify it yourself](#verify-it-yourself)**
+<!-- X-POST: when the demo post exists, replace this whole comment with:  · **[Demo post on X](https://x.com/…)** -->
 
 A spending cap stops an AI agent from spending too much. It does not stop a prompt-injected agent from spending a little on a scam token.
 
@@ -18,21 +23,17 @@ A spending cap stops an AI agent from spending too much. It does not stop a prom
 
 **2. The agent cannot skip the check.** It holds no key for Base, the chain it buys on. A NEAR contract (the _guard_) builds the swap itself, and NEAR Chain Signatures signs it only after two of the three sentinels said `allow`, or the owner approved their `warn`. The agent picks a token and an amount, nothing else.
 
+**See it for yourself**
+
+- Run `./verify.sh`: it reads the three deployed guards from public NEAR nodes, and four receipts from Base Sepolia, with `curl` and `jq`. No account, no key, 7 s here ([its output](#in-one-minute-nothing-to-install)).
+- Four transactions NEAR signed, mined on Base Sepolia: the [buy](https://sepolia.basescan.org/tx/0x2d5d377655b8f8faf7921b40e2a25cfe95190c1b8a17e6d0733f4b1070e46863), the sale ([approve](https://sepolia.basescan.org/tx/0xd7de762732c130366e39ca543ebfeb8ad0fb9708d8cec0604e24f9403d14c4c4), then [swap](https://sepolia.basescan.org/tx/0x7f65205ca9c33b80a9228b0ed2c0647c75548fb6aa2e780020355cc4778a21c9)) and the owner's [withdrawal](https://sepolia.basescan.org/tx/0x30d09618730ad7d4500318ed82ab55dfc99dc42d7ac5ef8509adf0d859a80943).
+- The guard that had them signed, [`guard.preflight-sepolia-96623.testnet`](https://testnet.nearblocks.io/address/guard.preflight-sepolia-96623.testnet): its account holds no access key.
+
 It is for the operator of an agent or bot that buys newly launched tokens on Uniswap V2 on Base, who can wait tens of seconds and wants a refusal that states its reason and can be replayed.
 
 Scope today: Uniswap V2 token/WETH pools on Base, NEAR testnet. The demo's purchases execute on a local copy of Base. A second guard's buy, sale and withdrawal were mined on Base Sepolia, with test tokens we deployed ([Base Sepolia](docs/base-sepolia.md)). The three sentinels run on one machine.
 
 The same contract is also on NEAR mainnet as [`guard.near-preflight.near`](https://nearblocks.io/address/guard.near-preflight.near), inert: no agent, bounds at zero, nothing signed. Its code hash is the reproducible build of the demo guard ([mainnet](docs/mainnet.md)).
-
-Three guards are deployed, on two versions of the contract:
-
-| Guard | Network | Role | Code commit | Wasm sha256 | Access keys of the guard account |
-| --- | --- | --- | --- | --- | --- |
-| `guard.goblin-guard-17826.testnet` | NEAR testnet | the demo: signs for Base (chain 8453), swaps go to a local fork | `22e5c32` | `3c5b992f…372f` | one full-access key, the owner's |
-| `guard.near-preflight.near` | NEAR mainnet | inert: no agent, bounds at zero, nothing signed | `22e5c32` | `3c5b992f…372f` | one full-access key, the owner's |
-| `guard.preflight-sepolia-96623.testnet` | NEAR testnet | signs for Base Sepolia (chain 84532): a buy, a sale and a withdrawal mined | `c3c361f` (tag `base-sepolia-guard`) | `f2136c17…01a9` | none |
-
-Commit `c3c361f` adds one thing to the contract: the EVM chain is fixed at init, 8453 or 84532. `./verify.sh` reads the commit, the hash and the keys of each from public nodes.
 
 ## Give this to your agent
 
@@ -122,6 +123,18 @@ ALL CHECKS PASSED
 ```
 
 `INFO` lines are disclosures, not claims. Not checked here, because it takes more than `curl`: the inert guard's owner and armer, and that each Base address is the one the signer derives (`bun app/deploy.ts near-preflight.near --verify` reads both, see [mainnet](docs/mainnet.md#verify)).
+
+### The three deployed guards
+
+Three guards are deployed, on two versions of the contract:
+
+| Guard | Network | Role | Code commit | Wasm sha256 | Access keys of the guard account |
+| --- | --- | --- | --- | --- | --- |
+| `guard.goblin-guard-17826.testnet` | NEAR testnet | the demo: signs for Base (chain 8453), swaps go to a local fork | `22e5c32` | `3c5b992f…372f` | one full-access key, the owner's |
+| `guard.near-preflight.near` | NEAR mainnet | inert: no agent, bounds at zero, nothing signed | `22e5c32` | `3c5b992f…372f` | one full-access key, the owner's |
+| `guard.preflight-sepolia-96623.testnet` | NEAR testnet | signs for Base Sepolia (chain 84532): a buy, a sale and a withdrawal mined | `c3c361f` (tag `base-sepolia-guard`) | `f2136c17…01a9` | none |
+
+Commit `c3c361f` adds one thing to the contract: the EVM chain is fixed at init, 8453 or 84532. `./verify.sh` reads the commit, the hash and the keys of each from public nodes.
 
 ### Claims and where to check them
 

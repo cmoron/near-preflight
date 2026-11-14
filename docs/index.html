@@ -85,6 +85,25 @@
       <section class="hero" aria-labelledby="h-hero">
         <h1 id="h-hero">Test the resale before the buy.</h1>
         <p class="sub">NEAR signs only what was checked.</p>
+        <div class="film" id="demo" style="margin-top: clamp(1.5rem, 3vw, 2.25rem)">
+          <video
+            controls
+            preload="metadata"
+            playsinline
+            muted
+            poster="assets/demo-poster.jpg"
+            width="1920"
+            height="1080"
+            aria-labelledby="h-film"
+          >
+            <source src="assets/demo.mp4" type="video/mp4" />
+            <a href="assets/demo.mp4">Download the demo video</a>
+          </video>
+          <p class="intro" id="h-film" style="margin-top: 0.75rem">
+            The demo, in 86 seconds. A real run on NEAR testnet and a local
+            fork of Base, the waits cut. No sound.
+          </p>
+        </div>
         <p class="lede">
           The agent buys on the Base blockchain only through the guard, a NEAR
           contract. Before
@@ -116,27 +135,6 @@
         <p class="live" id="live" role="status" aria-live="polite">
           Reading the demo guard on NEAR testnet…
         </p>
-      </section>
-
-      <section class="film" aria-labelledby="h-film">
-        <h2 id="h-film">The demo, in 86 seconds</h2>
-        <p class="intro">
-          A real run on NEAR testnet and a local fork of Base, the waits cut.
-          No sound.
-        </p>
-        <video
-          controls
-          preload="none"
-          playsinline
-          muted
-          poster="assets/demo-poster.jpg"
-          width="1920"
-          height="1080"
-          aria-labelledby="h-film"
-        >
-          <source src="assets/demo.mp4" type="video/mp4" />
-          <a href="assets/demo.mp4">Download the demo video</a>
-        </video>
       </section>
 
       <section class="run" id="run" aria-labelledby="h-run">
@@ -531,8 +529,13 @@ bun app/attest.ts app/fixtures/decision.json --check 10
       <p>
         Built for the NEAR Hackathon, tracks AI Security &amp; Defense and Open
         Innovation. MIT
-        license. The demo's tokens live on a local fork of Base; nothing is sent
-        to Base. The figures above are read from NEAR testnet by your browser,
+        license. The demo's tokens live on a local fork of Base, and its swaps go
+        to that fork. A second guard's buy, sale and withdrawal were mined on
+        <a
+          href="https://github.com/cmoron/near-preflight/blob/main/docs/base-sepolia.md"
+          >Base Sepolia</a
+        >, with test tokens we deployed. Nothing is sent to Base mainnet. The
+        figures above are read from NEAR testnet by your browser,
         with no backend, no wallet and no key.
       </p>
       <ul>
