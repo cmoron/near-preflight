@@ -11,7 +11,7 @@
 **Test the resale before the buy. NEAR signs only what was checked.**
 
 <p align="center">
-  <a href="https://cmoron.github.io/near-preflight/#demo"><img src="docs/assets/demo-poster.jpg" alt="A frame of the demo video. Three sentinels each report: buy ok, resale refused. Each votes block. The verdict block is stored on NEAR testnet, and the step Signed by NEAR stays dark. Caption: Resale fails: block. NEAR signs nothing." width="800"></a>
+  <a href="https://cmoron.github.io/near-preflight/#demo"><img src="docs/assets/demo-preview.webp" alt="Seventeen seconds of the demo video, looping. A prompt injection tells an AI agent to buy a token. Three sentinels simulate the buy and the resale: the resale fails, they vote block, NEAR signs nothing. On a healthy token they vote allow and NEAR signs the swap the guard built." width="800"></a>
 </p>
 
 **[▶ Watch the demo](https://cmoron.github.io/near-preflight/#demo)** (86 s, no sound) · **[Give this to your agent](#give-this-to-your-agent)** · **[Verify in one minute](#in-one-minute-nothing-to-install)** · **[Verify it yourself](#verify-it-yourself)**
