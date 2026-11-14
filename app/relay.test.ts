@@ -1,11 +1,11 @@
 // Off-chain verification of the transaction signed by NEAR, no network. Same vectors as the
 // Rust tests in src/tests/: viem produces them, the contract produces the same bytes.
 import { expect, test } from "bun:test";
-import { createPublicClient, encodeFunctionData, http, keccak256, maxUint256, parseAbi, serializeTransaction, type Address } from "viem";
+import { createPublicClient, encodeFunctionData, http, keccak256, maxUint256, parseAbi, serializeTransaction, toHex, type Address, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { broadcast, verifyBuy, verifyExit } from "./relay";
 import { localPreviews } from "./testkit";
-import { ROUTER, WETH } from "./verifier";
+import { BASE, BASE_SEPOLIA, CHAINS, ROUTER, WETH } from "./verifier";
 
 const signer = privateKeyToAccount("0x0000000000000000000000000000000000000000000000000000000000000001");
 const intruder = privateKeyToAccount("0x0000000000000000000000000000000000000000000000000000000000000002");
@@ -133,4 +133,94 @@ test("the tests' stand-in for the guard's previews builds the contract's bytes (
     "0x655e06dcbeba90aa01c2e4fb6f9b6bf827516faf20694d21488d2d9e168bb101",
     "0x4e63831862f4e2d50eab33966eee2e53843bd3f8cea8c0d01f4ece43e71cf1d1",
   ]);
+});
+
+// A Base Sepolia guard (evm.chain_id 84532 at its init): its signed transactions go to Base Sepolia itself.
+test("Base Sepolia's router builds the bytes a Base Sepolia guard signs (src/tests/buy.rs vector)", () => {
+  const data = encodeFunctionData({ abi: swap, args: [19_821n, [WETH, TARGET], ADDR, 300n] });
+  const unsigned = serializeTransaction({ ...tx({ chainId: BASE_SEPOLIA, to: CHAINS[BASE_SEPOLIA].router }), data });
+  expect(keccak256(unsigned)).toBe("0x78789b3545f75c9ce1861827880df3d87b8f4ef731c191b9511109d2eca515b1");
+});
+
+test("a relay set for Base refuses a transaction signed for Base Sepolia", async () => {
+  await expect(verifyBuy(await signer.signTransaction(tx({ chainId: BASE_SEPOLIA })), TARGET, ADDR)).rejects.toThrow("chain id 84532");
+  const raws = [await signer.signTransaction({ ...approveTx(), chainId: BASE_SEPOLIA }), await signer.signTransaction(swapTx())];
+  await expect(verifyExit(raws, sale, ADDR, OTHER)).rejects.toThrow("chain id 84532");
+});
+
+/** A node that is not anvil (it knows no anvil_ method) serving `chainId`, where `ADDR` holds `balance`;
+ *  `calls` records every method it was asked. */
+function publicNode(chainId: number, balance = 10n ** 18n) {
+  const calls: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const { id, method, params = [] } = (await req.json()) as { id: number; method: string; params?: unknown[] };
+      calls.push(method);
+      const hash = method === "eth_sendRawTransaction" ? keccak256(params[0] as Hex) : (params[0] as Hex);
+      const answers: Record<string, unknown> = {
+        eth_chainId: toHex(chainId),
+        eth_getTransactionCount: "0x0",
+        eth_getBalance: toHex(balance),
+        eth_call: toHex(354n, { size: 32 }), // getL1Fee
+        eth_blockNumber: "0x2",
+        eth_sendRawTransaction: hash,
+        eth_getTransactionReceipt: { transactionHash: hash, transactionIndex: "0x0", blockHash: hash, blockNumber: "0x1", from: ADDR, to: OTHER, cumulativeGasUsed: "0x5208", gasUsed: "0x5208", effectiveGasPrice: "0x1", contractAddress: null, logs: [], logsBloom: `0x${"00".repeat(256)}`, status: "0x1", type: "0x2" },
+      };
+      const known = Object.hasOwn(answers, method);
+      return Response.json({ jsonrpc: "2.0", id, ...(known ? { result: answers[method] } : { error: { code: -32601, message: "Method not found" } }) });
+    },
+  });
+  return { client: createPublicClient({ transport: http(`http://127.0.0.1:${server.port}`, { retryCount: 0 }) }), calls, stop: () => server.stop(true) };
+}
+const pay = (chainId: number) => signer.signTransaction({ ...fees, chainId, nonce: 0, to: OTHER, value: 1_000n, data: "0x" });
+const sent = (calls: string[]) => calls.includes("eth_sendRawTransaction");
+const forkSetup = (calls: string[]) => calls.filter((m) => /^(anvil|evm)_/.test(m) && m !== "anvil_nodeInfo");
+
+test("broadcast refuses a node that is neither a local anvil fork nor Base Sepolia: Base mainnet first", async () => {
+  for (const chainId of [BASE, 1, 11_155_111]) {
+    const node = publicNode(chainId);
+    try {
+      // whatever chain the transaction names: one signed for Base, and one signed for Base Sepolia
+      for (const raw of [await pay(BASE), await pay(BASE_SEPOLIA)]) await expect(broadcast(node.client, raw, ADDR, () => {})).rejects.toThrow(`refusing to broadcast: the EVM node is neither a local anvil fork nor Base Sepolia (chain id ${chainId})`);
+      expect(sent(node.calls)).toBe(false);
+    } finally {
+      node.stop();
+    }
+  }
+});
+
+test("broadcast refuses to send Base Sepolia a transaction signed for another chain", async () => {
+  const node = publicNode(BASE_SEPOLIA);
+  try {
+    await expect(broadcast(node.client, await pay(BASE), ADDR, () => {})).rejects.toThrow("refusing to broadcast: transaction signed for chain 8453");
+    expect(sent(node.calls)).toBe(false);
+  } finally {
+    node.stop();
+  }
+});
+
+test("a transaction signed for Base Sepolia is broadcast to Base Sepolia as it is, with no fork setup", async () => {
+  const node = publicNode(BASE_SEPOLIA);
+  try {
+    const raw = await pay(BASE_SEPOLIA);
+    const { receipt, already } = await broadcast(node.client, raw, ADDR, () => {});
+    expect(already).toBe(false);
+    expect(receipt.status).toBe("success");
+    expect(receipt.transactionHash).toBe(keccak256(raw));
+    expect(forkSetup(node.calls)).toEqual([]);
+  } finally {
+    node.stop();
+  }
+});
+
+test("on Base Sepolia an address short of funds is reported, never topped up", async () => {
+  const node = publicNode(BASE_SEPOLIA, 0n);
+  try {
+    await expect(broadcast(node.client, await pay(BASE_SEPOLIA), ADDR, () => {})).rejects.toThrow("send it test ETH");
+    expect(sent(node.calls)).toBe(false);
+    expect(forkSetup(node.calls)).toEqual([]);
+  } finally {
+    node.stop();
+  }
 });

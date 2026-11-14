@@ -25,9 +25,22 @@ import { environmentFindings, envOpcodes, trace, traceLater } from "./environmen
 import { laterSide } from "./later";
 import { beforeBlock, ownFunding, reputationFindings, reputationOf, templateOf, windowProblem, type Index, type Reputation } from "./index";
 
-export const ROUTER: Address = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"; // Uniswap V2 Router02 (Base)
+export const BASE = 8453;
+export const BASE_SEPOLIA = 84532;
+/** The chains a guard signs for (evm.chain_id, fixed at its init), each with the Uniswap V2 Router02 the
+ *  contract holds for it (router_of in src/lib.rs) and that router's factory(). */
+export const CHAINS: Record<number, { router: Address; factory: Address }> = {
+  [BASE]: { router: "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24", factory: "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6" },
+  [BASE_SEPOLIA]: { router: "0x1689E7B1F10000AE47eBfE339a4f69dECd19F602", factory: "0x7Ae58f10f7849cA6F5fB71b7f45CB416c9204b1e" },
+};
+/** The chain this process works on: EVM_CHAIN_ID=84532 for a Base Sepolia guard (app/setup.ts writes it),
+ *  Base mainnet when unset; any other value throws. */
+export const CHAIN_ID = Number(process.env.EVM_CHAIN_ID || BASE);
+if (!Object.hasOwn(CHAINS, CHAIN_ID)) throw new Error(`EVM_CHAIN_ID=${process.env.EVM_CHAIN_ID}: expected ${BASE} (Base) or ${BASE_SEPOLIA} (Base Sepolia)`);
+export const ROUTER: Address = CHAINS[CHAIN_ID].router;
+/** The OP-stack WETH predeploy: the same address on Base and Base Sepolia. */
 export const WETH: Address = "0x4200000000000000000000000000000000000006";
-export const FACTORY: Address = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"; // Uniswap V2 factory (Base), ROUTER.factory()
+export const FACTORY: Address = CHAINS[CHAIN_ID].factory;
 // What the guard signs is what the guard side simulates: its buy, approves and swaps are the unsigned
 // transactions the contract builds (preview_check, preview_sale), sent as is from its address (same
 // calldata, value, nonce, gas limit and fees), and nothing else: no read, no probe, no other sender

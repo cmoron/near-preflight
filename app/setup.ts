@@ -2,12 +2,15 @@
 // per role (.env.agent, .env.sentinel, .env.sentinel2, .env.sentinel3, .env.armer), plus .env.agent2 for a
 // second agent (demo --full). Three sentinels, two needed for an allow (quorum 2 of 3): each its own
 // account and key. WASM names another build of the contract than target/near/goblin_near.wasm.
-// Usage: [WASM=<file.wasm>] bun app/setup.ts <parent>.testnet [owner EVM address for ETH withdrawals]
+// EVM_CHAIN_ID=84532 deploys a guard that signs for Base Sepolia instead of Base (fixed at init); ENV_FILE
+// names the files written (.env by default: ENV_FILE=.env.sepolia writes .env.sepolia, .env.sepolia.agent...).
+// Usage: [WASM=<file.wasm>] [EVM_CHAIN_ID=84532 ENV_FILE=.env.sepolia] bun app/setup.ts <parent>.testnet [owner EVM address for ETH withdrawals]
 import { actions, KeyPair, nearToYocto, teraToGas } from "near-api-js";
 import { homedir } from "node:os";
 import { mkdir } from "node:fs/promises";
 import { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH, MPC_CONTRACT, NETWORK } from "./derive";
 import { account, humanAccount, provider, RPC, writeSecret } from "./near";
+import { BASE_SEPOLIA, CHAIN_ID } from "./verifier";
 
 // The demo arms agents and funds them: never on mainnet, where app/deploy.ts deploys an inert guard.
 if (NETWORK !== "testnet") throw new Error(`setup.ts deploys the testnet demo; on ${NETWORK}: bun app/deploy.ts <parent> --dry-run (docs/mainnet.md)`);
@@ -91,7 +94,7 @@ await guard.signAndSendTransaction({
         armer: id("armer"),
         sentinel: id("sentinel"),
         price: PRICE.toString(),
-        evm: { mpc: MPC_CONTRACT, address: evmAddress, withdraw_to: withdrawTo, ...EVM },
+        evm: { mpc: MPC_CONTRACT, address: evmAddress, withdraw_to: withdrawTo, ...EVM, chain_id: CHAIN_ID },
       },
       teraToGas("100"),
       0n,
@@ -99,7 +102,7 @@ await guard.signAndSendTransaction({
   ],
 });
 console.log(`guard deployed and initialized on ${id("guard")} (owner ${parent}, armer ${id("armer")}, price 0.025 NEAR)`);
-console.log(`derived EVM address of ${id("guard")} (path ${GUARD_PATH}, signer ${MPC_CONTRACT}): ${evmAddress}`);
+console.log(`derived EVM address of ${id("guard")} (path ${GUARD_PATH}, signer ${MPC_CONTRACT}): ${evmAddress}; it signs for chain ${CHAIN_ID}, fixed at init`);
 console.log(`ETH withdrawals from it go only to ${withdrawTo}, fixed at init`);
 if (!process.argv[3]) console.log("  0x...dEaD is a demo placeholder (a burn address), not an owner's address: pass your own EVM address as 2nd argument");
 
@@ -138,26 +141,28 @@ console.log(`0.05 NEAR of credit deposited for ${id("agent2")}`);
 // Shared config without keys; each function-call key in its own file, loaded by its own process only
 // (bun --env-file=.env --env-file=.env.agent ...): the agent never reads the sentinel's key
 // nor the armer's.
-const write = (file: string, lines: string[]) => writeSecret(file, [...lines, ""].join("\n"));
-await write(".env", [
+const ENV = process.env.ENV_FILE || ".env";
+const write = (role: string, lines: string[]) => writeSecret(`${ENV}${role}`, [...lines, ""].join("\n"));
+await write("", [
   `NEAR_RPC=${RPC}`,
   `OWNER=${parent}`,
   `GUARD=${id("guard")}`,
   `AGENT=${id("agent")}`,
   `SENTINEL=${id("sentinel")}`,
   `ARMER=${id("armer")}`,
-  `EVM_RPC=http://127.0.0.1:8545`,
+  // A Base Sepolia guard's roles read Base Sepolia itself, and know its router by EVM_CHAIN_ID.
+  ...(CHAIN_ID === BASE_SEPOLIA ? [`EVM_RPC=https://sepolia.base.org`, `EVM_CHAIN_ID=${CHAIN_ID}`] : [`EVM_RPC=http://127.0.0.1:8545`]),
 ]);
-await write(".env.agent", [`AGENT_KEY=${agentKey}`]);
-await write(".env.sentinel", [`SENTINEL_KEY=${sentinelKey}`]);
-await write(".env.sentinel2", [`SENTINEL=${id("sentinel2")}`, `SENTINEL_KEY=${sentinel2Key}`]);
-await write(".env.sentinel3", [`SENTINEL=${id("sentinel3")}`, `SENTINEL_KEY=${sentinel3Key}`]);
-await write(".env.armer", [`ARMER_KEY=${armerKey}`]);
-await write(".env.agent2", [`AGENT=${id("agent2")}`, `AGENT_KEY=${agent2Key}`]);
+await write(".agent", [`AGENT_KEY=${agentKey}`]);
+await write(".sentinel", [`SENTINEL_KEY=${sentinelKey}`]);
+await write(".sentinel2", [`SENTINEL=${id("sentinel2")}`, `SENTINEL_KEY=${sentinel2Key}`]);
+await write(".sentinel3", [`SENTINEL=${id("sentinel3")}`, `SENTINEL_KEY=${sentinel3Key}`]);
+await write(".armer", [`ARMER_KEY=${armerKey}`]);
+await write(".agent2", [`AGENT=${id("agent2")}`, `AGENT_KEY=${agent2Key}`]);
 // The RPC spreads reads over nodes more or less up to date: a node behind the deposit says 0.
 let credit = "0";
 for (let i = 0; i < 20 && credit === "0"; i++) {
   if (i) await Bun.sleep(1500);
   credit = (await provider.callFunction({ contractId: id("guard"), method: "credit_of", args: { account: id("agent") } })) as string;
 }
-console.log(`.env, .env.agent, .env.agent2, .env.sentinel, .env.sentinel2, .env.sentinel3, .env.armer written; agent credit: ${credit} yoctoNEAR`);
+console.log(`${ENV}, ${ENV}.agent, ${ENV}.agent2, ${ENV}.sentinel, ${ENV}.sentinel2, ${ENV}.sentinel3, ${ENV}.armer written; agent credit: ${credit} yoctoNEAR`);

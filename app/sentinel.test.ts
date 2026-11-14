@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { toHex } from "viem";
 import { INDEX_SPAN_S, windowProblem } from "./index";
 import type { Check } from "./near";
-import { indexer, refusal, step } from "./sentinel";
+import { chainProblem, indexer, refusal, step } from "./sentinel";
 import { patientFetch, rpc, stampOf } from "./verifier";
 
 const check = (verdict: Check["verdict"]): Check => ({
@@ -155,5 +155,21 @@ describe("the sentinel's template index, from its environment", () => {
     } finally {
       node.stop(true);
     }
+  });
+});
+
+// A sentinel votes with the state of one chain on what the guard signs for one chain: both must be the
+// chain this process is set for, or it would allow on Base Sepolia a token that is a trap on Base.
+describe("the sentinel's chain", () => {
+  test("a guard deployed before the chain was an init argument is a Base guard", () => {
+    expect(chainProblem(undefined, 8453, 8453)).toBeNull();
+    expect(chainProblem(8453, 8453, 8453)).toBeNull();
+    expect(chainProblem(84532, 84532, 84532)).toBeNull();
+  });
+  test("refused: a node, a guard or a setting of another chain", () => {
+    expect(chainProblem(84532, 8453, 84532)).toContain("node serves chain 8453");
+    expect(chainProblem(8453, 84532, 84532)).toContain("guard signs for chain 8453");
+    expect(chainProblem(undefined, 84532, 84532)).toContain("guard signs for chain 8453");
+    expect(chainProblem(84532, 84532, 8453)).toContain("EVM_CHAIN_ID");
   });
 });

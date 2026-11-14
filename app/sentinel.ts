@@ -62,6 +62,16 @@ export function step(check: Check | null, readAt: number, lastAt: number, due = 
   return dueAt < readAt ? "retry" : "skip";
 }
 
+/** Why this sentinel must not vote, or null: the guard signs for chain `guard` (evm_config.chain_id; a
+ *  guard deployed before the chain was an init argument names none and signs for Base), its node serves
+ *  chain `node`, and this process is set for chain `set` (EVM_CHAIN_ID: router and factory). All three
+ *  must be one chain: a vote from another chain's state would allow there what is a trap here. */
+export function chainProblem(guard: number | undefined, node: number, set: number): string | null {
+  const signs = guard ?? 8453;
+  if (signs === set && node === set) return null;
+  return `the guard signs for chain ${signs} and the node serves chain ${node}, but this sentinel is set for chain ${set} (EVM_CHAIN_ID)`;
+}
+
 /** Why the guard refused a vote, when the sentinel set or the quorum read at startup explains it:
  *  `settled`, the check took no more votes (the quorum's allow or warn came while this one simulated:
  *  only a block is taken after it; or the check was sent to signing, or is 300 s old);
@@ -75,7 +85,7 @@ export function refusal(reason: string): "settled" | "not a sentinel" | null {
 if (import.meta.main) {
   // near.ts installs a global fetch and reads NEAR_RPC at import: loaded here only, not by the tests.
   const { account, call, env, reason, view, viewAt } = await import("./near");
-  const { checkExit, checkToken, deriveProbes, toProof } = await import("./verifier");
+  const { CHAIN_ID, checkExit, checkToken, deriveProbes, rpc, toProof } = await import("./verifier");
   const { deriveEvmAddress, fetchMasterPublicKey, GUARD_PATH } = await import("./derive");
   const { mkdir, rm } = await import("node:fs/promises");
 
@@ -115,7 +125,10 @@ if (import.meta.main) {
   const GUARD_EVM = deriveEvmAddress(await fetchMasterPublicKey(), env("GUARD"), GUARD_PATH);
   // The guard's slippage bound, fixed at init: an agent's holding is a buy's quote minus it, and each buy
   // check also sells that share (app/verifier.ts exitShare).
-  const { max_slippage_bps } = await view<{ max_slippage_bps: number }>("evm_config");
+  const { max_slippage_bps, chain_id } = await view<{ max_slippage_bps: number; chain_id?: number }>("evm_config");
+  // One chain for the guard, the node and this process, or no vote at all.
+  const wrong = chainProblem(chain_id, Number(await rpc<Hex>(EVM, "eth_chainId", [])), CHAIN_ID);
+  if (wrong) throw new Error(wrong);
   await mkdir("proofs", { recursive: true });
   // The index must end at each check's reference block (windowProblem): it is built for each check.
   const index = indexer(process.env, log);

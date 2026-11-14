@@ -1,6 +1,7 @@
 // Relay, without any key: reads from the guard the transaction signed by NEAR for a request,
 // checks that it buys the request's target via the router, for the guard's derived address
-// and signed by it, then broadcasts it on the local Base fork and prints the receipt.
+// and signed by it, then broadcasts it on the local Base fork and prints the receipt. A Base Sepolia
+// guard's transactions (EVM_CHAIN_ID=84532) also go to Base Sepolia itself; never to another public chain.
 // `exit <nonce>`: same for the latest signed exit (sale or ETH withdrawal). A transaction already
 // mined is reported with its receipt.
 // Usage: bun --env-file=.env app/relay.ts <id> | exit <nonce>
@@ -22,7 +23,7 @@ import {
   type PublicClient,
   type TransactionReceipt,
 } from "viem";
-import { ROUTER, WETH } from "./verifier";
+import { BASE_SEPOLIA, CHAIN_ID, ROUTER, WETH } from "./verifier";
 
 const swap = parseAbi([
   "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256,address[],address,uint256) payable",
@@ -46,7 +47,7 @@ export async function verifyBuy(raw: Hex, target: Address, address: Address): Pr
   };
   const tx = parseTransaction(raw);
   if (tx.type !== "eip1559") reject(`type ${tx.type}`);
-  if (tx.chainId !== 8453) reject(`chain id ${tx.chainId}, not Base`);
+  if (tx.chainId !== CHAIN_ID) reject(`chain id ${tx.chainId}, not ${CHAIN_ID}`);
   if (!tx.to || getAddress(tx.to) !== ROUTER) reject(`to ${tx.to}, not the router`);
   const { args } = decodeFunctionData({ abi: swap, data: tx.data ?? "0x" });
   const [minOut, path, to, deadline] = args;
@@ -74,7 +75,7 @@ export async function verifyExit(raws: Hex[], exit: { token: Address | null; amo
   const out: string[] = [];
   for (const [i, raw] of raws.entries()) {
     const tx = parseTransaction(raw);
-    if (tx.type !== "eip1559" || tx.chainId !== 8453) reject(`tx ${i}: type ${tx.type}, chain id ${tx.chainId}`);
+    if (tx.type !== "eip1559" || tx.chainId !== CHAIN_ID) reject(`tx ${i}: type ${tx.type}, chain id ${tx.chainId}`);
     const from = await recoverTransactionAddress({ serializedTransaction: raw as Parameters<typeof recoverTransactionAddress>[0]["serializedTransaction"] });
     if (from !== getAddress(address)) reject(`tx ${i}: signer ${from}, not ${address}`);
     const to = getAddress(tx.to ?? reject(`tx ${i}: no recipient`));
@@ -107,32 +108,49 @@ export async function verifyExit(raws: Hex[], exit: { token: Address | null; amo
  *  An empty block first keeps every earlier block as it was. */
 const mineFirst = (client: PublicClient) => client.request({ method: "evm_mine" } as never);
 
-/** Fork setup Base would not need: tops `address` up to the value, max gas and L1 data fee of `raws`. */
-export async function fund(client: PublicClient, raws: Hex[], address: Address, log: (s: string) => void): Promise<void> {
+/** Where the relay broadcasts: a local anvil fork (`fork`, with the setup a real chain would not need),
+ *  or Base Sepolia itself, a public testnet (`sepolia`: no setup, the address holds real test ETH). Any
+ *  other node is refused, Base mainnet first: what NEAR signs for chain 8453 is valid there. */
+export async function nodeKind(client: PublicClient): Promise<"fork" | "sepolia"> {
+  const anvil = await client.request({ method: "anvil_nodeInfo" } as never).then(() => true, () => false);
+  if (anvil) return "fork";
+  const id = await client.getChainId();
+  if (id !== BASE_SEPOLIA) throw new Error(`refusing to broadcast: the EVM node is neither a local anvil fork nor Base Sepolia (chain id ${id})`);
+  return "sepolia";
+}
+
+/** `address` must hold the value, max gas and L1 data fee of `raws`. On a fork it is topped up to them
+ *  (setup Base would not need); on Base Sepolia a shortfall is an error naming it. */
+export async function fund(client: PublicClient, raws: Hex[], address: Address, log: (s: string) => void, kind: "fork" | "sepolia" = "fork"): Promise<void> {
   let need = 0n;
   for (const raw of raws) {
     const tx = parseTransaction(raw);
     const l1 = await client.readContract({ address: GAS_ORACLE, abi: oracle, functionName: "getL1Fee", args: [raw] });
     need += (tx.value ?? 0n) + (tx.gas ?? 0n) * (tx.maxFeePerGas ?? 0n) + l1;
   }
-  if ((await client.getBalance({ address })) < need) {
-    await mineFirst(client);
-    await client.request({ method: "anvil_setBalance", params: [address, toHex(need)] } as never);
-    log(`[fork setup] anvil_setBalance ${address} ${formatEther(need)} ETH (value + max gas + L1 data fee of ${raws.length} tx); on Base it would take a real deposit`);
-  }
+  const held = await client.getBalance({ address });
+  if (held >= need) return;
+  if (kind === "sepolia") throw new Error(`${address} holds ${formatEther(held)} ETH on Base Sepolia, ${raws.length} tx need ${formatEther(need)} (value + max gas + L1 data fee): send it test ETH`);
+  await mineFirst(client);
+  await client.request({ method: "anvil_setBalance", params: [address, toHex(need)] } as never);
+  log(`[fork setup] anvil_setBalance ${address} ${formatEther(need)} ETH (value + max gas + L1 data fee of ${raws.length} tx); on Base it would take a real deposit`);
 }
 
-/** Broadcasts `raw`, signed by `address`, on the local anvil fork only, after the fork setup Base
- *  would not need: balance for value, max gas and L1 data fee (anvil_setBalance), nonce aligned after
- *  a fork restart (anvil_setNonce). */
+/** Broadcasts `raw`, signed by `address`: on a local anvil fork, after the fork setup Base would not
+ *  need (balance for value, max gas and L1 data fee by anvil_setBalance, nonce aligned after a fork
+ *  restart by anvil_setNonce); or on Base Sepolia, as it is, when it is signed for Base Sepolia. */
 export async function broadcast(client: PublicClient, raw: Hex, address: Address, log: (s: string) => void): Promise<{ receipt: TransactionReceipt; already: boolean }> {
-  // Broadcast on the local fork only: the transaction is also valid on real Base.
-  await client.request({ method: "anvil_nodeInfo" } as never).catch(() => {
-    throw new Error("refusing to broadcast: the EVM node is not a local anvil fork");
-  });
+  // Never on another public chain: a transaction signed for 8453 is valid on real Base.
+  const kind = await nodeKind(client);
   const tx = parseTransaction(raw);
+  if (kind === "sepolia" && tx.chainId !== BASE_SEPOLIA) throw new Error(`refusing to broadcast: transaction signed for chain ${tx.chainId}, not Base Sepolia`);
   const nonce = tx.nonce ?? 0;
-  const current = await client.getTransactionCount({ address });
+  let current = await client.getTransactionCount({ address });
+  // A public node may answer from a block behind the one that mined the transaction before: reread for 10 s.
+  for (let i = 0; kind === "sepolia" && current < nonce && i < 10; i++) {
+    await Bun.sleep(1000);
+    current = await client.getTransactionCount({ address });
+  }
   if (current > nonce) {
     // Already broadcast (by this relay or anyone: the signed tx is public on NEAR): report it.
     const mined = await client.getTransactionReceipt({ hash: keccak256(raw) }).catch((e: unknown) => {
@@ -143,8 +161,9 @@ export async function broadcast(client: PublicClient, raw: Hex, address: Address
     log(`${mined.transactionHash} already broadcast: receipt status ${mined.status === "success" ? 1 : 0}, block ${mined.blockNumber}`);
     return { receipt: mined, already: true };
   }
-  await fund(client, [raw], address, log);
+  await fund(client, [raw], address, log, kind);
   if (current < nonce) {
+    if (kind === "sepolia") throw new Error(`nonce ${nonce} of ${address} is ahead of Base Sepolia's ${current}: an earlier signed transaction was not broadcast`);
     await mineFirst(client);
     await client.request({ method: "anvil_setNonce", params: [address, toHex(nonce)] } as never);
     log(`[fork setup] anvil_setNonce ${address} ${nonce} (the fork is behind the guard's nonce: restarted fork, or earlier signed tx not broadcast)`);
@@ -163,6 +182,10 @@ if (import.meta.main) {
   // Address recomputed here from the MPC master key, the guard's account and the fixed path.
   const address = deriveEvmAddress(await fetchMasterPublicKey(), env("GUARD"), GUARD_PATH);
   const client = createPublicClient({ transport: http(env("EVM_RPC")) });
+  // Refused here, before anything is read: a node that is neither a local anvil fork nor Base Sepolia.
+  const kind = await nodeKind(client);
+  /** On Base Sepolia the receipt is public: its explorer page. */
+  const page = (hash: Hex) => (kind === "sepolia" ? `  https://sepolia.basescan.org/tx/${hash}` : "");
   /** The RPC spreads reads over nodes that are more or less up to date: what was just signed may
    *  still be missing there; reread for up to 30 s. */
   const reread = async <T>(read: () => Promise<T>, done: (v: T) => boolean): Promise<T> => {
@@ -185,11 +208,11 @@ if (import.meta.main) {
     const lines = await verifyExit(raws, { token: exit.token, amount: BigInt(exit.amount), approve: exit.approve ? BigInt(exit.approve) : null }, address, withdraw_to);
     for (const l of lines) log(`exit by ${exit.by}, signed tx decoded: ${l}`);
     const watched = exit.token ? address : withdraw_to;
-    await fund(client, raws, address, log); // once for all, so the balance change below is the real one
+    await fund(client, raws, address, log, kind); // once for all, so the balance change below is the real one
     const before = await client.getBalance({ address: watched });
     for (const raw of raws) {
       const { receipt, already } = await broadcast(client, raw, address, log);
-      if (!already) log(`eth_sendRawTransaction ${receipt.transactionHash}: receipt status ${receipt.status === "success" ? 1 : 0}, block ${receipt.blockNumber}, gas used ${receipt.gasUsed}`);
+      if (!already) log(`eth_sendRawTransaction ${receipt.transactionHash}: receipt status ${receipt.status === "success" ? 1 : 0}, block ${receipt.blockNumber}, gas used ${receipt.gasUsed}${page(receipt.transactionHash)}`);
       if (receipt.status !== "success") process.exit(1);
     }
     const after = await client.getBalance({ address: watched });
@@ -217,10 +240,11 @@ if (import.meta.main) {
   ]);
   const { receipt, already } = await broadcast(client, raw, address, log);
   if (already) process.exit(receipt.status === "success" ? 0 : 1);
-  const after = await client.readContract({ ...token, functionName: "balanceOf", args: [address] });
+  // Read at the receipt's block: a public node behind it would still answer the balance before the buy.
+  const after = await client.readContract({ ...token, functionName: "balanceOf", args: [address], blockNumber: receipt.blockNumber });
   log(
     `#${id} eth_sendRawTransaction ${receipt.transactionHash}: receipt status ${receipt.status === "success" ? 1 : 0}, block ${receipt.blockNumber}, ` +
-      `gas used ${receipt.gasUsed}; ${address} holds ${formatUnits(after, decimals)} ${symbol} (+${formatUnits(after - before, decimals)})`,
+      `gas used ${receipt.gasUsed}; ${address} holds ${formatUnits(after, decimals)} ${symbol} (+${formatUnits(after - before, decimals)})${page(receipt.transactionHash)}`,
   );
   if (receipt.status !== "success" || after <= before) process.exit(1);
 }
