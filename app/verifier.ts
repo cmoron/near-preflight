@@ -247,6 +247,14 @@ export async function rpc<T>(url: string, method: string, params: unknown[]): Pr
   return body.result;
 }
 
+/** The chain id of the node at `url`, which must be the guard's, on every check: the node behind a URL
+ *  can change after the sentinel compared them at startup. */
+async function guardChain(url: string): Promise<number> {
+  const id = Number(await rpc<Hex>(url, "eth_chainId", []));
+  if (id !== CHAIN_ID) throw new Error(`the EVM node serves chain ${id}, the guard signs for ${CHAIN_ID}: no check`);
+  return id;
+}
+
 /** A simulated block: its number fixes its time (timeOf) and its prevrandao. */
 export type Block = { number: bigint; calls: Call[] };
 /** Real block on top of which we simulate: its base fee and coinbase are reused, its prevrandao seeds
@@ -793,12 +801,12 @@ export function nearFindings(n: NearFacts, codeHash: Hex, implementation: Addres
  *  runs the sales again on Base's later state with the buy's change applied. Throws when the index window is not bound to the block: no verdict rather than
  *  an unknown reputation. */
 export async function checkToken(url: string, token: Address, guard: Address, probes: (head: Header, c: Cadence) => Probe, ctx: Context): Promise<Report> {
+  const chainId = await guardChain(url);
   const head = await refBlock(url, ctx.requested_ns);
   const cadence = await cadenceAt(url, head);
   const { sale, later, ...probe } = probes(head, cadence);
   const who = { guard, ...probe };
   const block = BigInt(head.number);
-  const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
   const code = await rpc<Hex>(url, "eth_getCode", [token, toHex(block)]);
   const implementation = await implementationAt(url, token, block);
   const opcodes = await opcodesOf(url, code, implementation, block);
@@ -1152,9 +1160,9 @@ export function judgeExit(labels: string[], results: Result[], w: { token: Addre
  *  twice: with no floor for the quote, then exactly as signed on that quote. allow with the ETH received
  *  as quote, or block without one. */
 export async function checkExit(url: string, token: Address, guard: Address, amount: bigint, preview: (quote: bigint) => Promise<Hex[]>): Promise<ExitReport> {
+  const chainId = await guardChain(url);
   const head = await firstAt(url, BigInt((await stampOf(url, "latest")).timestamp)); // the first block of the latest second
   const cadence = await cadenceAt(url, head);
-  const chainId = Number(await rpc<Hex>(url, "eth_chainId", []));
   const pair = (await read(url, FACTORY, "getPair", [token, WETH], BigInt(head.number))) as Address;
   const run = async (txs: Hex[]) => {
     const fees = sameFees(txs);

@@ -5,7 +5,7 @@ import { toHex } from "viem";
 import { INDEX_SPAN_S, windowProblem } from "./index";
 import type { Check } from "./near";
 import { chainProblem, indexer, refusal, step } from "./sentinel";
-import { patientFetch, rpc, stampOf } from "./verifier";
+import { CHAIN_ID, checkExit, checkToken, patientFetch, rpc, stampOf } from "./verifier";
 
 const check = (verdict: Check["verdict"]): Check => ({
   agent: "agent.test",
@@ -172,4 +172,29 @@ describe("the sentinel's chain", () => {
     expect(chainProblem(undefined, 84532, 84532)).toContain("guard signs for chain 8453");
     expect(chainProblem(84532, 84532, 8453)).toContain("EVM_CHAIN_ID");
   });
+});
+
+// The sentinel compares the node's chain with the guard's at startup; a node can change behind its URL
+// afterwards (anvil restarted on the same port, a provider's alias moved).
+test("a check on a node that now serves another chain is refused before anything is simulated", async () => {
+  const calls: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const { id, method } = (await req.json()) as { id: number; method: string };
+      calls.push(method);
+      return Response.json({ jsonrpc: "2.0", id, ...(method === "eth_chainId" ? { result: "0x1" } : { error: { code: -32601, message: "Method not found" } }) });
+    },
+  });
+  const url = `http://127.0.0.1:${server.port}`;
+  const token = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+  const guard = "0x000000000000000000000000000000000000dEaD";
+  const refused = `the EVM node serves chain 1, the guard signs for ${CHAIN_ID}: no check`;
+  try {
+    await expect(checkToken(url, token, guard, () => ({}) as never, {} as never)).rejects.toThrow(refused);
+    await expect(checkExit(url, token, guard, 1n, async () => [])).rejects.toThrow(refused);
+    expect(calls).toEqual(["eth_chainId", "eth_chainId"]);
+  } finally {
+    server.stop(true);
+  }
 });
