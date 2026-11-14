@@ -35,6 +35,8 @@ version; each page below covers one part. Read them in this order if you are new
   deployed code.
 - [Mainnet](mainnet.md): read this if you deploy the guard on NEAR mainnet as an inert, readable guard:
   dry run, deploy, verify, undo.
+- [Base Sepolia](base-sepolia.md): read this if you want to see swaps the guard had NEAR sign mined on a
+  public chain, and a guard whose account holds no key: accounts, transactions, how to replay them.
 - [Site](https://cmoron.github.io/near-preflight/): the landing page ([`index.html`](index.html),
   [`landing.js`](landing.js)) and the [journal](https://cmoron.github.io/near-preflight/journal.html) of the
   demo guard's checks ([`journal.html`](journal.html), [`app.js`](app.js)), in this folder.

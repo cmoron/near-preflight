@@ -1,0 +1,35 @@
+{
+  "chain_id": 84532,
+  "deployer": "0xb4dF3199B9b39Aa9Be1A26cAbacbE24d03FdEfD3",
+  "router": "0x1689E7B1F10000AE47eBfE339a4f69dECd19F602",
+  "factory": "0x7Ae58f10f7849cA6F5fB71b7f45CB416c9204b1e",
+  "honest": {
+    "token": "0x79FD62c0B69372EC28932101D6f2C5fDbd9f316b",
+    "pair": "0xEDF370D1Df4F201410450AA5dcCC51a66B44cAB0",
+    "txs": [
+      "0x62c208a491941c60fc2e3fb44ff42f1a975ce73db9af31a604629998812e5ab0",
+      "0x5d7332ae06978dc338c26ef18cbcb29e85fabfef1604a3535e08d70db11835c7",
+      "0x99a259beb4e8c8e6e7fe5d4ad05e871623bcf16f2dbfb3fbc8376dd41418bb7d",
+      "0x4952a84bd36fdff3c3874b02fe4ab3a987a0396d47695cae9d0a51cb72853780",
+      "0x59b7db05642948d7ad943ea00b6e142ddb0487345a2acfdb2add7802ae212a78"
+    ]
+  },
+  "guard": {
+    "address": "0x4F87638FB3F58aE20630369eb2e02D6F0C68Ba5E",
+    "funded_by": [
+      "0x1f53f42db8920f1ea0087260e6415bb9df6dce5bb028a347fb9958466b908f5b",
+      "0x8f15f94ffcf03873580dfaee3ad72284c862fa087cdaebe6fcc9790993a7e9b4"
+    ]
+  },
+  "sell_blocked": {
+    "token": "0xd81b8Fb5fF766F4b88241984662b5dB1e718141b",
+    "pair": "0x096eD77da2fc377f7D47255d98dE40CD7A1fCc50",
+    "txs": [
+      "0xacb1ffe13111f1452e639d14a2b1e12e402301060990759eb33a42a742e0fe20",
+      "0xa74cdffdae8245bb531143be0d6e1a038349690c1b7111dcae94981ed6d18c32",
+      "0x280968435b72c4d5b9be8dd5fe17217acbc369500b40215da83306dff85331d5",
+      "0x1543819ad0deaa8d6fefe5d6821a8dfa46959848bb3a1832afe9ed3e4f9036a4",
+      "0x99f0abd973c15257d6f433e994e8231c1e8b34cee06e8210e7b0ce393ea53876"
+    ]
+  }
+}
