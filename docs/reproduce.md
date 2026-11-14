@@ -31,7 +31,7 @@ git clone https://github.com/cmoron/near-preflight && cd near-preflight && bun i
 export GUARD=guard.goblin-guard-17826.testnet
 INDEX_RPC=https://base-rpc.publicnode.com bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
 #   43 OK lines, then: REPLAY OK: verdict allow confirmed, same as on chain
-bun app/attest.ts app/fixtures/decision.json --check 10
+NEAR_RPC=https://archival-rpc.testnet.fastnear.com bun app/attest.ts app/fixtures/decision.json --check 10
 #   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)
 ```
 

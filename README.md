@@ -175,8 +175,8 @@ INDEX_RPC=https://base-rpc.publicnode.com bun app/replay.ts app/fixtures/usdc-ba
 GUARD=guard.preflight-sepolia-96623.testnet EVM_CHAIN_ID=84532 INDEX_RPC=https://base-sepolia-rpc.publicnode.com bun app/replay.ts app/fixtures/base-sepolia-buy.json https://sepolia.base.org --check
 #   REPLAY OK: verdict allow confirmed, same as on chain
 
-# The model's decision behind check #10: signature, Intel and NVIDIA attestation, the guard's record
-bun app/attest.ts app/fixtures/decision.json --check 10
+# The model's decision behind check #10: signature, Intel and NVIDIA attestation, the guard's record (archival node: ordinary nodes no longer keep the NEAR block the model cited)
+NEAR_RPC=https://archival-rpc.testnet.fastnear.com bun app/attest.ts app/fixtures/decision.json --check 10
 #   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)
 
 # Every trap of the table below, as CI runs it

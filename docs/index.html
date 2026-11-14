@@ -512,8 +512,8 @@ export GUARD=<span id="cmd-guard">guard.goblin-guard-17826.testnet</span>   <spa
 INDEX_RPC=https://base-rpc.publicnode.com bun app/replay.ts app/fixtures/usdc-base-mainnet.json https://mainnet.base.org --check
 <span class="c">#   REPLAY OK: verdict allow confirmed, same as on chain</span>
 
-<span class="c"># The model's decision behind check #10: signature, Intel and NVIDIA attestation, the guard's record</span>
-bun app/attest.ts app/fixtures/decision.json --check 10
+<span class="c"># The model's decision behind check #10: signature, Intel and NVIDIA attestation, the guard's record (archival node: ordinary nodes no longer keep the NEAR block the model cited)</span>
+NEAR_RPC=https://archival-rpc.testnet.fastnear.com bun app/attest.ts app/fixtures/decision.json --check 10
 <span class="c">#   ATTEST OK: 15 checks hold (1 not verified, see SKIPPED)</span></code></pre>
           <p class="copy">
             <button type="button" class="btn small" id="copy">
